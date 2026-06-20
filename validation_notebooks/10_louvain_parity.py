@@ -80,7 +80,10 @@ def main() -> None:
         "ari_vs_oracle": round(ari, 4),
     }]
 
-    # --- scaling probe: GPU Louvain vs igraph on larger synthetic (SBM) graphs ---
+    # --- scaling/quality probe on SBM graphs. Quality matches igraph here; small n
+    # is overhead-bound on the GPU. KNOWN OPEN BUG: on larger graphs (~>=100-200k,
+    # structure-dependent) colored local-moving stalls near pairs (Q collapses) —
+    # under investigation; not yet fast+correct at atlas scale. ---
     for n in (10_000, 50_000):
         A = _sbm_graph(n)
         gg = Graph.from_scipy(A)
