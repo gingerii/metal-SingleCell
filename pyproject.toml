@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metasinglecell"
+version = "0.0.1"
+description = "GPU-accelerated single-cell analysis on Apple Silicon (Metal/MLX) — a drop-in for rapids-singlecell."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "gingerii" }]
+license = { text = "BSD-3-Clause" }
+dependencies = [
+    "numpy",
+    "scipy",
+    "anndata",
+]
+
+# Heavy / platform-specific deps (scanpy for the CPU oracle, mlx for the Metal
+# backend) are managed in envs/metasinglecell.yml, not pinned here, so the
+# package stays importable in any environment. Library code lazy-imports them.
+[project.optional-dependencies]
+oracle = ["scanpy", "leidenalg", "igraph", "umap-learn", "scikit-learn"]
+metal = ["mlx"]
+dev = ["pytest", "jupyter", "matplotlib"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+metasinglecell = ["**/*.metal"]

@@ -1,0 +1,26 @@
+# Data — regenerable / large, never committed
+data/
+
+# Results — local only; force-add a specific file to publish it
+results/*
+!results/.gitkeep
+!results/**/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.ipynb_checkpoints/
+
+# Env / OS
+.DS_Store
+.venv/
+env/
+.env
+
+# Metal build artifacts
+*.metallib
+*.air
