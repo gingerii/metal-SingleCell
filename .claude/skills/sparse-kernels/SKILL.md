@@ -66,11 +66,35 @@ description: Stage-1 Metal sparse substrate — MLX custom-kernel API, CSR layou
 - scanpy `clip_array`: upper clip always, lower clip only if zero_center (confirmed from source).
 - Parity vs fp64 oracle (`results/scale/`): max_abs_err 2.2e-6, rmse 5.4e-8, r=1.0.
 
-## Front-end status: QC → normalize → log1p → HVG → scale ALL VALIDATED.
+## Front-end status: QC → normalize → log1p → HVG → scale → PCA ALL VALIDATED.
 
-## Next primitives (priority order, all validatable vs oracle)
-1. PCA → `06_X_pca` / `06_pca_components` / `06_pca_variance_ratio`. Mean-center the scaled HVG
-   matrix, then truncated SVD. **SVD core stays on Accelerate/LAPACK in fp64** (numerical anchor);
-   GPU handles the matmuls/projection. Watch sign convention (scanpy uses sklearn svd_flip) and
-   that PCA on already-scaled data centers again (mean≈0).
-2. neighbors (KNN on the 50-dim embedding) → `07_*`; then leiden/umap (dense, post-PCA).
+## PCA — `decomposition.pca(X, n_comps, solver=, random_state=)` — 3 solvers, VALIDATED
+- Mean-center on GPU (MLX fp32); returns `(X_pca [cells×k] f32, components [k×genes] f32,
+  variance_ratio f64)`. Signs fixed by sklearn `svd_flip` (u_based). variance_ratio uses
+  `Xc.var(ddof=1).sum()` as total variance (matches sklearn for all solvers). NB oracle
+  `06_pca_components` is genes×k → compare `components.T`.
+- `solver="full"`: `np.linalg.svd` (LAPACK gesdd, fp64). `solver="arpack"`: `scipy.svds` Lanczos
+  (fp64, what the oracle used) — reorder ascending→descending. Both match oracle **exactly**
+  (min|r|=1.0, subspace=1.0, vr rel-err 5e-9).
+- `solver="randomized"`: range finder (QR-normalized power iters, `n_iter=7`, `n_oversamples=10`) —
+  **matmuls `Xc@Q`/`Xcᵀ@Q` on GPU (fp32)**, QR on CPU (MLX QR is CPU-only), then **fp64 SVD of the
+  small projected `B=Qᵀ@Xc` on LAPACK**. This is the architecture's showcase: heavy work on Metal,
+  stable core on Accelerate.
+- **MLX hard limits (confirmed):** fp64 arrays silently downcast to fp32; `mx.linalg.svd` is
+  **CPU-stream only** (GPU raises "not yet supported"); `qr`/`eigh` work but pass `stream=mx.cpu`.
+  ⇒ the fp64 numerical anchor must be NumPy/SciPy (Accelerate), never MLX.
+
+## FINDING: randomized SVD under-resolves trailing PCs on scaled single-cell data
+- Our randomized matches sklearn `randomized_svd` exactly (min|r|=1.0) — implementation is faithful.
+- But randomized (default oversampling/iters) reaches only **subspace overlap 0.76 vs the exact top-50**
+  on the scaled HVG matrix — its spectrum decays slowly (many comparable singular values), so trailing
+  PCs aren't resolved. Top PCs (drive neighbors/clustering) are fine; trailing ones rotate within
+  near-degenerate blocks. Validate randomized against sklearn-randomized, NOT against arpack/exact;
+  report subspace-vs-exact as a quality metric. To tighten: raise `n_oversamples`/`n_iter`.
+
+## Validation harness additions
+- `validation.compare_signed_columns(name, got, expected, min_abs_corr)` — per-column |Pearson r|,
+  sign-invariant (for PCA/embeddings). `validation.subspace_overlap(a, b)` — `||QaᵀQb||_F²/k` ∈ [0,1].
+
+## Next primitives
+1. neighbors (KNN on the 50-dim embedding) → `07_*`; then leiden/umap (dense, post-PCA).
