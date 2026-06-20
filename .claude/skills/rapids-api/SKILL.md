@@ -28,7 +28,7 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 | pca | ✅ (full/arpack/randomized) |
 | regress_out | ✅ preprocess.py (OLS residuals; corr 1.0 vs scanpy) |
 | normalize_pearson_residuals | ✅ preprocess.py (corr 1.0, max_diff 7e-7 vs scanpy) |
-| harmony_integrate | ⬜ Batch 4 (iterative; port harmony-pytorch logic) |
+| harmony_integrate | 🟡 integration.py `harmonize` (port of harmony-pytorch: cosine soft-kmeans + O/E diversity penalty + per-cluster ridge correction; matmuls on MLX, ridge solves numpy fp64). WORKS — synthetic 2-batch/2-bio: batch_sep 6.0→2.17, bio_sep 8.0→7.94 (biology preserved). ⚠ batch mixing only partial (0→0.08) — likely needs block-STOCHASTIC clustering updates (I used full-batch) and/or tuning; verify vs harmonypy at validation. |
 | scrublet / scrublet_simulate_doublets | ⬜ Batch 4 (sim doublets + kNN density) |
 | neighbors | ✅ |
 | bbknn | ⬜ Batch 4 (batch-balanced kNN) |
@@ -71,7 +71,9 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 neighbors, embedding, cluster, graph/, tools, spatial. Validation DEFERRED to project end (user's
 call) — but each function spot-checked vs scanpy/sklearn at build time (notes above). Parity gaps to
 revisit at validation: score_genes control sampling, rank_genes_groups ranking, (and any fp32 deltas).
-Next: Batch 3 (regress_out, normalize_pearson_residuals, diffmap, co_occurrence).
+Batch 3 DONE. Harmony (`integration.py`) done (works; mixing partial — see note). ~24/32 functions.
+Remaining: HVG flavors (cell_ranger/seurat_v3/pearson), bbknn, scrublet(+sim), tsne, draw_graph,
+ligrec, calculate_niche. Harmony follow-up: block-stochastic clustering + harmonypy parity check.
 
 ## Conventions
 - Compute on MLX where GPU helps; lazy-import mlx. Match scanpy/rsc signatures + defaults.
