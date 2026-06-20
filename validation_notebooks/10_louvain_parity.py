@@ -80,11 +80,10 @@ def main() -> None:
         "ari_vs_oracle": round(ari, 4),
     }]
 
-    # --- scaling/quality probe on SBM graphs. Quality matches igraph here; small n
-    # is overhead-bound on the GPU. KNOWN OPEN BUG: on larger graphs (~>=100-200k,
-    # structure-dependent) colored local-moving stalls near pairs (Q collapses) —
-    # under investigation; not yet fast+correct at atlas scale. ---
-    for n in (10_000, 50_000):
+    # --- scaling/quality probe on SBM graphs. Quality matches igraph at all sizes;
+    # small n is overhead-bound on the GPU, but the GPU pulls ahead at atlas scale
+    # (~1M: faster than igraph with equal/better modularity). ---
+    for n in (50_000, 200_000, 1_000_000):
         A = _sbm_graph(n)
         gg = Graph.from_scipy(A)
         t = time.perf_counter(); lab = louvain(gg, 1.0); mx.eval(mx.array(lab)); gpu_t = time.perf_counter() - t

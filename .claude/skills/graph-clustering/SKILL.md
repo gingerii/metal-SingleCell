@@ -72,26 +72,26 @@ sort, no shared memory — degree≤~50 for kNN graphs), picks best modularity-g
 self-loops; only the active color computes. `_local_moving` re-colors each pass (needed for fuzzy-
 graph quality), one GPU sync per pass (not per color). This replaced the per-color global sort.
 
-### Current state (driver 10): CORRECT on small/well-structured, OPEN BUG at scale
-- **Quality correct where structure is clear/small**: SBM n=10k Q=0.809==igraph (20 cl exactly);
-  n=50k 0.787 vs 0.807; PBMC 0.630 / 35 cl / ARI 0.53 vs igraph 0.656/~13.
-- **Speed**: small n is overhead-bound (GPU 0.05–0.4× igraph — per-pass coloring syncs + dispatch).
-- **OPEN BUG (the crux)**: on LARGE + WEAKLY-structured graphs (e.g. SBM 200k, 20 blocks → sparse
-  blocks) colored local-moving **stalls near pairs**, Q collapses to ~0.04. A one-off 200k/40-block
-  run worked (1.5× faster, Q 0.779>igraph) — so it's structure/scale-dependent, NOT a fixed-n bug.
-  Root cause (hypothesis): the colored greedy fails to *nucleate* large communities when within-
-  community connectivity is sparse — sequential igraph snowballs, parallel colored doesn't. Math is
-  scale-invariant (equilibrium penalty identical at 200k vs 500k), so it's a dynamics/nucleation
-  issue, not fp32 or the modularity formula. NOT yet root-caused.
+### NUCLEATION BUG — ROOT-CAUSED & FIXED (self-loop in coloring)
+The "stall near pairs at scale" was NOT a dynamics/nucleation problem — it was a one-line coloring
+bug. **Contracted graphs have a self-loop on every super-vertex.** In `color_graph`, the self-loop
+made a vertex its own uncolored neighbor, so `prio > max_nb` (its own prio) was always false → the
+vertex was NEVER selected → left `color=-1` → never active in `_local_moving` (`for c in
+range(n_colors)` never hits -1) → never moved → coarse levels couldn't merge. Original graphs have
+no self-loops, so level-0 worked; every contracted level silently froze.
+**Fix:** exclude self-loops in the coloring's neighbor-max: `both = unc[src] & unc[dst] & (src!=dst)`.
+(Diagnosis path: igraph merged our contracted graph 89236→20 but ours did 0 moves; a debug kernel
+showed gains were all ≈1 (correct); the real kernel moved 0 because `color[v]==-1` for ~all vertices,
+ncolors hit the 2000 cap.)
 
-### Next ideas to try for the nucleation/scale bug
-- Leiden-style refinement (Phase 3) — may help but won't fix nucleation alone.
-- Better move acceptance: allow moving toward the *max-edge-weight* neighbor's community first
-  (coalescence bias), or a few sequential "seed" sweeps before colored parallel sweeps.
-- Verify the multilevel actually contracts+continues at scale (suspect level loop stops after ~1
-  level when local-moving returns only pairs — check whether coarse levels re-merge).
+### Current state (driver 10): FAST + CORRECT at all scales ✓
+- **Quality matches/beats igraph everywhere**: PBMC Q=0.658 / 10 cl / ARI 0.64 (vs igraph Louvain
+  0.654, Leiden 0.671); SBM 50k 0.807==0.807; 200k 0.712 vs 0.714; **1M 0.693 vs 0.658 (higher)**.
+- **Speed**: small/mid n overhead-bound & ~par (0.9×); **GPU pulls ahead at atlas scale — 1M:
+  ~16s vs igraph ~44s = ~2.8× faster.** Crossover ~1M; the bigger the graph the bigger the win.
 
 ## Status
-Phase 1 substrate DONE. Phase 2: per-vertex kernel makes it fast & correct on small/well-structured
-graphs; a scale+weak-structure nucleation bug is the open crux before atlas-scale is trustworthy.
-Phases 3 (Leiden refinement) + 4 (1M benchmark) follow once nucleation is fixed.
+Phase 1 substrate DONE. **Phase 2 parallel Louvain DONE — fast + correct at atlas scale** (per-vertex
+move kernel, graph coloring, self-loop fixes in both gain and coloring). Next: Phase 3 Leiden
+refinement (close the small gap to igraph *Leiden* 0.671 and guarantee well-connected communities) +
+wire `cluster.leiden(backend="gpu")`; Phase 4 formal 1M+ benchmark.
