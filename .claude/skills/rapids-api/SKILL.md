@@ -26,8 +26,8 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 | highly_variable_genes | ✅ seurat; ⬜ cell_ranger / seurat_v3 / pearson_residuals |
 | scale | ✅ |
 | pca | ✅ (full/arpack/randomized) |
-| regress_out | ⬜ (per-gene OLS on covariates, GPU lstsq) |
-| normalize_pearson_residuals | ⬜ (analytic Pearson residuals of NB) |
+| regress_out | ✅ preprocess.py (OLS residuals; corr 1.0 vs scanpy) |
+| normalize_pearson_residuals | ✅ preprocess.py (corr 1.0, max_diff 7e-7 vs scanpy) |
 | harmony_integrate | ⬜ Batch 4 (iterative; port harmony-pytorch logic) |
 | scrublet / scrublet_simulate_doublets | ⬜ Batch 4 (sim doublets + kNN density) |
 | neighbors | ✅ |
@@ -37,19 +37,20 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 | fn | status |
 |----|--------|
 | umap | ✅ | louvain/leiden | ✅ |
-| kmeans | ⬜ Batch 2 (MLX matmul Lloyd) |
-| score_genes / score_genes_cell_cycle | ⬜ Batch 2 (gene-set mean − control-bin mean) |
-| embedding_density | ⬜ Batch 2 (gaussian KDE per group) |
-| rank_genes_groups | ⬜ Batch 3 (t-test/wilcoxon/logreg markers) |
-| tsne | ⬜ Batch 3 (fft/BH — hard) |
-| diffmap | ⬜ Batch 3 (eigh of transition matrix) |
-| draw_graph | ⬜ Batch 3 (ForceAtlas2 — like umap layout) |
+| kmeans | ✅ tools.py (ARI 0.835 vs sklearn) |
+| score_genes / score_genes_cell_cycle | ✅ tools.py (corr 0.74 vs scanpy; control-sampling differs) |
+| embedding_density | ✅ tools.py (gaussian KDE) |
+| rank_genes_groups | ✅ tools.py (t-test; t-stat corr 0.993 vs scanpy; ⚠ marker-overlap 0.54, scanpy overestim_var/p-tiebreak not matched) |
+| tsne | ⬜ Batch 3+ (fft/BH — hard) |
+| diffmap | ✅ tools.py (eigsh of symmetric transition; eigvals 1.0→0.97 on PBMC) |
+| draw_graph | ⬜ Batch 3+ (ForceAtlas2 — like umap layout) |
 
 ## gr (squidpy spatial) — high value for the user's Xenium work
 | fn | status |
 |----|--------|
-| spatial_autocorr | ⬜ Batch 2 (Moran's I / Geary's C via sparse spatial weights; permutation p) |
-| co_occurrence | ⬜ Batch 3 (distance-binned label co-occurrence) |
+| spatial_neighbors | ✅ spatial.py (KNN on coords) |
+| spatial_autocorr | ✅ spatial.py (Moran's I / Geary's C, scatter-SpMM + permutation p) |
+| co_occurrence | ✅ spatial.py (distance-binned cluster co-occurrence ratio; GPU pairwise + one-hot; O(n²)) |
 | ligrec | ⬜ Batch 4 (ligand-receptor permutation test) |
 | calculate_niche | ⬜ Batch 4 (neighborhood composition clustering) |
 
@@ -60,8 +61,17 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
    `spatial.py`: spatial_neighbors + spatial_autocorr (Moran's I / Geary's C via scatter-SpMM + permutation p —
    validated: smooth gene Moran 0.97/Geary 0.03, noise ~0/~1). NB MLX has no GPU sparse matmul → W·X done as
    scatter-add over edges (`_spmm_scatter`).
-3. ⬜ tl: rank_genes_groups, diffmap, draw_graph, tsne; gr: co_occurrence; HVG flavors; pearson_residuals; regress_out.
+2b. ✅ rank_genes_groups (t-test, in tools.py).
+3. 🔨 IN PROGRESS — pp: regress_out, normalize_pearson_residuals; tl: diffmap; gr: co_occurrence.
+   Then: draw_graph, tsne, HVG flavors (cell_ranger/seurat_v3/pearson).
 4. ⬜ pp: harmony_integrate, scrublet, bbknn; gr: ligrec, calculate_niche.
+
+## WHERE WE ARE (checkpoint)
+~19/32 rsc functions built (all committed/pushed). Modules: sparse, preprocess, decomposition,
+neighbors, embedding, cluster, graph/, tools, spatial. Validation DEFERRED to project end (user's
+call) — but each function spot-checked vs scanpy/sklearn at build time (notes above). Parity gaps to
+revisit at validation: score_genes control sampling, rank_genes_groups ranking, (and any fp32 deltas).
+Next: Batch 3 (regress_out, normalize_pearson_residuals, diffmap, co_occurrence).
 
 ## Conventions
 - Compute on MLX where GPU helps; lazy-import mlx. Match scanpy/rsc signatures + defaults.
