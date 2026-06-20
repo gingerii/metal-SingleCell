@@ -11,6 +11,97 @@ from __future__ import annotations
 
 import numpy as np
 
+from .sparse import CSR
+
+
+def calculate_qc_metrics(X) -> dict:
+    """Per-cell and per-gene QC metrics (scanpy ``pp.calculate_qc_metrics``).
+
+    ``X`` is a (cells x genes) scipy sparse / array of counts. Returns a dict with
+    per-cell ``total_counts``/``n_genes_by_counts`` and per-gene ``total_counts``/
+    ``n_cells_by_counts``/``mean_counts``/``pct_dropout_by_counts``. GPU reductions.
+    """
+    import scipy.sparse as sp
+
+    csr = CSR.from_scipy(sp.csr_matrix(X))
+    n_cells = csr.shape[0]
+    cell_total, cell_ngenes = csr.qc_metrics()
+    gene_total, gene_ncells = csr.gene_counts()
+    return {
+        "total_counts": cell_total,
+        "n_genes_by_counts": cell_ngenes.astype(np.int64),
+        "gene_total_counts": gene_total,
+        "n_cells_by_counts": gene_ncells.astype(np.int64),
+        "mean_counts": gene_total / n_cells,
+        "pct_dropout_by_counts": 100.0 * (1.0 - gene_ncells / n_cells),
+    }
+
+
+def filter_cells(X, min_counts=None, max_counts=None, min_genes=None,
+                 max_genes=None) -> np.ndarray:
+    """Boolean cell mask passing the given thresholds (scanpy ``pp.filter_cells``).
+
+    Exactly one of the count/gene bounds is typically used at a time, mirroring
+    scanpy; here any combination is ANDed.
+    """
+    import scipy.sparse as sp
+
+    total, ngenes = CSR.from_scipy(sp.csr_matrix(X)).qc_metrics()
+    keep = np.ones(X.shape[0], dtype=bool)
+    if min_counts is not None:
+        keep &= total >= min_counts
+    if max_counts is not None:
+        keep &= total <= max_counts
+    if min_genes is not None:
+        keep &= ngenes >= min_genes
+    if max_genes is not None:
+        keep &= ngenes <= max_genes
+    return keep
+
+
+def filter_genes(X, min_counts=None, max_counts=None, min_cells=None,
+                 max_cells=None) -> np.ndarray:
+    """Boolean gene mask passing the given thresholds (scanpy ``pp.filter_genes``)."""
+    import scipy.sparse as sp
+
+    total, ncells = CSR.from_scipy(sp.csr_matrix(X)).gene_counts()
+    keep = np.ones(X.shape[1], dtype=bool)
+    if min_counts is not None:
+        keep &= total >= min_counts
+    if max_counts is not None:
+        keep &= total <= max_counts
+    if min_cells is not None:
+        keep &= ncells >= min_cells
+    if max_cells is not None:
+        keep &= ncells <= max_cells
+    return keep
+
+
+def flag_gene_family(var_names, startswith=None, endswith=None,
+                     contains=None) -> np.ndarray:
+    """Boolean mask flagging a gene family by name (scanpy ``pp.flag_gene_family``).
+
+    e.g. mitochondrial genes via ``startswith="MT-"``. ``var_names`` is an array
+    of gene symbols.
+    """
+    names = np.asarray(var_names).astype(str)
+    if startswith is not None:
+        return np.char.startswith(names, startswith)
+    if endswith is not None:
+        return np.char.endswith(names, endswith)
+    if contains is not None:
+        return np.char.find(names, contains) >= 0
+    raise ValueError("provide one of startswith / endswith / contains")
+
+
+def filter_highly_variable(hvg_df):
+    """Indices of highly-variable genes (scanpy ``pp.filter_highly_variable``).
+
+    ``hvg_df`` is the DataFrame from :func:`highly_variable_genes`; returns the
+    boolean mask of its ``highly_variable`` column.
+    """
+    return hvg_df["highly_variable"].to_numpy().astype(bool)
+
 
 def scale(csr, max_value: float | None = 10.0, zero_center: bool = True) -> np.ndarray:
     """Z-score each gene then clip (scanpy ``sc.pp.scale``).
