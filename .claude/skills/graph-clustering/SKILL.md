@@ -118,10 +118,17 @@ loop). So coloring, not GPU math, was the bottleneck.
 - **DO NOT apply the recolor-every-K trick to `_refine`**: within-community refinement with a fixed
   coloring + shuffle fails to converge → hits max_passes every level → catastrophic (200k Leiden:
   11s → **1115s**). Refinement re-colors **every pass** (stable: 200k 10.4s, 1M ~24s).
-- **Known instability (O(d²) move kernel)**: the per-vertex kernel scans distinct neighbor-communities
-  in O(degree²). Fine for bounded-degree kNN graphs, but a single very-high-degree contracted
-  super-vertex serializes the whole launch. cuGraph solves this with degree-binning (separate kernels
-  for low/high degree) — the real next optimization for robustness + more speed.
+- **O(d²) move kernel — SOLVED via degree-binning (host tail).** The per-vertex kernel is O(degree²)
+  (dedup + per-community weight sum by rescan). Measured at 1M: a contracted level with a **degree-76578
+  super-vertex made one move pass take 140s** (sum(d²)=4.75e10). MLX can't do the cuGraph threadgroup-
+  hash fix (**no Metal float-atomics**, and ~32KB threadgroup memory can't hold a 76k-entry hash). So:
+  the GPU kernel **skips vertices with degree > `_DEGREE_CAP` (1024)** (a `cap` input), and those rare
+  high-degree vertices are moved **exactly on the host in NumPy, O(degree)** (`_high_degree_moves` /
+  `_high_degree_refine`, sequential with incremental Σtot; refinement version respects the P-restriction).
+  Result: degree-30000 hub 3.07s → **0.02s (150×)**; the 76k level would be ~instant. **Zero overhead
+  when no large vertices** (`large_ids` empty → host path skipped; PBMC/1M unaffected, quality identical:
+  PBMC Louvain 0.661, Leiden 0.666/ARI 0.825). Applied to BOTH the Louvain move kernel and the Leiden
+  refine kernel.
 
 ## Status
 Phases 1–3 DONE + Louvain perf-optimized. **GPU Louvain: fast+correct, ~5–13× over igraph at 1M**
