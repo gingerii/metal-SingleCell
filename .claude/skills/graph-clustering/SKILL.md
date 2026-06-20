@@ -43,8 +43,28 @@ Parallel ≠ sequential and stochastic → NOT bit-parity. Use: **modularity Q �
 (rigorous for an optimizer) + ARI vs oracle within the RNG floor (~0.65; scanpy's own seed span
 0.69–0.90). + cluster-count sanity. Reuse `validation.compare` / igraph for the reference Q.
 
-## Status / next
-- Phase 1 substrate: DONE. Next: `graph/louvain.py` (multilevel parallel local-moving + contract),
-  then `graph/leiden.py` (refinement), wire `cluster.leiden(backend="gpu")`, atlas benchmark to 1M.
-- Oscillation risk in synchronous local-moving: tie-break lowest community id / half-step; guard with
-  modularity-monotonicity.
+## Phase 2 Louvain — FUNCTIONAL + SPEED PROVEN, QUALITY GAP (WIP)
+`graph/louvain.py`: multilevel synchronous local-moving (segmented argmax via `.at[].maximum/minimum`
+with ±inf init; 2-cycle swap-breaker; modularity-monotonicity guard) + `_contract_dense`.
+- **Speed (driver 10, the headline win):** GPU Louvain vs igraph `community_multilevel` on synthetic
+  graphs — **8× @10k, 12× @50k, 64× @200k** (igraph 43s → GPU 0.67s). Confirms atlas hour→minutes.
+- **Quality gap (unsolved):** on the PBMC graph GPU Louvain gives Q=0.614 / ~70 communities vs igraph
+  Louvain 0.654 / Leiden 0.670 / ~13 communities, ARI 0.62. Fully-synchronous moving converges to a
+  worse fixed point (every vertex moves on STALE community state). Best-keeping + 200 passes doesn't
+  help — it's a true synchronous fixed point, not early stopping.
+- **Caveat:** the synthetic-graph generator in driver 10 is not genuinely clustered, so its *Q* values
+  are meaningless — only the *timings* there are valid. Fix the generator before trusting synthetic Q.
+
+## THE FIX (next): graph coloring for sequential-quality moves
+cuGraph/Grappolo process **independent sets** (vertices of one color, mutually non-adjacent) so each
+move sees up-to-date neighbor communities → near-sequential quality, still parallel within a color.
+- Luby coloring sketch (works): per round, random priority per vertex; a vertex joins the current
+  color if its priority exceeds all *uncolored* neighbors' (segment-max of `prio[dst]` over edges with
+  both endpoints uncolored, via `.at[src].maximum`). ~10-40 colors for these graphs.
+- A first colored-local-moving prototype REGRESSED (Q 0.543 / 203 comms) — has a bug (likely the
+  per-color apply/Σtot-update interaction). Debug before adopting. Then Leiden refinement (Phase 3)
+  on top to guarantee well-connected communities and close the rest of the gap.
+
+## Status
+Phase 1 substrate DONE. Phase 2 Louvain: speed proven, quality gap open (coloring fix pending).
+Phases 3 (Leiden refinement) + 4 (1M-vertex benchmark) after quality is right.
