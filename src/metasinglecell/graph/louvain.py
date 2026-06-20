@@ -84,6 +84,9 @@ def color_graph(graph: Graph, seed: int = 0, max_colors: int = 2000):
 
     n = graph.n
     src, dst = graph.edge_src, graph.indices
+    not_self = src != dst        # contracted graphs have a self-loop per super-vertex;
+                                 # without excluding it a vertex is its own neighbor and
+                                 # is never a local max -> never colored -> never moves.
     color = mx.full((n,), -1, dtype=mx.int32)
     key = mx.random.key(seed)
     r = 0
@@ -91,7 +94,7 @@ def color_graph(graph: Graph, seed: int = 0, max_colors: int = 2000):
         key, sub = mx.random.split(key)
         prio = mx.random.uniform(shape=(n,), key=sub)
         unc = color < 0
-        both = unc[src] & unc[dst]
+        both = unc[src] & unc[dst] & not_self
         contrib = mx.where(both, prio[dst], mx.full(dst.shape, -mx.inf))
         max_nb = mx.full((n,), -mx.inf).at[src].maximum(contrib)
         selected = unc & (prio > max_nb)
