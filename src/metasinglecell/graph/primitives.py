@@ -43,19 +43,29 @@ def segment_head(seg_id, n_seg, starts, arr_i32):
 
 
 def neighbor_community_weights(graph: Graph, comm):
-    """Per (vertex, adjacent-community) summed edge weight.
+    """Per (vertex, adjacent-community) summed edge weight, EXCLUDING self-loops.
 
     Returns ``(src, community, weight)`` MLX arrays: for each vertex, the total
-    edge weight to each community it touches. Core of Louvain local-moving.
+    edge weight to each community it touches via edges to *other* vertices. Core
+    of Louvain local-moving.
+
+    Self-loops (present on contracted graphs as a community's internal weight) are
+    excluded here: they belong to the vertex's degree, not to inter-vertex edge
+    weight. Counting them would inflate the "stay" score so no super-vertex ever
+    moves — i.e. coarse levels would never merge.
     """
     import mlx.core as mx
+
+    # Zero self-loop weights (MLX lacks boolean indexing) so they drop out of the
+    # per-community sums while keeping the edge arrays aligned.
+    e_w = mx.where(graph.edge_src == graph.indices, mx.zeros_like(graph.weights), graph.weights)
 
     C = int(comm.max().item()) + 1
     cdst = comm[graph.indices]                       # int32 community of each dst
     key = graph.edge_src.astype(mx.int64) * C + cdst.astype(mx.int64)
     order = mx.argsort(key)
     seg_id, S, starts = _segments(key[order])
-    w = segment_sum(seg_id, S, graph.weights[order])
+    w = segment_sum(seg_id, S, e_w[order])
     src = segment_head(seg_id, S, starts, graph.edge_src[order])
     com = segment_head(seg_id, S, starts, cdst[order])
     return src, com, w

@@ -43,28 +43,36 @@ Parallel ≠ sequential and stochastic → NOT bit-parity. Use: **modularity Q �
 (rigorous for an optimizer) + ARI vs oracle within the RNG floor (~0.65; scanpy's own seed span
 0.69–0.90). + cluster-count sanity. Reuse `validation.compare` / igraph for the reference Q.
 
-## Phase 2 Louvain — FUNCTIONAL + SPEED PROVEN, QUALITY GAP (WIP)
-`graph/louvain.py`: multilevel synchronous local-moving (segmented argmax via `.at[].maximum/minimum`
-with ±inf init; 2-cycle swap-breaker; modularity-monotonicity guard) + `_contract_dense`.
-- **Speed (driver 10, the headline win):** GPU Louvain vs igraph `community_multilevel` on synthetic
-  graphs — **8× @10k, 12× @50k, 64× @200k** (igraph 43s → GPU 0.67s). Confirms atlas hour→minutes.
-- **Quality gap (unsolved):** on the PBMC graph GPU Louvain gives Q=0.614 / ~70 communities vs igraph
-  Louvain 0.654 / Leiden 0.670 / ~13 communities, ARI 0.62. Fully-synchronous moving converges to a
-  worse fixed point (every vertex moves on STALE community state). Best-keeping + 200 passes doesn't
-  help — it's a true synchronous fixed point, not early stopping.
-- **Caveat:** the synthetic-graph generator in driver 10 is not genuinely clustered, so its *Q* values
-  are meaningless — only the *timings* there are valid. Fix the generator before trusting synthetic Q.
+## Phase 2 Louvain — QUALITY CORRECT (colored), SPEED REGRESSED (WIP)
+`graph/louvain.py` now uses **graph-coloring local-moving** (`color_graph` = Luby/JP greedy: a vertex
+takes the next color if its random priority beats all *uncolored* neighbors', via `.at[src].maximum`;
+then process color-by-color so each independent set moves seeing fresh neighbor communities).
 
-## THE FIX (next): graph coloring for sequential-quality moves
-cuGraph/Grappolo process **independent sets** (vertices of one color, mutually non-adjacent) so each
-move sees up-to-date neighbor communities → near-sequential quality, still parallel within a color.
-- Luby coloring sketch (works): per round, random priority per vertex; a vertex joins the current
-  color if its priority exceeds all *uncolored* neighbors' (segment-max of `prio[dst]` over edges with
-  both endpoints uncolored, via `.at[src].maximum`). ~10-40 colors for these graphs.
-- A first colored-local-moving prototype REGRESSED (Q 0.543 / 203 comms) — has a bug (likely the
-  per-color apply/Σtot-update interaction). Debug before adopting. Then Leiden refinement (Phase 3)
-  on top to guarantee well-connected communities and close the rest of the gap.
+### TWO BUGS FOUND & FIXED (both real)
+1. **Self-loop in move gain** (the big one): on *contracted* graphs each super-vertex has a self-loop
+   (= its internal weight). Counting it in `neighbor_community_weights` made the "stay" score equal
+   that large self-loop weight, so NO super-vertex ever moved → coarse levels never merged (188→188).
+   Fix: zero self-loop weights in `neighbor_community_weights` (they belong to *degree*, not to
+   inter-vertex edge weight). MLX has no boolean indexing → use `mx.where(edge_src==indices, 0, w)`.
+   Effect: PBMC Q 0.543 → 0.630.
+2. **Fully-synchronous fragmentation**: all-vertices-move-on-stale-state splits even a clique in two
+   (verified on a 2-clique toy: stuck at Q=0.117, oscillating). Coloring fixes it.
+
+### Current quality vs speed (driver 10)
+- **Quality is SOUND**: on a genuinely-clustered SBM graph the colored GPU Louvain **matches igraph
+  exactly** (n=10k: Q=0.809=0.809, both 20 clusters). On fuzzy PBMC: Q=0.630 / 35 comms / ARI 0.53 vs
+  igraph 0.66 / ~13 — close but coarse-merge stalls (residual gap; Leiden refinement should help).
+- **Speed REGRESSED**: colored recomputes the full edge-sort (`neighbor_community_weights`) **per
+  color per pass** → O(colors·passes·E·logE). ~14-100× SLOWER than igraph at 10-50k. The earlier
+  fast (64×) numbers were the *synchronous* version (poor quality). So: fast-but-wrong vs slow-but-right.
+
+### THE unifying fix (next, substantial): fused single-kernel local-moving
+cuGraph does local-moving in ONE custom kernel: each vertex accumulates its neighbor-community
+weights in thread-local/shared-memory hashing (no global re-sort), picks the best move — fast AND
+fresh-state. That's a custom `mx.fast.metal_kernel` with per-vertex hashing, the real engineering
+lift. Then Leiden refinement (Phase 3) for the fuzzy-graph coarse-merge gap.
 
 ## Status
-Phase 1 substrate DONE. Phase 2 Louvain: speed proven, quality gap open (coloring fix pending).
-Phases 3 (Leiden refinement) + 4 (1M-vertex benchmark) after quality is right.
+Phase 1 substrate DONE (validated, fast). Phase 2: clustering is now CORRECT (matches igraph on clear
+graphs) but the colored impl is slow; achieving fast+correct needs the fused kernel above. Decision
+point for the user: invest in the single-kernel local-moving (the cuGraph core) next.

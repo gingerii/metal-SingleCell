@@ -20,19 +20,22 @@ from metasinglecell.graph.louvain import louvain
 from metasinglecell.graph.primitives import modularity
 
 
-def _synthetic_knn_graph(n, k=15, n_clusters=20, seed=0):
-    """Synthetic clustered kNN-like graph for scaling tests."""
+def _sbm_graph(n, k=15, n_clusters=20, p_in=0.85, seed=0):
+    """Stochastic-block-model kNN-like graph (genuinely clustered)."""
     rng = np.random.default_rng(seed)
-    block = rng.integers(0, n_clusters, n)
+    order = np.argsort(rng.integers(0, n_clusters, n))  # group same-block nodes contiguously
+    block = np.repeat(np.arange(n_clusters), int(np.ceil(n / n_clusters)))[:n][order.argsort()]
     rows = np.repeat(np.arange(n), k)
-    # ~80% intra-cluster neighbors, 20% random
-    same = rng.random(n * k) < 0.8
-    cols = np.where(same,
-                    rng.integers(0, n, n * k),  # placeholder, fixed below
-                    rng.integers(0, n, n * k))
-    # for intra edges, pick a partner in the same block
-    for_intra = np.where(same)[0]
-    cols[for_intra] = rng.integers(0, n, for_intra.size)
+    cols = np.empty(n * k, dtype=np.int64)
+    # same-block partners: pick a random member of each node's block
+    members = {b: np.where(block == b)[0] for b in range(n_clusters)}
+    intra = rng.random(n * k) < p_in
+    rb = block[rows]
+    for b in range(n_clusters):
+        mask = intra & (rb == b)
+        if mask.any() and members[b].size:
+            cols[mask] = rng.choice(members[b], mask.sum())
+    cols[~intra] = rng.integers(0, n, (~intra).sum())
     A = sp.csr_matrix((np.ones(rows.size, np.float32), (rows, cols)), shape=(n, n))
     A = A + A.T
     A.setdiag(0); A.eliminate_zeros()
@@ -77,9 +80,9 @@ def main() -> None:
         "ari_vs_oracle": round(ari, 4),
     }]
 
-    # --- scaling probe: GPU Louvain vs igraph on larger synthetic graphs ---
-    for n in (10_000, 50_000, 200_000):
-        A = _synthetic_knn_graph(n)
+    # --- scaling probe: GPU Louvain vs igraph on larger synthetic (SBM) graphs ---
+    for n in (10_000, 50_000):
+        A = _sbm_graph(n)
         gg = Graph.from_scipy(A)
         t = time.perf_counter(); lab = louvain(gg, 1.0); mx.eval(mx.array(lab)); gpu_t = time.perf_counter() - t
         cooA = A.tocoo(); upA = cooA.row < cooA.col

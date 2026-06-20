@@ -1,17 +1,14 @@
 """Parallel multilevel Louvain on the Metal GPU (MLX).
 
-Each level runs synchronous (Jacobi) local-moving — every vertex picks, in
-parallel, the neighbor community giving the best modularity gain — then the graph
-is contracted and the level repeats until modularity stops improving.
+Local-moving is parallelized via **graph coloring**: vertices of one color form an
+independent set (no two adjacent), so they can move simultaneously while each sees
+up-to-date neighbor communities — recovering near-sequential quality without the
+fragmentation of fully-synchronous moves. Colors are processed in sequence; after
+a vertex moves, later colors see it. Levels contract and repeat until modularity
+stops improving.
 
-Two devices keep the synchronous scheme correct/convergent:
-* a vectorized 2-cycle **swap-breaker** (without it, a graph of singletons just
-  swaps labels forever instead of merging), and
-* a **modularity-monotonicity guard** (a pass that doesn't raise Q ends the level),
-  which also catches the rare longer oscillation.
-
-Validated by modularity (>= igraph) rather than label parity — parallel Louvain is
-a different, stochastic optimizer. See the `graph-clustering` skill.
+Validated by modularity (close to igraph) rather than label parity — parallel
+Louvain is a different, stochastic optimizer. See the `graph-clustering` skill.
 """
 
 from __future__ import annotations
@@ -25,55 +22,76 @@ from .primitives import (_segments, modularity, neighbor_community_weights,
 _INT32_MAX = 2_147_483_647
 
 
-def _local_moving(graph: Graph, resolution: float, twom: float,
-                  max_passes: int = 100, tol: float = 1e-9):
-    """Optimize communities on `graph` starting from singletons. Returns MLX comm."""
+def color_graph(graph: Graph, seed: int = 0, max_colors: int = 2000):
+    """Greedy Luby graph coloring on the GPU. Returns ``(color, n_colors)``.
+
+    Each round, vertices whose random priority exceeds all *uncolored* neighbors'
+    form an independent set and take the next color.
+    """
+    import mlx.core as mx
+
+    n = graph.n
+    src, dst = graph.edge_src, graph.indices
+    color = mx.full((n,), -1, dtype=mx.int32)
+    key = mx.random.key(seed)
+    r = 0
+    while bool(mx.any(color < 0).item()) and r < max_colors:
+        key, sub = mx.random.split(key)
+        prio = mx.random.uniform(shape=(n,), key=sub)
+        unc = color < 0
+        both = unc[src] & unc[dst]
+        contrib = mx.where(both, prio[dst], mx.full(dst.shape, -mx.inf))
+        max_nb = mx.full((n,), -mx.inf).at[src].maximum(contrib)
+        selected = unc & (prio > max_nb)
+        color = mx.where(selected, mx.array(r, dtype=mx.int32), color)
+        r += 1
+    return color, r
+
+
+def _local_moving(graph: Graph, resolution: float, twom: float, seed: int = 0,
+                  max_passes: int = 100):
+    """Colored local-moving from singletons. Returns MLX community labels."""
     import mlx.core as mx
 
     n = graph.n
     k = graph.degrees()
     comm = mx.arange(n, dtype=mx.int32)
-    q_prev = modularity(graph, comm, resolution)
-    idx = mx.arange(n, dtype=mx.int32)
 
-    for _ in range(max_passes):
-        sigtot = mx.zeros((n,), dtype=mx.float32).at[comm].add(k)
+    for p in range(max_passes):
+        color, n_colors = color_graph(graph, seed=seed + p)
+        color_np = np.asarray(color)
+        changed = False
 
-        # per (vertex, adjacent-community) modularity-gain score (vertex isolated first)
-        src, com, w = neighbor_community_weights(graph, comm)
-        curr = comm[src]
-        kv = k[src]
-        sig_adj = sigtot[com] - mx.where(com == curr, kv, mx.zeros_like(kv))
-        score = w - resolution * sig_adj * kv / twom
+        for c in range(n_colors):
+            sigtot = mx.zeros((n,), dtype=mx.float32).at[comm].add(k)
+            src, com, w = neighbor_community_weights(graph, comm)
+            curr = comm[src]
+            kv = k[src]
+            sig_adj = sigtot[com] - mx.where(com == curr, kv, mx.zeros_like(kv))
+            score = w - resolution * sig_adj * kv / twom
 
-        # segmented argmax over each vertex's candidate communities (ties -> lowest id)
-        seg_id, S, starts = _segments(src.astype(mx.int64))
-        seg_max = mx.full((S,), -mx.inf, dtype=mx.float32).at[seg_id].maximum(score)
-        is_best = score >= seg_max[seg_id] - 1e-12
-        cand = mx.where(is_best, com, mx.full(com.shape, _INT32_MAX, dtype=mx.int32))
-        best_com = mx.full((S,), _INT32_MAX, dtype=mx.int32).at[seg_id].minimum(cand)
-        seg_src = segment_head(seg_id, S, starts, src)
+            seg_id, S, starts = _segments(src.astype(mx.int64))
+            seg_max = mx.full((S,), -mx.inf, dtype=mx.float32).at[seg_id].maximum(score)
+            is_best = score >= seg_max[seg_id] - 1e-9
+            cand = mx.where(is_best, com, mx.full(com.shape, _INT32_MAX, dtype=mx.int32))
+            best_com = mx.full((S,), _INT32_MAX, dtype=mx.int32).at[seg_id].minimum(cand)
+            seg_src = segment_head(seg_id, S, starts, src)
+            stay = mx.zeros((S,), dtype=mx.float32).at[seg_id].add(
+                mx.where(com == curr, score, mx.zeros_like(score)))
+            moved = seg_max > stay + 1e-9
+            new_for_seg = mx.where(moved, best_com, comm[seg_src])
 
-        # stay vs move: staying score is the (vertex, own-community) pair, else 0
-        stay = mx.zeros((S,), dtype=mx.float32).at[seg_id].add(
-            mx.where(com == curr, score, mx.zeros_like(score)))
-        moved = seg_max > stay + tol
-        new_for_seg = mx.where(moved, best_com, comm[seg_src])
+            target = (comm + 0).at[seg_src].add(new_for_seg - comm[seg_src])
+            # apply only this color's vertices (independent set -> no interference)
+            apply = mx.array(color_np == c)
+            new_comm = mx.where(apply, target, comm)
+            mx.eval(new_comm)
+            if not bool(mx.all(new_comm == comm).item()):
+                changed = True
+            comm = new_comm
 
-        target = (comm + 0).at[seg_src].add(new_for_seg - comm[seg_src])
-
-        # break 2-cycles (mutual targeting): cancel the higher-id vertex's move
-        tt = target[target]
-        is_swap = (tt == idx) & (target != idx)
-        target = mx.where(is_swap & (idx > target), idx, target)
-        mx.eval(target)
-
-        if mx.all(target == comm).item():
+        if not changed:
             break
-        q_new = modularity(graph, target, resolution)
-        if q_new <= q_prev + tol:   # monotonicity guard: no gain -> stop
-            break
-        comm, q_prev = target, q_new
 
     return comm
 
@@ -85,13 +103,12 @@ def louvain(graph: Graph, resolution: float = 1.0, random_state: int = 0,
 
     twom = graph.total_weight()
     g = graph
-    orig2super = np.arange(graph.n, dtype=np.int64)  # original vertex -> current super-node
+    orig2super = np.arange(graph.n, dtype=np.int64)
     q_prev = -1.0
 
-    for _ in range(max_levels):
-        comm = _local_moving(g, resolution, twom)
-        comm_np = np.asarray(comm)
-        _, comm_dense = np.unique(comm_np, return_inverse=True)  # 0..C-1
+    for level in range(max_levels):
+        comm = _local_moving(g, resolution, twom, seed=random_state + 100 * level)
+        _, comm_dense = np.unique(np.asarray(comm), return_inverse=True)
         comm_dense = comm_dense.astype(np.int64)
         C = int(comm_dense.max()) + 1
 
@@ -108,7 +125,7 @@ def louvain(graph: Graph, resolution: float = 1.0, random_state: int = 0,
 
 
 def _contract_dense(graph: Graph, comm_dense: np.ndarray, C: int) -> Graph:
-    """Contract using already-dense (0..C-1) labels."""
+    """Contract with already-dense (0..C-1) labels."""
     import mlx.core as mx
 
     comm = mx.array(comm_dense.astype(np.int32))
