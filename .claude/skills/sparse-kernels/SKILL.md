@@ -96,5 +96,27 @@ description: Stage-1 Metal sparse substrate — MLX custom-kernel API, CSR layou
 - `validation.compare_signed_columns(name, got, expected, min_abs_corr)` — per-column |Pearson r|,
   sign-invariant (for PCA/embeddings). `validation.subspace_overlap(a, b)` — `||QaᵀQb||_F²/k` ∈ [0,1].
 
-## Next primitives
-1. neighbors (KNN on the 50-dim embedding) → `07_*`; then leiden/umap (dense, post-PCA).
+## neighbors — `neighbors.neighbors(X_pca, n_neighbors)` — VALIDATED (exact)
+- GPU brute-force exact k-NN: squared-Euclidean via one matmul `|xi|²+|xj|²-2XXᵀ`, `mx.argpartition`
+  for top-k, sort the k by distance on host. Connectivities via UMAP `fuzzy_simplicial_set` (same
+  call scanpy uses). Returns scipy CSR distances (k-1/row) + symmetric connectivities.
+- Parity (`results/neighbors/`): **k-NN overlap 1.0000**, connectivity edge-support 1.0 vs oracle.
+- Caveat: brute-force is O(n²) memory/time → fine to ~tens of thousands; large cohorts need
+  approximate NN (pynndescent). Confirmed by benchmark (loses at n=30k).
+
+## BENCHMARK (M3, synthetic ~7% sparse, results/benchmark/) — genuine but uneven wins
+- Methodology caveat: GPU = best-of-3 after warm-up (MLX compiles kernel on 1st launch); CPU =
+  single run. Favors GPU slightly; only matters for the marginal (~1.x) cases. gene_moments CPU
+  baseline used the DENSE `_get_mean_var` (scanpy's sparse path would be faster → that speedup is
+  optimistic).
+- **normalize+log1p: 3–12× faster** (best win; grows with n). **gene_moments(HVG): 2.3–3.7×.**
+  **pca_randomized: 1.2–1.6×** (QR-on-CPU + host roundtrips + small core SVD eat the matmul gain).
+  **knn_bruteforce: 2× @2.7k → 1.4× @10k → 0.49× @30k** (O(n²) loses at scale).
+- Takeaway: the sparse elementwise/reduction kernels are the real, scalable win; PCA-randomized is
+  marginal (optimization target: keep QR on GPU / avoid roundtrips); brute-force KNN needs an
+  approximate replacement to scale. Absolute times are ms-scale here — wins compound at real cohort
+  size but each op is already cheap until ~100k+ cells.
+
+## Next
+- leiden/umap (dense, post-PCA) for an end-to-end pipeline demo. Optimize pca_randomized (GPU QR).
+- Bigger benchmark (fairer CPU best-of-n; scanpy sparse baseline; end-to-end pipeline walltime).
