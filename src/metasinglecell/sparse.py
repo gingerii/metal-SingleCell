@@ -217,6 +217,22 @@ class CSR:
         mx.eval(out)
         return self._with_data(out)
 
+    def gene_counts(self) -> tuple[np.ndarray, np.ndarray]:
+        """Per-gene total counts and number of cells expressing it (nonzero).
+
+        Returns ``(total_counts, n_cells_by_counts)`` (length n_genes) via GPU
+        scatter-add over the gene (column) index — no custom kernel needed.
+        """
+        import mlx.core as mx
+
+        col = self.indices                                  # gene index per nonzero
+        ng = self.shape[1]
+        total = mx.zeros((ng,), dtype=mx.float32).at[col].add(self.data)
+        nnz = mx.zeros((ng,), dtype=mx.float32).at[col].add(
+            (self.data > 0).astype(mx.float32))
+        mx.eval(total, nnz)
+        return np.asarray(total), np.asarray(nnz)
+
     def gene_moments(self) -> tuple[np.ndarray, np.ndarray]:
         """Per-gene mean and (ddof=1) variance of ``expm1(data)`` over all cells.
 
