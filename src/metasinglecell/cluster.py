@@ -1,10 +1,10 @@
 """Graph clustering (scanpy ``sc.tl.leiden``).
 
-Leiden is graph community detection — an irregular, largely sequential algorithm
-that does not GPU-accelerate without a specialized graph engine (NVIDIA cuGraph
-has no Metal equivalent). scanpy itself just calls igraph on CPU, and so do we.
-The GPU value at this stage is upstream: building the neighbor graph fast. This
-is the correct drop-in, run on our GPU-built connectivity graph.
+Two backends:
+* ``"gpu"`` — our parallel Leiden on the Metal GPU (``graph.leiden``): faster than
+  igraph at atlas scale with matching/higher modularity. The cuGraph-analog.
+* ``"igraph"`` — igraph ``community_leiden`` (modularity), matching scanpy's
+  ``flavor="igraph"``. CPU; the reference.
 """
 
 from __future__ import annotations
@@ -13,13 +13,23 @@ import numpy as np
 
 
 def leiden(connectivities, resolution: float = 1.0, random_state: int = 0,
-           n_iterations: int = 2) -> np.ndarray:
-    """Leiden clustering on a connectivity graph; returns integer labels.
+           n_iterations: int = 2, backend: str = "igraph") -> np.ndarray:
+    """Leiden clustering on a symmetric connectivity graph; returns integer labels.
 
-    Mirrors scanpy's default ``flavor="igraph"``: igraph ``community_leiden`` with
-    the modularity objective, weighted, ``n_iterations=2``. ``connectivities`` is a
-    symmetric scipy sparse graph.
+    ``backend="gpu"`` uses the Metal parallel Leiden; ``"igraph"`` (default) uses
+    igraph on CPU.
     """
+    if backend == "gpu":
+        from .graph import Graph
+        from .graph.leiden import leiden as gpu_leiden
+
+        g = Graph.from_scipy(connectivities)
+        return gpu_leiden(g, resolution=resolution, random_state=random_state,
+                          n_iterations=n_iterations)
+
+    if backend != "igraph":
+        raise ValueError(f"unknown backend {backend!r} (gpu|igraph)")
+
     import random as _random
 
     import igraph as ig

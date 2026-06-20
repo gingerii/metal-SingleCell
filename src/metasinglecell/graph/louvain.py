@@ -104,16 +104,17 @@ def color_graph(graph: Graph, seed: int = 0, max_colors: int = 2000):
 
 
 def _local_moving(graph: Graph, resolution: float, twom: float, seed: int = 0,
-                  max_passes: int = 100):
-    """Colored local-moving from singletons (per-vertex kernel, no sort).
+                  max_passes: int = 100, init_comm=None):
+    """Colored local-moving (per-vertex kernel, no sort).
 
-    Returns MLX community labels.
+    Starts from singletons unless ``init_comm`` is given (Leiden's aggregate levels
+    start from the lifted Louvain partition). Returns MLX community labels.
     """
     import mlx.core as mx
 
     n = graph.n
     k = graph.degrees()
-    comm = mx.arange(n, dtype=mx.int32)
+    comm = mx.arange(n, dtype=mx.int32) if init_comm is None else init_comm.astype(mx.int32)
     kernel = _move_kernel()
     res_a = mx.array([resolution], dtype=mx.float32)
     twom_a = mx.array([twom], dtype=mx.float32)

@@ -90,8 +90,23 @@ ncolors hit the 2000 cap.)
 - **Speed**: small/mid n overhead-bound & ~par (0.9×); **GPU pulls ahead at atlas scale — 1M:
   ~16s vs igraph ~44s = ~2.8× faster.** Crossover ~1M; the bigger the graph the bigger the win.
 
+## Phase 3 Leiden refinement — DONE (quality win; speed not yet)
+`graph/leiden.py`: Louvain local-moving + **refinement** (`_REFINE_KERNEL_SOURCE`: Louvain move kernel
++ a `part` input, only considers neighbors in the SAME Louvain community — keeps refined communities
+pure ⊆ one Louvain community and well-connected, gains use full degrees) → aggregate on the REFINED
+partition, **next level's local-moving initialized from the Louvain partition** (`_local_moving` gained
+an `init_comm` arg). `n_iterations` repeats the whole multilevel pass. Wired: `cluster.leiden(
+connectivities, backend="gpu"|"igraph")` (default igraph).
+- **Quality (driver 11): GPU Leiden BEATS igraph Leiden** — PBMC Q=0.664 / 8 cl / ARI 0.706 vs igraph
+  Leiden 0.660; SBM 200k 0.8075==0.8075, 1M 0.786 vs 0.805 (slightly under at 1M).
+- **Speed: NOT a win at scale** — refinement ≈ a second colored local-moving per level, and
+  `n_iterations=2` doubles again → ~4× Louvain's work. 200k 0.23×, 1M 0.57× vs igraph Leiden (which
+  is itself faster than igraph Louvain). So: **GPU Louvain = the speed win (2.8× @1M); GPU Leiden =
+  the quality win** (better modularity + well-connected guarantee) at a speed cost.
+
 ## Status
-Phase 1 substrate DONE. **Phase 2 parallel Louvain DONE — fast + correct at atlas scale** (per-vertex
-move kernel, graph coloring, self-loop fixes in both gain and coloring). Next: Phase 3 Leiden
-refinement (close the small gap to igraph *Leiden* 0.671 and guarantee well-connected communities) +
-wire `cluster.leiden(backend="gpu")`; Phase 4 formal 1M+ benchmark.
+Phases 1–3 DONE. Louvain: fast+correct at atlas scale. Leiden: best quality, wired as a drop-in,
+but slower than igraph Leiden at scale (refinement cost). **Next (optimization, not correctness):**
+speed up Leiden — refinement is the bottleneck; ideas: skip the 2nd iteration when it adds little,
+fuse refine into the move kernel, or only refine the final levels. Phase 4: formal 1M+ benchmark
+table + figures.
