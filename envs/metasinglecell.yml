@@ -1,0 +1,31 @@
+# Dedicated environment for the metaSingleCell project.
+# Create:  conda env create -f envs/metasinglecell.yml
+# Then:    conda activate metasinglecell && pip install -e .
+#
+# Apple Silicon (M-series). mlx is the Metal GPU backend; scanpy is the CPU
+# fp64 reference oracle used for numerical-parity validation. Keep this env
+# separate from other projects' envs.
+name: metasinglecell
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - scipy
+  - pandas
+  - anndata
+  - h5py
+  - scikit-learn
+  # CPU reference oracle (scanpy + its clustering/embedding deps)
+  - scanpy
+  - leidenalg
+  - python-igraph
+  - umap-learn
+  - matplotlib
+  - jupyter
+  - ipykernel
+  - pip:
+      # Apple Metal array framework (the GPU backend we build on)
+      - mlx
+# After creating the env, install the project itself:  pip install -e .
