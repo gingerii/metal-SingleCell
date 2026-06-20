@@ -97,6 +97,41 @@ def _log1p_kernel():
     )
 
 
+# Per-gene (per-column) mean and variance of expm1(data) — the reduction scanpy's
+# highly_variable_genes (seurat flavor) needs. Computed from a CSC layout so each
+# thread owns one gene's contiguous column slice (no atomics). Two-pass (mean,
+# then squared deviations) for fp32 stability; implicit zeros are folded in via
+# (n_cells - nnz_col) * mean^2. ddof=1 to match scanpy's R (unbiased) convention.
+# MSL has no expm1, so expm1(x) is computed as exp(x)-1 (lognorm values are not
+# near zero here, so cancellation is not a concern).
+_GENE_MOMENTS_KERNEL_SOURCE = """
+    uint g = thread_position_in_grid.x;
+    uint start = colptr[g];
+    uint end = colptr[g + 1];
+    uint n = ncells[0];
+    float s = 0.0f;
+    for (uint j = start; j < end; ++j) { s += exp(data[j]) - 1.0f; }
+    float mean = s / (float)n;
+    float ss = 0.0f;
+    for (uint j = start; j < end; ++j) { float d = (exp(data[j]) - 1.0f) - mean; ss += d * d; }
+    uint nnz_col = end - start;
+    ss += (float)(n - nnz_col) * mean * mean;
+    gene_mean[g] = mean;
+    gene_var[g] = (n > 1u) ? (ss / (float)(n - 1u)) : 0.0f;
+"""
+
+
+def _gene_moments_kernel():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="csc_gene_moments",
+        input_names=["data", "colptr", "ncells"],
+        output_names=["gene_mean", "gene_var"],
+        source=_GENE_MOMENTS_KERNEL_SOURCE,
+    )
+
+
 @dataclass
 class CSR:
     """Compressed-sparse-row matrix backed by MLX arrays (on the Metal device).
@@ -181,6 +216,35 @@ class CSR:
         )
         mx.eval(out)
         return self._with_data(out)
+
+    def gene_moments(self) -> tuple[np.ndarray, np.ndarray]:
+        """Per-gene mean and (ddof=1) variance of ``expm1(data)`` over all cells.
+
+        This is the heavy reduction behind ``highly_variable_genes`` (seurat
+        flavor): scanpy undoes the log (``expm1``) then takes per-gene mean/var
+        including implicit zeros. Runs on the GPU via a CSC column reduction.
+        Returns ``(gene_mean, gene_var)`` as numpy arrays of length n_genes.
+        """
+        import mlx.core as mx
+        import scipy.sparse as sp
+
+        csr = sp.csr_matrix(
+            (np.asarray(self.data), np.asarray(self.indices), np.asarray(self.indptr)),
+            shape=self.shape,
+        )
+        csc = csr.tocsc()
+        data = mx.array(csc.data.astype(np.float32))
+        colptr = mx.array(csc.indptr.astype(np.uint32))
+        n_genes = self.shape[1]
+        gene_mean, gene_var = _gene_moments_kernel()(
+            inputs=[data, colptr, mx.array([self.shape[0]], dtype=mx.uint32)],
+            grid=(n_genes, 1, 1),
+            threadgroup=(min(256, n_genes), 1, 1),
+            output_shapes=[(n_genes,), (n_genes,)],
+            output_dtypes=[mx.float32, mx.float32],
+        )
+        mx.eval(gene_mean, gene_var)
+        return np.asarray(gene_mean), np.asarray(gene_var)
 
     def qc_metrics(self) -> tuple[np.ndarray, np.ndarray]:
         """Per-row (per-cell) total counts and number of nonzero genes.

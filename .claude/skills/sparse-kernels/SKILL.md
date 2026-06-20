@@ -34,6 +34,23 @@ description: Stage-1 Metal sparse substrate — MLX custom-kernel API, CSR layou
   validation. Parity vs fp64 oracle (`results/normalize_log1p/`): **pass at fp32**, not bit-exact —
   normalized max_rel_err 1.1e-7, lognorm 1.9e-7, r=1.0. Use rtol≈1e-4 for these (fp32-vs-fp64).
 
+## gene_moments + highly_variable_genes — VALIDATED (fp32, selection exact)
+- `CSR.gene_moments()` → per-gene mean & ddof=1 variance of `expm1(data)`. Builds CSC
+  (`csr.tocsc()`) so each thread owns one gene's column slice — **no atomics**. Two-pass
+  (mean, then squared deviations) for fp32 stability; implicit zeros folded in as
+  `(n_cells - nnz_col) * mean^2`.
+- **MSL gotcha: no `expm1`** (compile error "use of undeclared identifier"). Use `exp(x) - 1.0f`
+  (lognorm values aren't near 0, so no cancellation); likewise `log(1.0f + x)` for log1p.
+- Host seurat binning in `preprocess.highly_variable_genes` (float64): expm1→mean/var→
+  log-dispersion→`pd.cut` 20 equal-width mean bins→per-bin z-score (ddof=1 std; single-gene bins
+  set avg=0/dev=avg per scanpy `_postprocess_dispersions_seurat`)→top-n by dispersions_norm.
+- Parity vs fp64 oracle (`results/hvg/`): means max_abs_err 1.9e-6, dispersions_norm 6.1e-6,
+  **highly_variable flag EXACT, 2000/2000 gene-selection overlap**, r=1.0. rtol 1e-4 (means)/1e-3 (disp_norm).
+
+## Harness handles non-finite (`metasinglecell.validation`)
+- `compare()` masks positions non-finite in either array for error metrics, and only passes if the
+  non-finite *masks* match (`nonfinite_masks_match`); `exact_match` uses `equal_nan=True`.
+
 ## Validation pattern (`metasinglecell.validation`)
 - `load_snapshot(name)` reads `data/processed/reference/<name>.npy` (oracle ground truth).
 - `compare(name, got, expected, rtol, atol)` → record with max_abs/rel err, rmse, pearson_r,
@@ -43,5 +60,6 @@ description: Stage-1 Metal sparse substrate — MLX custom-kernel API, CSR layou
 
 ## Next sparse primitives (priority order, all validatable vs oracle)
 1. ~~`normalize_total` + `log1p`~~ — DONE (fp32-exact).
-2. Per-gene reductions (mean/variance) for HVG — needs column scatter/atomics (vs `04_*`).
-3. SpMM for PCA input; SVD core stays on Accelerate/LAPACK (fp64).
+2. ~~Per-gene mean/variance for HVG~~ — DONE (CSC column reduction; selection exact).
+3. `scale` (z-score, densifies HVG subset) → snapshot `05_scaled`.
+4. PCA: SpMM / covariance for the embedding; SVD core stays on Accelerate/LAPACK (fp64) → `06_*`.

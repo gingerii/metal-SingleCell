@@ -30,9 +30,10 @@ def compare(
 ) -> dict:
     """Compare two arrays and return a parity record.
 
-    ``rtol``/``atol`` default to fp32-appropriate tolerances. Correlation is
-    computed on the flattened finite values; for integer-valued outputs the
-    ``exact_match`` field is the relevant one.
+    ``rtol``/``atol`` default to fp32-appropriate tolerances. Non-finite entries
+    (NaN/inf — e.g. HVG dispersions for zero-variance genes) are handled
+    explicitly: error metrics are computed over positions finite in both arrays,
+    and the comparison only passes if the non-finite *masks* match.
     """
     got = np.asarray(got, dtype=np.float64).ravel()
     expected = np.asarray(expected, dtype=np.float64).ravel()
@@ -42,20 +43,26 @@ def compare(
             "got_shape": got.size, "expected_shape": expected.size,
         }
 
-    abs_err = np.abs(got - expected)
-    denom = np.maximum(np.abs(expected), 1e-12)
+    finite = np.isfinite(got) & np.isfinite(expected)
+    masks_match = bool(np.array_equal(np.isfinite(got), np.isfinite(expected)))
+    g, e = got[finite], expected[finite]
+
+    abs_err = np.abs(g - e)
+    denom = np.maximum(np.abs(e), 1e-12)
     rel_err = abs_err / denom
-    corr = float(np.corrcoef(got, expected)[0, 1]) if got.size > 1 else 1.0
-    passed = bool(np.allclose(got, expected, rtol=rtol, atol=atol))
+    corr = float(np.corrcoef(g, e)[0, 1]) if g.size > 1 else 1.0
+    passed = masks_match and bool(np.allclose(g, e, rtol=rtol, atol=atol))
 
     return {
         "check": name,
         "passed": passed,
-        "exact_match": bool(np.array_equal(got, expected)),
+        "exact_match": bool(np.array_equal(got, expected, equal_nan=True)),
+        "nonfinite_masks_match": masks_match,
         "n": int(got.size),
-        "max_abs_err": float(abs_err.max()),
-        "max_rel_err": float(rel_err.max()),
-        "rmse": float(np.sqrt(np.mean(abs_err ** 2))),
+        "n_compared": int(g.size),
+        "max_abs_err": float(abs_err.max()) if g.size else 0.0,
+        "max_rel_err": float(rel_err.max()) if g.size else 0.0,
+        "rmse": float(np.sqrt(np.mean(abs_err ** 2))) if g.size else 0.0,
         "pearson_r": corr,
         "rtol": rtol,
         "atol": atol,
