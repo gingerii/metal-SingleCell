@@ -103,6 +103,57 @@ def score_genes_cell_cycle(X, s_genes, g2m_genes, var_names, **kwargs) -> dict:
     return {"S_score": s, "G2M_score": g2m, "phase": phase}
 
 
+def rank_genes_groups(X, groups, var_names=None, method: str = "t-test",
+                      reference: str = "rest") -> dict:
+    """Rank marker genes per group (scanpy ``tl.rank_genes_groups``).
+
+    Welch's t-test of each group vs the rest, per gene. Group-wise per-gene
+    mean/variance are computed on the GPU by scatter-add over the group label.
+    Returns, per group, gene names/indices sorted by descending score, with
+    scores (t-statistic) and two-sided p-values. ``X`` is log-normalized.
+    """
+    import mlx.core as mx
+    from scipy import stats
+
+    if method != "t-test":
+        raise NotImplementedError("only method='t-test' implemented so far")
+
+    Xg = mx.array(np.asarray(X.todense() if hasattr(X, "todense") else X, dtype=np.float32))
+    n, n_genes = Xg.shape
+    groups = np.asarray(groups)
+    cats = np.unique(groups)
+    code = np.searchsorted(cats, groups).astype(np.int32)
+    G = len(cats)
+
+    gsum = mx.zeros((G, n_genes), dtype=mx.float32).at[mx.array(code)].add(Xg)
+    gsq = mx.zeros((G, n_genes), dtype=mx.float32).at[mx.array(code)].add(Xg * Xg)
+    ng = np.bincount(code, minlength=G).astype(np.float64)
+    tot_sum = np.asarray(mx.sum(Xg, axis=0)); tot_sq = np.asarray(mx.sum(Xg * Xg, axis=0))
+    gsum = np.asarray(gsum, dtype=np.float64); gsq = np.asarray(gsq, dtype=np.float64)
+    var_names = np.arange(n_genes) if var_names is None else np.asarray(var_names)
+
+    out = {}
+    for gi, cat in enumerate(cats):
+        n_g = ng[gi]; n_r = n - n_g
+        mean_g = gsum[gi] / n_g
+        var_g = (gsq[gi] / n_g - mean_g ** 2) * n_g / max(n_g - 1, 1)
+        mean_r = (tot_sum - gsum[gi]) / n_r
+        var_r = ((tot_sq - gsq[gi]) / n_r - mean_r ** 2) * n_r / max(n_r - 1, 1)
+        se = np.sqrt(var_g / n_g + var_r / n_r) + 1e-12
+        t = (mean_g - mean_r) / se
+        # Welch–Satterthwaite df
+        df = se ** 4 / ((var_g / n_g) ** 2 / max(n_g - 1, 1) + (var_r / n_r) ** 2 / max(n_r - 1, 1) + 1e-30)
+        pval = 2 * stats.t.sf(np.abs(t), df)
+        order = np.argsort(-t)
+        out[str(cat)] = {
+            "names": np.asarray(var_names)[order],
+            "scores": t[order],
+            "pvals": pval[order],
+            "logfoldchanges": (mean_g - mean_r)[order],
+        }
+    return out
+
+
 def embedding_density(embedding, groups=None) -> np.ndarray:
     """Per-cell gaussian-KDE density in an embedding (scanpy ``tl.embedding_density``).
 
