@@ -1,4 +1,4 @@
-"""Path configuration for metaSingleCell.
+"""Path configuration for metal-SingleCell.
 
 All filesystem paths resolve through here, honoring the ``DATA_ROOT`` environment
 variable so the same code runs on any machine. Never hardcode paths in the

@@ -3,7 +3,7 @@ name: sparse-kernels
 description: Stage-1 Metal sparse substrate — MLX custom-kernel API, CSR layout convention, QC-reduction kernel (validated exact), and the parity harness pattern. Load when writing/validating GPU sparse kernels.
 ---
 
-# Sparse kernels (Stage 1) — metaSingleCell
+# Sparse kernels (Stage 1) — metal-SingleCell
 
 ## MLX custom-kernel API (verified, mlx 0.31.2)
 - Default device is `Device(gpu, 0)`; `mx.fast.metal_kernel` works on this M3.

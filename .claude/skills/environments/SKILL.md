@@ -1,9 +1,9 @@
 ---
 name: environments
-description: Dedicated conda env for metaSingleCell (envs/metasinglecell.yml), install steps, the mlx/Metal backend, and the fp32-only-GPU fact. Load when setting up envs or running code.
+description: Dedicated conda env for metal-SingleCell (envs/metasinglecell.yml), install steps, the mlx/Metal backend, and the fp32-only-GPU fact. Load when setting up envs or running code.
 ---
 
-# Environments — metaSingleCell
+# Environments — metal-SingleCell
 
 ## Rule: dedicated envs only
 Never reuse another project's env (e.g. the Xenium `spatial`/`morphometrics` envs, which also have

@@ -1,4 +1,4 @@
-# Skills catalog — metaSingleCell
+# Skills catalog — metal-SingleCell
 
 Durable project knowledge lives as **skills** in `.claude/skills/<name>/SKILL.md`. Only each
 skill's one-line `description` stays in context; the body loads on demand (progressive disclosure).

@@ -1,4 +1,4 @@
-# metaSingleCell
+# metal-SingleCell
 
 **GPU-accelerated single-cell analysis on Apple Silicon.**
 
