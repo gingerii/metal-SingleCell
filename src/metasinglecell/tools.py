@@ -154,6 +154,28 @@ def rank_genes_groups(X, groups, var_names=None, method: str = "t-test",
     return out
 
 
+def diffmap(connectivities, n_comps: int = 15) -> dict:
+    """Diffusion map from a neighbor connectivity graph (scanpy ``tl.diffmap``).
+
+    Eigendecompose the symmetric normalized transition matrix
+    ``T = D^{-1/2} W D^{-1/2}`` (ARPACK, fp64 — sparse, no dense GPU eig), then map
+    back to the diffusion components ``D^{-1/2} · eigvecs``. Returns eigenvalues
+    (descending) and ``X_diffmap``.
+    """
+    import scipy.sparse as sp
+    from scipy.sparse.linalg import eigsh
+
+    W = sp.csr_matrix(connectivities).astype(np.float64)
+    d = np.asarray(W.sum(axis=1)).ravel()
+    dinv = sp.diags(1.0 / np.sqrt(d + 1e-12))
+    T = dinv @ W @ dinv
+    vals, vecs = eigsh(T, k=min(n_comps, W.shape[0] - 1), which="LM")
+    order = np.argsort(-vals)
+    vals, vecs = vals[order], vecs[:, order]
+    x_diffmap = np.asarray(dinv @ vecs)
+    return {"eigenvalues": vals, "X_diffmap": x_diffmap}
+
+
 def embedding_density(embedding, groups=None) -> np.ndarray:
     """Per-cell gaussian-KDE density in an embedding (scanpy ``tl.embedding_density``).
 

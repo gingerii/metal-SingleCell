@@ -30,6 +30,48 @@ def spatial_neighbors(coords, n_neighs: int = 6):
     return A.tocsr()
 
 
+def co_occurrence(coords, labels, n_intervals: int = 50, max_dist=None) -> dict:
+    """Distance-binned cluster co-occurrence ratio (squidpy ``gr.co_occurrence``).
+
+    For each distance interval, the conditional probability P(type j | type i at
+    distance) divided by the unconditional P(type j) — values > 1 mean enrichment.
+    Pairwise distances are computed on the GPU; counts per (i, j, bin) via one-hot
+    matmuls. O(n²) memory, so suited to moderate n (tile for very large sections).
+
+    Returns ``occ`` of shape (K, K, n_intervals) and the interval edges.
+    """
+    import mlx.core as mx
+
+    X = mx.array(np.asarray(coords, dtype=np.float32))
+    labels = np.asarray(labels)
+    cats = np.unique(labels)
+    code = np.searchsorted(cats, labels).astype(np.int32)
+    K = len(cats)
+    n = X.shape[0]
+
+    sq = mx.sum(X * X, axis=1)
+    D2 = mx.maximum(sq[:, None] + sq[None, :] - 2.0 * (X @ X.T), 0.0)
+    D = mx.sqrt(D2)
+    mx.eval(D)
+    Dnp = np.asarray(D)
+    if max_dist is None:
+        max_dist = float(np.percentile(Dnp[Dnp > 0], 95))
+    edges = np.linspace(0, max_dist, n_intervals + 1)
+
+    onehot = mx.array((code[:, None] == np.arange(K)[None, :]).astype(np.float32))  # n×K
+    p_uncond = np.bincount(code, minlength=K) / n
+
+    occ = np.zeros((K, K, n_intervals))
+    for b in range(n_intervals):
+        mask = mx.array(((Dnp >= edges[b]) & (Dnp < edges[b + 1])).astype(np.float32))
+        # pair counts per (cat_i, cat_j): onehot.T @ mask @ onehot
+        cnt = np.asarray(onehot.T @ (mask @ onehot))                # K×K
+        row = cnt.sum(axis=1, keepdims=True)
+        cond = cnt / np.maximum(row, 1e-12)                         # P(j | i, bin)
+        occ[:, :, b] = cond / np.maximum(p_uncond[None, :], 1e-12)
+    return {"occ": occ, "interval": edges, "categories": cats}
+
+
 def _spmm_scatter(src, dst, w, Xc):
     """W·X as scatter-add over edges: out[i] += w_ij · X[j]  (on the GPU)."""
     import mlx.core as mx

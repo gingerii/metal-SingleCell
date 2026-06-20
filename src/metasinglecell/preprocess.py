@@ -103,6 +103,47 @@ def filter_highly_variable(hvg_df):
     return hvg_df["highly_variable"].to_numpy().astype(bool)
 
 
+def regress_out(X, covariates) -> np.ndarray:
+    """Regress per-gene expression on covariates, return residuals (scanpy ``pp.regress_out``).
+
+    All genes share the design matrix [intercept | covariates], so we fit one OLS
+    (fp64 LAPACK for the small k×k solve) and form residuals ``X - D·beta`` on the
+    GPU. ``covariates`` is (cells,) or (cells × k). ``X`` is (cells × genes).
+    """
+    import mlx.core as mx
+
+    Xd = np.asarray(X.todense() if hasattr(X, "todense") else X, dtype=np.float64)
+    cov = np.asarray(covariates, dtype=np.float64)
+    if cov.ndim == 1:
+        cov = cov[:, None]
+    D = np.column_stack([np.ones(Xd.shape[0]), cov])           # intercept + covariates
+    beta, *_ = np.linalg.lstsq(D, Xd, rcond=None)              # (k × genes), fp64
+    resid = mx.array(Xd.astype(np.float32)) - mx.array(D.astype(np.float32)) @ mx.array(beta.astype(np.float32))
+    mx.eval(resid)
+    return np.asarray(resid)
+
+
+def normalize_pearson_residuals(X, theta: float = 100.0, clip: float | None = None) -> np.ndarray:
+    """Analytic Pearson residuals of a NB model (scanpy ``pp.normalize_pearson_residuals``).
+
+    ``mu = rowsum·colsum / total``; ``residual = (X - mu) / sqrt(mu + mu²/theta)``,
+    clipped to ``[-clip, clip]`` (default ``sqrt(n_cells)``). Returns a dense array.
+    """
+    import mlx.core as mx
+
+    Xd = np.asarray(X.todense() if hasattr(X, "todense") else X, dtype=np.float32)
+    Xg = mx.array(Xd)
+    row = mx.sum(Xg, axis=1, keepdims=True)
+    col = mx.sum(Xg, axis=0, keepdims=True)
+    total = mx.sum(Xg)
+    mu = (row @ col) / total
+    resid = (Xg - mu) / mx.sqrt(mu + mu * mu / theta)
+    c = float(np.sqrt(Xd.shape[0])) if clip is None else clip
+    resid = mx.clip(resid, -c, c)
+    mx.eval(resid)
+    return np.asarray(resid)
+
+
 def scale(csr, max_value: float | None = 10.0, zero_center: bool = True) -> np.ndarray:
     """Z-score each gene then clip (scanpy ``sc.pp.scale``).
 
