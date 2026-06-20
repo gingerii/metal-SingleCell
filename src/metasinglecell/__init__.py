@@ -1,4 +1,4 @@
-"""metaSingleCell — GPU-accelerated single-cell analysis on Apple Silicon.
+"""metal-SingleCell — GPU-accelerated single-cell analysis on Apple Silicon.
 
 A Metal/MLX re-implementation of rapids-singlecell's scanpy drop-ins.
 Heavy backends (mlx, scanpy) are lazy-imported inside functions so this

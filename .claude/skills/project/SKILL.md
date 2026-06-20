@@ -1,9 +1,9 @@
 ---
 name: project
-description: metaSingleCell goal (Metal/MLX port of rapids-singlecell), the 3-stage roadmap, and repo layout. Load when planning work, prioritizing, or navigating the codebase.
+description: metal-SingleCell goal (Metal/MLX port of rapids-singlecell), the 3-stage roadmap, and repo layout. Load when planning work, prioritizing, or navigating the codebase.
 ---
 
-# Project — metaSingleCell
+# Project — metal-SingleCell
 
 ## Goal
 Bring GPU-accelerated single-cell analysis to **Apple Silicon (Metal)** — a drop-in

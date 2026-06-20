@@ -46,7 +46,7 @@ results/ * All .csv, .png, and .pdfs related to the project will live here. For 
   artifacts, grouped by analysis type.
 * Resolve paths through `src/config.py` (honoring `DATA_ROOT`); avoid hardcoding.
 * **Consult the matching skill before writing code** (durable facts live in `.claude/skills/`; see `SKILLS.md`).
-* **Git**: ask before every `git push` (commit locally freely). `results/` is gitignored except `.gitkeep` — figures/outputs stay local; force-add only a specific file if publishing it. Remote: private GitHub repo **gingerii/metaSingleCell** (https://github.com/gingerii/metaSingleCell). Note this repo's `.git` is independent — `metaSingleCell/` lives inside the home dir which is its own unrelated repo (gingerii/RASP_manuscript); always run git from the project root.
+* **Git**: ask before every `git push` (commit locally freely). `results/` is gitignored except `.gitkeep` — figures/outputs stay local; force-add only a specific file if publishing it. Remote: private GitHub repo **gingerii/metal-SingleCell** (https://github.com/gingerii/metal-SingleCell). Project root is `~/Desktop/metal-SingleCell`; always run git from there. (Note: the Python import package is still `metasinglecell` and the conda env is `metasinglecell` — display name differs from these identifiers.)
 * Secrets (e.g. the gated-UNI HF token): `huggingface_hub` login / env var only — never commit.
 
 
