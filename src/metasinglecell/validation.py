@@ -69,6 +69,43 @@ def compare(
     }
 
 
+def compare_signed_columns(
+    name: str,
+    got: np.ndarray,
+    expected: np.ndarray,
+    min_abs_corr: float = 0.99,
+) -> dict:
+    """Compare matrices whose columns are defined only up to sign (PCA/embeddings).
+
+    Computes the per-column absolute Pearson correlation between ``got`` and
+    ``expected`` (both n x k) and passes if the worst column clears
+    ``min_abs_corr``. Robust to SVD sign flips.
+    """
+    got = np.asarray(got, dtype=np.float64)
+    expected = np.asarray(expected, dtype=np.float64)
+    k = min(got.shape[1], expected.shape[1])
+    corrs = np.array([abs(np.corrcoef(got[:, i], expected[:, i])[0, 1]) for i in range(k)])
+    return {
+        "check": name,
+        "passed": bool(corrs.min() >= min_abs_corr),
+        "n_components": int(k),
+        "min_abs_corr": float(corrs.min()),
+        "mean_abs_corr": float(corrs.mean()),
+        "min_abs_corr_threshold": min_abs_corr,
+    }
+
+
+def subspace_overlap(a: np.ndarray, b: np.ndarray) -> float:
+    """Normalized overlap of two k-dim column subspaces, in [0, 1] (1 == identical).
+
+    ``||Qa^T Qb||_F^2 / k`` where Qa, Qb are orthonormal bases of the columns.
+    """
+    qa, _ = np.linalg.qr(np.asarray(a, dtype=np.float64))
+    qb, _ = np.linalg.qr(np.asarray(b, dtype=np.float64))
+    k = min(a.shape[1], b.shape[1])
+    return float(np.linalg.norm(qa[:, :k].T @ qb[:, :k], "fro") ** 2 / k)
+
+
 def write_report(records: list[dict], analysis: str, filename: str = "parity_report.csv") -> Path:
     """Write parity records to ``results/<analysis>/<filename>`` and return the path."""
     out = config.results_dir(analysis) / filename
