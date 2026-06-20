@@ -55,6 +55,48 @@ def _qc_kernel():
     )
 
 
+# Per-row normalization: scale every entry of row r by target_sum / row_total[r]
+# (scanpy normalize_total, exclude_highly_expressed=False). One thread per row;
+# first pass sums the row, second pass writes the scaled values.
+_NORMALIZE_KERNEL_SOURCE = """
+    uint row = thread_position_in_grid.x;
+    uint start = indptr[row];
+    uint end = indptr[row + 1];
+    float total = 0.0f;
+    for (uint j = start; j < end; ++j) { total += data[j]; }
+    float scale = (total > 0.0f) ? (tsum[0] / total) : 0.0f;
+    for (uint j = start; j < end; ++j) { out[j] = data[j] * scale; }
+"""
+
+# Elementwise log1p over the nnz values (natural log, matching scanpy log1p).
+_LOG1P_KERNEL_SOURCE = """
+    uint i = thread_position_in_grid.x;
+    out[i] = log(1.0f + data[i]);
+"""
+
+
+def _normalize_kernel():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="csr_normalize_total",
+        input_names=["data", "indptr", "tsum"],
+        output_names=["out"],
+        source=_NORMALIZE_KERNEL_SOURCE,
+    )
+
+
+def _log1p_kernel():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="csr_log1p",
+        input_names=["data"],
+        output_names=["out"],
+        source=_LOG1P_KERNEL_SOURCE,
+    )
+
+
 @dataclass
 class CSR:
     """Compressed-sparse-row matrix backed by MLX arrays (on the Metal device).
@@ -85,6 +127,60 @@ class CSR:
     @property
     def n_rows(self) -> int:
         return self.shape[0]
+
+    @property
+    def nnz(self) -> int:
+        return int(self.data.size)
+
+    def _with_data(self, new_data) -> "CSR":
+        """Return a copy sharing indices/indptr/shape but with new values."""
+        return CSR(data=new_data, indices=self.indices, indptr=self.indptr, shape=self.shape)
+
+    def toarray(self) -> np.ndarray:
+        """Densify to a numpy array (host-side; for validation/inspection only)."""
+        import scipy.sparse as sp
+
+        csr = sp.csr_matrix(
+            (np.asarray(self.data), np.asarray(self.indices), np.asarray(self.indptr)),
+            shape=self.shape,
+        )
+        return csr.toarray()
+
+    def normalize_total(self, target_sum: float = 1e4) -> "CSR":
+        """Scale each cell's counts to sum to ``target_sum`` (scanpy normalize_total).
+
+        Returns a new CSR with the same sparsity pattern and rescaled values,
+        computed on the GPU.
+        """
+        import mlx.core as mx
+
+        kernel = _normalize_kernel()
+        n = self.n_rows
+        (out,) = kernel(
+            inputs=[self.data, self.indptr, mx.array([target_sum], dtype=mx.float32)],
+            grid=(n, 1, 1),
+            threadgroup=(min(256, n), 1, 1),
+            output_shapes=[(self.nnz,)],
+            output_dtypes=[mx.float32],
+        )
+        mx.eval(out)
+        return self._with_data(out)
+
+    def log1p(self) -> "CSR":
+        """Elementwise ``log(1 + x)`` over the nonzero values (scanpy log1p)."""
+        import mlx.core as mx
+
+        kernel = _log1p_kernel()
+        nnz = self.nnz
+        (out,) = kernel(
+            inputs=[self.data],
+            grid=(nnz, 1, 1),
+            threadgroup=(min(256, nnz), 1, 1),
+            output_shapes=[(nnz,)],
+            output_dtypes=[mx.float32],
+        )
+        mx.eval(out)
+        return self._with_data(out)
 
     def qc_metrics(self) -> tuple[np.ndarray, np.ndarray]:
         """Per-row (per-cell) total counts and number of nonzero genes.

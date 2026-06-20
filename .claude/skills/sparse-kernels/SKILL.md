@@ -25,6 +25,15 @@ description: Stage-1 Metal sparse substrate — MLX custom-kernel API, CSR layou
 - Parity vs fp64 oracle (`results/qc_metrics/parity_report.csv`): **exact match, max_abs_err=0,
   r=1.0** on PBMC3k (2700 cells × 13714 genes, nnz=2.28M).
 
+## normalize_total + log1p kernels — VALIDATED (fp32-exact)
+- `CSR.normalize_total(target_sum=1e4)` (`csr_normalize_total`): one thread/row, two passes
+  (sum, then scale by `target_sum/total`); `exclude_highly_expressed=False`. Scalar passed as a
+  1-elem mlx array (`tsum[0]`), not f-string-baked.
+- `CSR.log1p()` (`csr_log1p`): elementwise `log(1+x)` over nnz, one thread/nnz.
+- Both return a new CSR via `_with_data` (shares indices/indptr). `CSR.toarray()`/`nnz` added for
+  validation. Parity vs fp64 oracle (`results/normalize_log1p/`): **pass at fp32**, not bit-exact —
+  normalized max_rel_err 1.1e-7, lognorm 1.9e-7, r=1.0. Use rtol≈1e-4 for these (fp32-vs-fp64).
+
 ## Validation pattern (`metasinglecell.validation`)
 - `load_snapshot(name)` reads `data/processed/reference/<name>.npy` (oracle ground truth).
 - `compare(name, got, expected, rtol, atol)` → record with max_abs/rel err, rmse, pearson_r,
@@ -33,6 +42,6 @@ description: Stage-1 Metal sparse substrate — MLX custom-kernel API, CSR layou
   used (e.g. from snapshot `00_counts`) so the comparison is closed-loop.
 
 ## Next sparse primitives (priority order, all validatable vs oracle)
-1. `normalize_total` + `log1p` — elementwise on `data` keyed by row-sum (vs `02_/03_`).
+1. ~~`normalize_total` + `log1p`~~ — DONE (fp32-exact).
 2. Per-gene reductions (mean/variance) for HVG — needs column scatter/atomics (vs `04_*`).
 3. SpMM for PCA input; SVD core stays on Accelerate/LAPACK (fp64).
