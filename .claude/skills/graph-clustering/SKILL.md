@@ -66,13 +66,32 @@ then process color-by-color so each independent set moves seeing fresh neighbor 
   color per pass** → O(colors·passes·E·logE). ~14-100× SLOWER than igraph at 10-50k. The earlier
   fast (64×) numbers were the *synchronous* version (poor quality). So: fast-but-wrong vs slow-but-right.
 
-### THE unifying fix (next, substantial): fused single-kernel local-moving
-cuGraph does local-moving in ONE custom kernel: each vertex accumulates its neighbor-community
-weights in thread-local/shared-memory hashing (no global re-sort), picks the best move — fast AND
-fresh-state. That's a custom `mx.fast.metal_kernel` with per-vertex hashing, the real engineering
-lift. Then Leiden refinement (Phase 3) for the fuzzy-graph coarse-merge gap.
+### DONE: fused per-vertex move kernel (no sort) — `_MOVE_KERNEL_SOURCE` in louvain.py
+One thread per vertex walks its CSR row, O(degree²) scan over distinct neighbor communities (no
+sort, no shared memory — degree≤~50 for kNN graphs), picks best modularity-gain move; skips
+self-loops; only the active color computes. `_local_moving` re-colors each pass (needed for fuzzy-
+graph quality), one GPU sync per pass (not per color). This replaced the per-color global sort.
+
+### Current state (driver 10): CORRECT on small/well-structured, OPEN BUG at scale
+- **Quality correct where structure is clear/small**: SBM n=10k Q=0.809==igraph (20 cl exactly);
+  n=50k 0.787 vs 0.807; PBMC 0.630 / 35 cl / ARI 0.53 vs igraph 0.656/~13.
+- **Speed**: small n is overhead-bound (GPU 0.05–0.4× igraph — per-pass coloring syncs + dispatch).
+- **OPEN BUG (the crux)**: on LARGE + WEAKLY-structured graphs (e.g. SBM 200k, 20 blocks → sparse
+  blocks) colored local-moving **stalls near pairs**, Q collapses to ~0.04. A one-off 200k/40-block
+  run worked (1.5× faster, Q 0.779>igraph) — so it's structure/scale-dependent, NOT a fixed-n bug.
+  Root cause (hypothesis): the colored greedy fails to *nucleate* large communities when within-
+  community connectivity is sparse — sequential igraph snowballs, parallel colored doesn't. Math is
+  scale-invariant (equilibrium penalty identical at 200k vs 500k), so it's a dynamics/nucleation
+  issue, not fp32 or the modularity formula. NOT yet root-caused.
+
+### Next ideas to try for the nucleation/scale bug
+- Leiden-style refinement (Phase 3) — may help but won't fix nucleation alone.
+- Better move acceptance: allow moving toward the *max-edge-weight* neighbor's community first
+  (coalescence bias), or a few sequential "seed" sweeps before colored parallel sweeps.
+- Verify the multilevel actually contracts+continues at scale (suspect level loop stops after ~1
+  level when local-moving returns only pairs — check whether coarse levels re-merge).
 
 ## Status
-Phase 1 substrate DONE (validated, fast). Phase 2: clustering is now CORRECT (matches igraph on clear
-graphs) but the colored impl is slow; achieving fast+correct needs the fused kernel above. Decision
-point for the user: invest in the single-kernel local-moving (the cuGraph core) next.
+Phase 1 substrate DONE. Phase 2: per-vertex kernel makes it fast & correct on small/well-structured
+graphs; a scale+weak-structure nucleation bug is the open crux before atlas-scale is trustworthy.
+Phases 3 (Leiden refinement) + 4 (1M benchmark) follow once nucleation is fixed.

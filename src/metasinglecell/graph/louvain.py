@@ -16,10 +16,62 @@ from __future__ import annotations
 import numpy as np
 
 from .csr_graph import Graph
-from .primitives import (_segments, modularity, neighbor_community_weights,
-                         segment_head, segment_sum)
+from .primitives import _segments, modularity, segment_head, segment_sum
 
-_INT32_MAX = 2_147_483_647
+
+# Per-vertex best-move kernel: one thread per vertex walks its own neighbor list
+# (CSR row) and, with an O(degree^2) scan over distinct neighbor communities,
+# picks the community maximizing the modularity gain. No sort, no shared memory —
+# replaces the global edge-sort that made the colored version slow. Only vertices
+# of the active color compute; others keep their community (independent set ->
+# simultaneous moves don't interfere, and each sees up-to-date neighbors).
+_MOVE_KERNEL_SOURCE = """
+    uint v = thread_position_in_grid.x;
+    if (color[v] != active[0]) { target[v] = comm[v]; return; }
+    uint start = indptr[v];
+    uint end = indptr[v + 1];
+    int curr = comm[v];
+    float kv = k[v];
+    float inv = 1.0f / twom[0];
+    float best_gain = -1e30f;
+    int best_comm = curr;
+    float stay_gain = 0.0f;            // isolated baseline if no same-community edge
+    for (uint a = start; a < end; ++a) {
+        int na = indices[a];
+        if (na == (int)v) { continue; }        // skip self-loop
+        int ca = comm[na];
+        bool first = true;                     // process each community once
+        for (uint b = start; b < a; ++b) {
+            int nb = indices[b];
+            if (nb != (int)v && comm[nb] == ca) { first = false; break; }
+        }
+        if (!first) { continue; }
+        float wc = 0.0f;                       // total edge weight v -> community ca
+        for (uint b = start; b < end; ++b) {
+            int nb = indices[b];
+            if (nb != (int)v && comm[nb] == ca) { wc += weights[b]; }
+        }
+        float sig = sigtot[ca] - (ca == curr ? kv : 0.0f);
+        float gain = wc - res[0] * sig * kv * inv;
+        if (ca == curr) { stay_gain = gain; }
+        if (gain > best_gain || (gain == best_gain && ca < best_comm)) {
+            best_gain = gain; best_comm = ca;
+        }
+    }
+    target[v] = (best_gain > stay_gain + 1e-9f) ? best_comm : curr;
+"""
+
+
+def _move_kernel():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="louvain_best_move",
+        input_names=["indptr", "indices", "weights", "comm", "k", "sigtot",
+                     "color", "active", "res", "twom"],
+        output_names=["target"],
+        source=_MOVE_KERNEL_SOURCE,
+    )
 
 
 def color_graph(graph: Graph, seed: int = 0, max_colors: int = 2000):
@@ -50,47 +102,36 @@ def color_graph(graph: Graph, seed: int = 0, max_colors: int = 2000):
 
 def _local_moving(graph: Graph, resolution: float, twom: float, seed: int = 0,
                   max_passes: int = 100):
-    """Colored local-moving from singletons. Returns MLX community labels."""
+    """Colored local-moving from singletons (per-vertex kernel, no sort).
+
+    Returns MLX community labels.
+    """
     import mlx.core as mx
 
     n = graph.n
     k = graph.degrees()
     comm = mx.arange(n, dtype=mx.int32)
+    kernel = _move_kernel()
+    res_a = mx.array([resolution], dtype=mx.float32)
+    twom_a = mx.array([twom], dtype=mx.float32)
 
     for p in range(max_passes):
+        # Re-color each pass (fresh random independent sets) — important for
+        # escaping poor optima on fuzzy graphs; cheap relative to the moves.
         color, n_colors = color_graph(graph, seed=seed + p)
-        color_np = np.asarray(color)
-        changed = False
-
+        comm_before = comm
         for c in range(n_colors):
             sigtot = mx.zeros((n,), dtype=mx.float32).at[comm].add(k)
-            src, com, w = neighbor_community_weights(graph, comm)
-            curr = comm[src]
-            kv = k[src]
-            sig_adj = sigtot[com] - mx.where(com == curr, kv, mx.zeros_like(kv))
-            score = w - resolution * sig_adj * kv / twom
-
-            seg_id, S, starts = _segments(src.astype(mx.int64))
-            seg_max = mx.full((S,), -mx.inf, dtype=mx.float32).at[seg_id].maximum(score)
-            is_best = score >= seg_max[seg_id] - 1e-9
-            cand = mx.where(is_best, com, mx.full(com.shape, _INT32_MAX, dtype=mx.int32))
-            best_com = mx.full((S,), _INT32_MAX, dtype=mx.int32).at[seg_id].minimum(cand)
-            seg_src = segment_head(seg_id, S, starts, src)
-            stay = mx.zeros((S,), dtype=mx.float32).at[seg_id].add(
-                mx.where(com == curr, score, mx.zeros_like(score)))
-            moved = seg_max > stay + 1e-9
-            new_for_seg = mx.where(moved, best_com, comm[seg_src])
-
-            target = (comm + 0).at[seg_src].add(new_for_seg - comm[seg_src])
-            # apply only this color's vertices (independent set -> no interference)
-            apply = mx.array(color_np == c)
-            new_comm = mx.where(apply, target, comm)
-            mx.eval(new_comm)
-            if not bool(mx.all(new_comm == comm).item()):
-                changed = True
-            comm = new_comm
-
-        if not changed:
+            (comm,) = kernel(
+                inputs=[graph.indptr, graph.indices, graph.weights, comm, k, sigtot,
+                        color, mx.array([c], dtype=mx.int32), res_a, twom_a],
+                grid=(n, 1, 1),
+                threadgroup=(min(256, n), 1, 1),
+                output_shapes=[(n,)],
+                output_dtypes=[mx.int32],
+            )
+        mx.eval(comm)                                  # one sync per pass, not per color
+        if bool(mx.all(comm == comm_before).item()):
             break
 
     return comm
