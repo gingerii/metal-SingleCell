@@ -54,10 +54,14 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 | calculate_niche | ⬜ Batch 4 (neighborhood composition clustering) |
 
 ## Build batches (tractable → hard)
-1. pp completions: filter_cells/genes, flag_gene_family, filter_highly_variable, top-level qc.
-2. tl: kmeans, score_genes(+cell_cycle), embedding_density; gr: spatial_autocorr (Moran/Geary).
-3. tl: rank_genes_groups, diffmap, draw_graph, tsne; gr: co_occurrence; HVG flavors; pearson_residuals; regress_out.
-4. pp: harmony_integrate, scrublet, bbknn; gr: ligrec, calculate_niche.
+1. ✅ DONE pp completions: filter_cells/genes, flag_gene_family, filter_highly_variable, calculate_qc_metrics
+   (+ `CSR.gene_counts`). All match scanpy exactly on PBMC.
+2. ✅ DONE `tools.py`: kmeans (MLX Lloyd, ARI 0.835 vs sklearn), score_genes(+cell_cycle, embedding_density);
+   `spatial.py`: spatial_neighbors + spatial_autocorr (Moran's I / Geary's C via scatter-SpMM + permutation p —
+   validated: smooth gene Moran 0.97/Geary 0.03, noise ~0/~1). NB MLX has no GPU sparse matmul → W·X done as
+   scatter-add over edges (`_spmm_scatter`).
+3. ⬜ tl: rank_genes_groups, diffmap, draw_graph, tsne; gr: co_occurrence; HVG flavors; pearson_residuals; regress_out.
+4. ⬜ pp: harmony_integrate, scrublet, bbknn; gr: ligrec, calculate_niche.
 
 ## Conventions
 - Compute on MLX where GPU helps; lazy-import mlx. Match scanpy/rsc signatures + defaults.
