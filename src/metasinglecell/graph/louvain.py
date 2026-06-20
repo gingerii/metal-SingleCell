@@ -30,6 +30,9 @@ _MOVE_KERNEL_SOURCE = """
     if (color[v] != active[0]) { target[v] = comm[v]; return; }
     uint start = indptr[v];
     uint end = indptr[v + 1];
+    // Degree-binning: this O(degree^2) kernel handles bounded-degree vertices; rare
+    // very-high-degree (contracted) super-vertices are computed on the host in O(d).
+    if (end - start > (uint)cap[0]) { target[v] = comm[v]; return; }
     int curr = comm[v];
     float kv = k[v];
     float inv = 1.0f / twom[0];
@@ -68,10 +71,45 @@ def _move_kernel():
     return mx.fast.metal_kernel(
         name="louvain_best_move",
         input_names=["indptr", "indices", "weights", "comm", "k", "sigtot",
-                     "color", "active", "res", "twom"],
+                     "color", "active", "res", "twom", "cap"],
         output_names=["target"],
         source=_MOVE_KERNEL_SOURCE,
     )
+
+
+# Degree threshold: vertices above this are handled on the host (exact, O(d)) to
+# avoid the GPU kernel's O(d^2) blowup on rare high-degree contracted super-vertices.
+_DEGREE_CAP = 1024
+
+
+def _high_degree_moves(indptr, indices, weights, comm_np, k_np, sigtot_np,
+                       large_ids, resolution, twom):
+    """Exact best-move for the (few) high-degree vertices, sequentially in NumPy.
+
+    O(degree) per vertex (bincount over neighbor communities), processed one at a
+    time with Sigma_tot updated after each move (so adjacent large vertices don't
+    interfere). Mutates ``comm_np`` and ``sigtot_np`` in place.
+    """
+    for v in large_ids:
+        s, e = int(indptr[v]), int(indptr[v + 1])
+        nbr = indices[s:e]
+        keep = nbr != v
+        nbr, w = nbr[keep], weights[s:e][keep]
+        if nbr.size == 0:
+            continue
+        wc = np.bincount(comm_np[nbr], weights=w)            # weight to each community
+        cand = np.flatnonzero(wc > 0)
+        kv = float(k_np[v])
+        curr = int(comm_np[v])
+        sig = sigtot_np[cand] - np.where(cand == curr, kv, 0.0)
+        gain = wc[cand] - resolution * sig * kv / twom
+        stay = gain[cand == curr]
+        stay_gain = float(stay[0]) if stay.size else 0.0
+        best = int(cand[np.argmax(gain)])
+        if gain[np.argmax(gain)] > stay_gain + 1e-9 and best != curr:
+            sigtot_np[curr] -= kv
+            sigtot_np[best] += kv
+            comm_np[v] = best
 
 
 def color_graph(graph: Graph, seed: int = 0, max_colors: int = 2000):
@@ -123,8 +161,19 @@ def _local_moving(graph: Graph, resolution: float, twom: float, seed: int = 0,
     kernel = _move_kernel()
     res_a = mx.array([resolution], dtype=mx.float32)
     twom_a = mx.array([twom], dtype=mx.float32)
+    cap_a = mx.array([_DEGREE_CAP], dtype=mx.int32)
     rng = np.random.default_rng(seed)
     color, n_colors = None, 0
+
+    # Degree-binning: the GPU kernel skips vertices with degree > cap (O(d^2) blowup);
+    # these rare high-degree super-vertices are moved exactly on the host (O(d)).
+    deg = np.diff(np.asarray(graph.indptr).astype(np.int64))
+    large_ids = np.flatnonzero(deg > _DEGREE_CAP)
+    if large_ids.size:
+        hd_indptr = np.asarray(graph.indptr).astype(np.int64)
+        hd_indices = np.asarray(graph.indices)
+        hd_weights = np.asarray(graph.weights).astype(np.float64)
+        k_np = np.asarray(k).astype(np.float64)
 
     for p in range(max_passes):
         if p % recolor_every == 0:
@@ -134,12 +183,18 @@ def _local_moving(graph: Graph, resolution: float, twom: float, seed: int = 0,
             sigtot = mx.zeros((n,), dtype=mx.float32).at[comm].add(k)
             (comm,) = kernel(
                 inputs=[graph.indptr, graph.indices, graph.weights, comm, k, sigtot,
-                        color, mx.array([int(c)], dtype=mx.int32), res_a, twom_a],
+                        color, mx.array([int(c)], dtype=mx.int32), res_a, twom_a, cap_a],
                 grid=(n, 1, 1),
                 threadgroup=(min(256, n), 1, 1),
                 output_shapes=[(n,)],
                 output_dtypes=[mx.int32],
             )
+        if large_ids.size:                             # host-handle high-degree vertices
+            comm_np = np.asarray(comm).copy()
+            sigtot_np = np.bincount(comm_np, weights=k_np, minlength=n).astype(np.float64)
+            _high_degree_moves(hd_indptr, hd_indices, hd_weights, comm_np, k_np,
+                               sigtot_np, large_ids, resolution, twom)
+            comm = mx.array(comm_np.astype(np.int32))
         mx.eval(comm)                                  # one sync per pass, not per color
         if bool(mx.all(comm == comm_before).item()):
             break

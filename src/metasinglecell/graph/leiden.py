@@ -20,7 +20,7 @@ from __future__ import annotations
 import numpy as np
 
 from .csr_graph import Graph
-from .louvain import _contract_dense, _local_moving, color_graph
+from .louvain import _DEGREE_CAP, _contract_dense, _local_moving, color_graph
 from .primitives import modularity
 
 
@@ -31,9 +31,10 @@ from .primitives import modularity
 _REFINE_KERNEL_SOURCE = """
     uint v = thread_position_in_grid.x;
     if (color[v] != active[0]) { target[v] = comm[v]; return; }
-    int pv = part[v];
     uint start = indptr[v];
     uint end = indptr[v + 1];
+    if (end - start > (uint)cap[0]) { target[v] = comm[v]; return; }  // host handles high-degree
+    int pv = part[v];
     int curr = comm[v];
     float kv = k[v];
     float inv = 1.0f / twom[0];
@@ -72,10 +73,34 @@ def _refine_kernel():
     return mx.fast.metal_kernel(
         name="leiden_refine_move",
         input_names=["indptr", "indices", "weights", "comm", "part", "k", "sigtot",
-                     "color", "active", "res", "twom"],
+                     "color", "active", "res", "twom", "cap"],
         output_names=["target"],
         source=_REFINE_KERNEL_SOURCE,
     )
+
+
+def _high_degree_refine(indptr, indices, weights, comm_np, part_np, k_np, sigtot_np,
+                        large_ids, resolution, twom):
+    """Exact within-community best-move for high-degree vertices (host, O(degree))."""
+    for v in large_ids:
+        pv = part_np[v]
+        s, e = int(indptr[v]), int(indptr[v + 1])
+        nbr = indices[s:e]
+        keep = (nbr != v) & (part_np[nbr] == pv)        # same Louvain community only
+        nbr, w = nbr[keep], weights[s:e][keep]
+        if nbr.size == 0:
+            continue
+        wc = np.bincount(comm_np[nbr], weights=w)
+        cand = np.flatnonzero(wc > 0)
+        kv = float(k_np[v]); curr = int(comm_np[v])
+        sig = sigtot_np[cand] - np.where(cand == curr, kv, 0.0)
+        gain = wc[cand] - resolution * sig * kv / twom
+        stay = gain[cand == curr]
+        stay_gain = float(stay[0]) if stay.size else 0.0
+        best = int(cand[np.argmax(gain)])
+        if gain[np.argmax(gain)] > stay_gain + 1e-9 and best != curr:
+            sigtot_np[curr] -= kv; sigtot_np[best] += kv
+            comm_np[v] = best
 
 
 def _refine(graph: Graph, part: np.ndarray, resolution: float, twom: float,
@@ -94,6 +119,15 @@ def _refine(graph: Graph, part: np.ndarray, resolution: float, twom: float,
     kernel = _refine_kernel()
     res_a = mx.array([resolution], dtype=mx.float32)
     twom_a = mx.array([twom], dtype=mx.float32)
+    cap_a = mx.array([_DEGREE_CAP], dtype=mx.int32)
+
+    deg = np.diff(np.asarray(graph.indptr).astype(np.int64))
+    large_ids = np.flatnonzero(deg > _DEGREE_CAP)   # high-degree -> host (O(d))
+    if large_ids.size:
+        hd_indptr = np.asarray(graph.indptr).astype(np.int64)
+        hd_indices = np.asarray(graph.indices)
+        hd_weights = np.asarray(graph.weights).astype(np.float64)
+        k_np = np.asarray(k).astype(np.float64)
 
     # NB: refinement re-colors every pass (no recolor_every shuffle trick here).
     # The fixed-coloring + shuffled-order optimization used in _local_moving makes
@@ -106,12 +140,18 @@ def _refine(graph: Graph, part: np.ndarray, resolution: float, twom: float,
             sigtot = mx.zeros((n,), dtype=mx.float32).at[comm].add(k)
             (comm,) = kernel(
                 inputs=[graph.indptr, graph.indices, graph.weights, comm, part_mx, k,
-                        sigtot, color, mx.array([c], dtype=mx.int32), res_a, twom_a],
+                        sigtot, color, mx.array([c], dtype=mx.int32), res_a, twom_a, cap_a],
                 grid=(n, 1, 1),
                 threadgroup=(min(256, n), 1, 1),
                 output_shapes=[(n,)],
                 output_dtypes=[mx.int32],
             )
+        if large_ids.size:
+            comm_np = np.asarray(comm).copy()
+            sigtot_np = np.bincount(comm_np, weights=k_np, minlength=n).astype(np.float64)
+            _high_degree_refine(hd_indptr, hd_indices, hd_weights, comm_np, part,
+                                k_np, sigtot_np, large_ids, resolution, twom)
+            comm = mx.array(comm_np.astype(np.int32))
         mx.eval(comm)
         if bool(mx.all(comm == comm_before).item()):
             break
