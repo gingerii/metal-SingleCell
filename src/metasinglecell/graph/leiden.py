@@ -95,6 +95,10 @@ def _refine(graph: Graph, part: np.ndarray, resolution: float, twom: float,
     res_a = mx.array([resolution], dtype=mx.float32)
     twom_a = mx.array([twom], dtype=mx.float32)
 
+    # NB: refinement re-colors every pass (no recolor_every shuffle trick here).
+    # The fixed-coloring + shuffled-order optimization used in _local_moving makes
+    # within-community refinement fail to converge -> max_passes every level (a
+    # ~100x slowdown at some sizes). Per-pass recoloring keeps refinement stable.
     for p in range(max_passes):
         color, n_colors = color_graph(graph, seed=seed + p)
         comm_before = comm

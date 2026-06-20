@@ -104,9 +104,27 @@ connectivities, backend="gpu"|"igraph")` (default igraph).
   is itself faster than igraph Louvain). So: **GPU Louvain = the speed win (2.8× @1M); GPU Leiden =
   the quality win** (better modularity + well-connected guarantee) at a speed cost.
 
+## PERF: why we're not cuGraph's 70× — and what helped
+rapids' 70× is a datacenter GPU (A100, ~2TB/s) vs CPU, with fully-fused compiled CUDA (shared-mem
+hash tables, warp reductions, no host syncs). We're on M3 (~400GB/s) with Python-orchestrated MLX.
+**Profiling the 1M Louvain: coloring = 60% of runtime** (8.6s of 14.2s; one full graph-coloring per
+pass), move-kernel 35%, convergence syncs negligible (0.01s — MLX lazy-eval already batches the move
+loop). So coloring, not GPU math, was the bottleneck.
+- **WIN (Louvain): re-color every 3 passes + shuffle color order in between** (`recolor_every=3` in
+  `_local_moving`). Coloring cost drops ~3×; shuffled order gives the convergence diversity that
+  per-pass recoloring provided. Result: **50k 1.77× faster, 1M ~9.8s** (quality equal/better,
+  PBMC Q 0.661). Color-once (no recolor) is a trap: coloring → 0.67s but passes explode 26→151 (move
+  time dominates) → slower. K=3/K=10 are the sweet spot; K=1 (per-pass) and K=∞ (once) are both worse.
+- **DO NOT apply the recolor-every-K trick to `_refine`**: within-community refinement with a fixed
+  coloring + shuffle fails to converge → hits max_passes every level → catastrophic (200k Leiden:
+  11s → **1115s**). Refinement re-colors **every pass** (stable: 200k 10.4s, 1M ~24s).
+- **Known instability (O(d²) move kernel)**: the per-vertex kernel scans distinct neighbor-communities
+  in O(degree²). Fine for bounded-degree kNN graphs, but a single very-high-degree contracted
+  super-vertex serializes the whole launch. cuGraph solves this with degree-binning (separate kernels
+  for low/high degree) — the real next optimization for robustness + more speed.
+
 ## Status
-Phases 1–3 DONE. Louvain: fast+correct at atlas scale. Leiden: best quality, wired as a drop-in,
-but slower than igraph Leiden at scale (refinement cost). **Next (optimization, not correctness):**
-speed up Leiden — refinement is the bottleneck; ideas: skip the 2nd iteration when it adds little,
-fuse refine into the move kernel, or only refine the final levels. Phase 4: formal 1M+ benchmark
-table + figures.
+Phases 1–3 DONE + Louvain perf-optimized. **GPU Louvain: fast+correct, ~5–13× over igraph at 1M**
+(igraph timing noisy). **GPU Leiden: quality beats igraph Leiden** (PBMC 0.665 vs 0.660), ~par speed
+at 1M. Next: degree-binning for the O(d²) kernel (robustness + speed); incremental Σtot; Phase 4
+formal benchmark table + figures.
