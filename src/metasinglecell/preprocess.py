@@ -12,6 +12,35 @@ from __future__ import annotations
 import numpy as np
 
 
+def scale(csr, max_value: float | None = 10.0, zero_center: bool = True) -> np.ndarray:
+    """Z-score each gene then clip (scanpy ``sc.pp.scale``).
+
+    Per-gene: subtract mean, divide by std (ddof=1; std==0 -> 1), then clip to
+    ``[-max_value, max_value]`` (lower bound only when ``zero_center``). Zero-
+    centering densifies, so this runs as dense MLX ops on the GPU and returns a
+    dense float32 numpy array (cells x genes).
+    """
+    import mlx.core as mx
+
+    x = mx.array(csr.toarray().astype(np.float32))
+    n = x.shape[0]
+    mean = mx.mean(x, axis=0)
+    var = mx.sum((x - mean) ** 2, axis=0) / (n - 1)  # ddof=1, R convention
+    std = mx.sqrt(var)
+    std = mx.where(std == 0, mx.array(1.0, dtype=std.dtype), std)
+
+    if zero_center:
+        x = x - mean
+    x = x / std
+
+    if max_value is not None:
+        upper = mx.minimum(x, mx.array(max_value, dtype=x.dtype))
+        x = mx.maximum(upper, mx.array(-max_value, dtype=x.dtype)) if zero_center else upper
+
+    mx.eval(x)
+    return np.asarray(x)
+
+
 def highly_variable_genes(
     csr,
     n_top_genes: int = 2000,

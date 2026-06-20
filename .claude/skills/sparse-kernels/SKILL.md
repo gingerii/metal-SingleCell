@@ -58,8 +58,19 @@ description: Stage-1 Metal sparse substrate — MLX custom-kernel API, CSR layou
 - Drivers live in `validation_notebooks/NN_<topic>_parity.py`; rebuild the exact matrix the oracle
   used (e.g. from snapshot `00_counts`) so the comparison is closed-loop.
 
-## Next sparse primitives (priority order, all validatable vs oracle)
-1. ~~`normalize_total` + `log1p`~~ — DONE (fp32-exact).
-2. ~~Per-gene mean/variance for HVG~~ — DONE (CSC column reduction; selection exact).
-3. `scale` (z-score, densifies HVG subset) → snapshot `05_scaled`.
-4. PCA: SpMM / covariance for the embedding; SVD core stays on Accelerate/LAPACK (fp64) → `06_*`.
+## scale (sparse→dense boundary) — VALIDATED (fp32)
+- `preprocess.scale(csr, max_value=10, zero_center=True)`: densifies (zero-centering forces it),
+  per-gene z-score with **ddof=1** var (std==0→1), then clip to `[-max_value, max_value]` (lower
+  bound only when zero_center). Pure dense **MLX** ops (mean/var/where/min/max) — no custom kernel;
+  this is the densification boundary. Returns dense float32.
+- scanpy `clip_array`: upper clip always, lower clip only if zero_center (confirmed from source).
+- Parity vs fp64 oracle (`results/scale/`): max_abs_err 2.2e-6, rmse 5.4e-8, r=1.0.
+
+## Front-end status: QC → normalize → log1p → HVG → scale ALL VALIDATED.
+
+## Next primitives (priority order, all validatable vs oracle)
+1. PCA → `06_X_pca` / `06_pca_components` / `06_pca_variance_ratio`. Mean-center the scaled HVG
+   matrix, then truncated SVD. **SVD core stays on Accelerate/LAPACK in fp64** (numerical anchor);
+   GPU handles the matmuls/projection. Watch sign convention (scanpy uses sklearn svd_flip) and
+   that PCA on already-scaled data centers again (mean≈0).
+2. neighbors (KNN on the 50-dim embedding) → `07_*`; then leiden/umap (dense, post-PCA).
