@@ -117,6 +117,33 @@ description: Stage-1 Metal sparse substrate — MLX custom-kernel API, CSR layou
   approximate replacement to scale. Absolute times are ms-scale here — wins compound at real cohort
   size but each op is already cheap until ~100k+ cells.
 
-## Next
-- leiden/umap (dense, post-PCA) for an end-to-end pipeline demo. Optimize pca_randomized (GPU QR).
-- Bigger benchmark (fairer CPU best-of-n; scanpy sparse baseline; end-to-end pipeline walltime).
+## leiden — `cluster.leiden(connectivities, resolution)` — VALIDATED (RNG-floor)
+- igraph `community_leiden(objective_function="modularity", weights, n_iterations=2)` — matches
+  scanpy `flavor="igraph"`. Seed via `random` module: `ig.set_random_number_generator(random)` (NOT a
+  numpy Generator/RandomState — igraph needs `.gauss`/`.randint`, i.e. the stdlib `random` module).
+- **NOT a GPU target** — graph community detection is irregular/sequential; no Metal graph engine
+  (rapids uses cuGraph). The clustering-stage speedup is upstream (fast neighbor graph).
+- Parity (`results/leiden_umap/`): same cluster count (9) as oracle, ARI 0.70. **scanpy reproduces
+  the oracle exactly at seed 0 (ARI 1.0), but scanpy's own seed-to-seed ARI vs the oracle spans
+  0.69–0.90** — so ours is within Leiden's RNG floor, not a correctness defect. Validate by
+  cluster-count match + ARI ≥ ~0.65, never exact agreement.
+
+## umap — `embedding.umap(connectivities, ...)` — VALIDATED + GPU WIN (~4×)
+- Force-layout SGD on the GPU (MLX): per epoch, vectorized attractive force over "due" edges +
+  `NEG_SAMPLE_RATE=5` repulsive negatives; gradients accumulated with `emb.at[idx].add(...)`
+  (MLX scatter-add — duplicate indices accumulate correctly). `mx.eval(emb)` once/epoch to bound the
+  lazy graph. Reuse umap-learn for the cheap setup: `find_ab_params`, `spectral_layout` init,
+  `make_epochs_per_sample`.
+- **MLX scalar gotcha:** `np.float64 * mlx_array` returns a numpy ndarray (numpy `__mul__` wins) →
+  `clip` then fails. Cast solver scalars (`a, b = float(a), float(b)`) so ops stay on-device.
+- Parity (`results/leiden_umap/`): neighbor-preservation ours 0.119 vs umap-learn 0.117 (matches its
+  quality; embedding is stochastic so validate structure, not coordinates). **Timing: GPU layout
+  1.8s vs umap-learn full 7.4s (~4×)** — note umap-learn's number includes its graph build, ours is
+  layout-only on the prebuilt graph.
+
+## Pipeline COMPLETE end-to-end: QC→normalize→log1p→HVG→scale→PCA→neighbors→leiden→umap, all validated.
+
+## Next / optimization targets
+- Approximate NN (Annoy/NN-descent/HNSW) to replace brute-force KNN at scale (production standard).
+- Optimize pca_randomized (GPU QR/orthonormalization; avoid host roundtrips).
+- Fairer/bigger benchmark: CPU best-of-n, scanpy sparse baseline, end-to-end pipeline walltime.
