@@ -132,6 +132,59 @@ def _gene_moments_kernel():
     )
 
 
+# Sparse-matrix x dense-matrix product (SpMM): out[r, c] = sum_{j in row r} vals[j] *
+# B[idx[j], c]. One thread per (output row r, output column c) — it walks row r's
+# segment [ptr[r], ptr[r+1]) once and accumulates a single scalar, so NO nnz x size
+# intermediate is ever materialized (that intermediate is what an MLX scatter-add SpMM
+# would blow memory on at atlas scale). MLX has no GPU sparse matmul, so this is the
+# primitive the sparse PCA range-finder is built on. Used both ways: with the CSR
+# (ptr/col-idx) for X·B, and with the CSC (col-ptr/row-idx) for Xᵀ·B.
+_SPMM_KERNEL_SOURCE = """
+    uint c = thread_position_in_grid.x;          // output column [0, size)
+    uint r = thread_position_in_grid.y;          // output row    [0, n_out)
+    uint sz = (uint)dims[0];
+    uint start = ptr[r];
+    uint end = ptr[r + 1];
+    float acc = 0.0f;
+    for (uint j = start; j < end; ++j) {
+        uint k = (uint)idx[j];
+        acc += vals[j] * B[k * sz + c];
+    }
+    out[r * sz + c] = acc;
+"""
+
+
+def _spmm_kernel():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="csr_spmm_dense",
+        input_names=["ptr", "idx", "vals", "B", "dims"],
+        output_names=["out"],
+        source=_SPMM_KERNEL_SOURCE,
+    )
+
+
+def spmm(ptr, idx, vals, B, n_out: int):
+    """GPU SpMM: ``out[r] = Σ_{j∈seg r} vals[j]·B[idx[j]]`` → ``(n_out, size)``.
+
+    ``ptr``/``idx``/``vals`` are a CSR (or CSC) segment layout on the device; ``B`` is
+    a dense ``(m, size)`` MLX array. Returns ``(n_out, size)`` with no nnz×size temporary.
+    """
+    import mlx.core as mx
+
+    size = B.shape[1]
+    tg_x = min(size, 32)
+    (out,) = _spmm_kernel()(
+        inputs=[ptr, idx, vals, B, mx.array([size], dtype=mx.int32)],
+        grid=(size, n_out, 1),
+        threadgroup=(tg_x, max(1, 1024 // tg_x), 1),
+        output_shapes=[(n_out, size)],
+        output_dtypes=[mx.float32],
+    )
+    return out
+
+
 @dataclass
 class CSR:
     """Compressed-sparse-row matrix backed by MLX arrays (on the Metal device).
@@ -275,3 +328,52 @@ class CSR:
         )
         mx.eval(row_sum, row_nnz)
         return np.asarray(row_sum), np.asarray(row_nnz)
+
+    def spmm(self, B):
+        """``X @ B`` on the GPU (X this CSR, B dense ``(n_features, size)`` MLX array).
+
+        Returns ``(n_rows, size)``. Streams the CSR once per output column without a
+        dense copy of X — the primitive behind the sparse PCA range-finder.
+        """
+        return spmm(self.indptr, self.indices, self.data, B, self.n_rows)
+
+    def csc_arrays(self):
+        """``(colptr, rowind, data)`` of the CSC form (MLX arrays), built+cached once.
+
+        Lets ``Xᵀ @ B`` reuse the same SpMM kernel keyed by column. Built on the host
+        via scipy (one-time); cached so the power-iteration loop pays for it once.
+        """
+        import mlx.core as mx
+        import scipy.sparse as sp
+
+        cache = getattr(self, "_csc_cache", None)
+        if cache is None:
+            m = sp.csr_matrix(
+                (np.asarray(self.data), np.asarray(self.indices), np.asarray(self.indptr)),
+                shape=self.shape,
+            ).tocsc()
+            cache = (mx.array(m.indptr.astype(np.uint32)),
+                     mx.array(m.indices.astype(np.int32)),
+                     mx.array(m.data.astype(np.float32)))
+            self._csc_cache = cache
+        return cache
+
+    def spmm_t(self, B):
+        """``Xᵀ @ B`` on the GPU (B dense ``(n_rows, size)``). Returns ``(n_features, size)``."""
+        colptr, rowind, cdata = self.csc_arrays()
+        return spmm(colptr, rowind, cdata, B, self.shape[1])
+
+    def col_moments(self):
+        """Per-column mean and (ddof=1) variance of the raw stored values (incl. zeros).
+
+        For implicit mean-centering in sparse PCA. Returns ``(mean, var)`` MLX arrays.
+        """
+        import mlx.core as mx
+
+        ng = self.shape[1]
+        n = self.shape[0]
+        colsum = mx.zeros((ng,), dtype=mx.float32).at[self.indices].add(self.data)
+        colsq = mx.zeros((ng,), dtype=mx.float32).at[self.indices].add(self.data * self.data)
+        mean = colsum / n
+        var = (colsq - n * mean * mean) / max(n - 1, 1)
+        return mean, var

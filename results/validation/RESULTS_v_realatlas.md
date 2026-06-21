@@ -28,10 +28,12 @@ runs this dataset on 40–80 GB datacenter GPUs. The sweep is therefore capped a
 (`ATLAS_FULL=1` to attempt the full size). The genuine **2M-cell** scale demonstration is the
 Xenium panel (`v_realxenium.py`, 5,101 genes ≈ 5 GB, which fits) — see RESULTS_v_realxenium.md.
 
-## Note flagged for future work
-The dense `scale`→`pca` path materializes an n×n_hvg float32 array (+ MLX copy). A
-**sparse-aware GPU randomized PCA** (no densify, implicit mean-centering) would raise the
-on-laptop ceiling and likely flip PCA's sub-1× speed — the one remaining implementation limit
-rather than hardware limit on this path.
+## Update: the dense-PCA limit has been lifted
+The dense `scale`→`pca` path materializes an n×n_hvg float32 array (+ MLX copy), which capped it
+on-laptop. A **sparse-aware GPU randomized PCA** (implicit mean-centering, custom Metal CSR×dense
+SpMM, no densify) has since been added (`pca(CSR, ...)`): subspace overlap 1.0 vs sklearn, 2×
+faster than dense, and it runs at the full **2M cells** on real Xenium where dense OOMs — see
+RESULTS_v_realxenium.md. The remaining 1.3M×28k boundary here is purely the 16GB raw-counts object
+(hardware), not the PCA implementation.
 
 Driver: `validation_notebooks/v_realatlas.py`. Dataset: `data/external/1M_neurons.h5`.

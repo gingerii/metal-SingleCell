@@ -11,7 +11,8 @@ real tissue coordinates. Pipeline + spatial `gr` parity on the largest single se
 |----------|--------|---------|
 | normalize+log1p | max\|Δ\| 9.5e-7 | exact |
 | highly_variable_genes | overlap **1.000** | exact |
-| pca (randomized) | subspace overlap **0.960** | high |
+| pca (dense, scaled) | subspace overlap 0.960 (0.77s) | high |
+| pca (sparse, implicit-center) | subspace overlap **1.0000** (0.36s) | exact + 2× faster |
 | neighbors | graph agreement 0.798 vs scanpy | OK (see note) |
 | leiden GPU vs igraph | **14 vs 14 cl**, ARI 0.591 | cluster count matches |
 
@@ -25,9 +26,22 @@ real tissue coordinates. Pipeline + spatial `gr` parity on the largest single se
 | calculate_niche (composition) | max\|Δ\| **0.0** | exact |
 
 ## Full-cohort 2M scale test — the genuine atlas-scale demonstration
-**normalize_total + log1p + highly_variable_genes on the full 2,035,266 × 5,101 matrix:
-3.9 s, no OOM** (counts read via h5py into scipy CSR ≈ 5 GB, fits the 24 GB M3). This is the
-real 2M-cell demonstration the synthetic atlas could only approximate — on the user's own data.
+- **normalize_total + log1p + highly_variable_genes** on the full 2,035,266 × 5,101 matrix:
+  **4.2 s, no OOM** (counts read via h5py into scipy CSR ≈ 5 GB, fits the 24 GB M3).
+- **sparse-aware PCA** on the full 2M cells (HVG-subset lognorm): **8.3 s, no OOM** — exactly
+  where the dense `scale`→`pca` path dies (it would need ~32 GB). Implicit mean-centering keeps
+  the matrix sparse end-to-end.
+
+This is the real 2M-cell demonstration the synthetic atlas could only approximate — on the
+user's own data, now including PCA.
+
+## Sparse-aware PCA (closes the last implementation-bound function)
+The dense path densifies (`scale` z-scores zeros into nonzeros). The new sparse path runs
+randomized PCA directly on the CSR lognorm with **implicit mean-centering** — every product with
+the centered matrix is the sparse product plus a rank-1 correction, via a custom Metal CSR×dense
+SpMM kernel (no nnz×size temporary). Result: subspace overlap **1.0000** vs sklearn, **2× faster**
+than dense at 104k, and it **scales to the full 2M** where dense OOMs. This was previously flagged
+as the one implementation (not hardware) limit on the atlas path; it is now lifted.
 
 ## Notes
 - **Moran/Geary exact on real Xenium** confirms the scatter-add SpMM autocorr is correct on

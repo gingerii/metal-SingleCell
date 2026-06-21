@@ -74,12 +74,22 @@ def main():
     ref_hv = adl.var["highly_variable"].to_numpy()
     log.info("HVG: overlap=%.3f vs scanpy", (mine_hv & ref_hv).sum() / max(ref_hv.sum(), 1))
 
+    import scipy.sparse as sp
+    import time as _t
     dense = pp.scale(CSR.from_scipy(counts[:, mine_hv].tocsc().tocsr()))
-    Xpca, comps, _ = pca(dense, n_comps=50, solver="randomized")
+    t = _t.perf_counter(); Xpca, comps, _ = pca(dense, n_comps=50, solver="randomized"); td = _t.perf_counter() - t
     Xc = dense - dense.mean(0)
     _, _, Vt = randomized_svd(Xc.astype(np.float32), 50, n_iter=5, random_state=0)
-    log.info("PCA: subspace overlap=%.4f vs sklearn", validation.subspace_overlap(comps.T, Vt.T))
+    log.info("PCA (dense, scaled): subspace overlap=%.4f vs sklearn | %.2fs", validation.subspace_overlap(comps.T, Vt.T), td)
     emb = Xpca.astype(np.float32)
+
+    # sparse-aware PCA (implicit mean-center, NO densify) — the scalable atlas path
+    lognorm_hv = sp.csr_matrix(adl[:, mine_hv].X).astype(np.float32)
+    t = _t.perf_counter(); Xs, comps_s, _ = pca(CSR.from_scipy(lognorm_hv), n_comps=50); ts = _t.perf_counter() - t
+    Dref = np.asarray(lognorm_hv.todense(), np.float64); Dref -= Dref.mean(0)
+    _, _, Vts = randomized_svd(Dref, 50, n_iter=7, random_state=0)
+    log.info("PCA (sparse, implicit-center): subspace overlap=%.4f vs sklearn | %.2fs (vs dense %.2fs)",
+             validation.subspace_overlap(comps_s.T, Vts.T), ts, td)
 
     dist_g, conn = neighbors(emb, n_neighbors=15)
     adn = ad_mod.AnnData(emb.copy()); adn.obsm["X_pca"] = emb
@@ -163,11 +173,23 @@ def main():
         L = f["layers"]["counts"]
         Xfull = sp.csr_matrix((L["data"][:], L["indices"][:], L["indptr"][:]),
                               shape=tuple(L.attrs["shape"]))
+    nfull = Xfull.shape[0]
     log.info("\nfull-cohort read: %d x %d (%.0fs)", *Xfull.shape, time.perf_counter()-t)
     t = time.perf_counter()
     ln2 = CSR.from_scipy(Xfull.astype(np.float32)).normalize_total(1e4).log1p()
-    hv2 = pp.highly_variable_genes(ln2, n_top_genes=2000)
+    hv2 = pp.highly_variable_genes(ln2, n_top_genes=2000)["highly_variable"].to_numpy()
     log.info("2M pipeline (normalize+log1p+HVG): %.1fs on real Xenium (no OOM)", time.perf_counter()-t)
+    del Xfull; gc.collect()
+
+    # sparse-aware PCA at the FULL 2M cells (HVG-subset lognorm) — this is exactly where
+    # the dense scale+PCA path OOMs (would need ~2*2M*2000*4 bytes ≈ 32GB). Implicit
+    # centering keeps it sparse so it runs on the 24GB M3.
+    ln2_sp = sp.csr_matrix((np.asarray(ln2.data), np.asarray(ln2.indices),
+                            np.asarray(ln2.indptr)), shape=ln2.shape)
+    ln2_hv = CSR.from_scipy(ln2_sp[:, hv2].astype(np.float32))
+    t = time.perf_counter(); X2, _, _ = pca(ln2_hv, n_comps=50); tp = time.perf_counter() - t
+    log.info("2M sparse PCA (implicit-center): %.1fs -> X_pca %s (no OOM; dense path needs ~%dGB)",
+             tp, X2.shape, int(2 * nfull * 2000 * 4 / 1e9))
 
     log.info("\nreal-Xenium validation complete")
 
