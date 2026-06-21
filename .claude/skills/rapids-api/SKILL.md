@@ -48,11 +48,17 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 ## gr (squidpy spatial) — high value for the user's Xenium work
 | fn | status |
 |----|--------|
-| spatial_neighbors | ✅ spatial.py (KNN on coords) |
-| spatial_autocorr | ✅ spatial.py (Moran's I / Geary's C, scatter-SpMM + permutation p) |
-| co_occurrence | ✅ spatial.py (distance-binned cluster co-occurrence ratio; GPU pairwise + one-hot; O(n²)) |
-| ligrec | ✅ spatial.py (CellPhoneDB-style L-R: cluster-mean scatter + permutation p; validated A→B mean 3.1/p .005) |
-| calculate_niche | ✅ spatial.py (neighborhood composition via scatter-SpMM + kmeans; ARI 0.957 vs true regions) |
+| spatial_neighbors | ✅ spatial.py (KNN on coords); REAL Visium edge Jaccard 0.974 vs squidpy |
+| spatial_autocorr | ✅ spatial.py (Moran's I / Geary's C, scatter-SpMM + permutation p); REAL Visium **exact** vs squidpy (Moran corr 1.0 Δ6e-8; Geary corr 1.0 Δ3e-7) |
+| co_occurrence | ✅ spatial.py (CUMULATIVE d≤thr + squidpy conditional norm; `interval=` accepts squidpy thresholds; GPU pairwise + one-hot; O(n²)); REAL Visium **corr 1.0** Δ7e-4 vs squidpy |
+| ligrec | ✅ spatial.py (CellPhoneDB-style L-R: cluster-mean scatter + permutation p); REAL Visium mean-scores **exact** Δ1e-7 |
+| calculate_niche | ✅ spatial.py (neighborhood composition via scatter-SpMM + kmeans); REAL Visium composition **exact** Δ0.0 vs scipy |
+
+**REAL-spatial validation (v_realspatial.py, squidpy 1.8.2 on Visium V1 Breast Cancer 3,798 spots):**
+all gr functions match squidpy. Two fixes surfaced ONLY by real-data parity: (1) Geary's C was the
+symmetric identity `2(Σdx²−Σx·Wx)` — only exact for symmetric W (gave 0.12 error on real conn);
+rewrote to sum `Σwᵢⱼ(xᵢ−xⱼ)²` directly over edges → exact. (2) co_occurrence was disjoint bins
+(corr 0.60); squidpy is cumulative `d≤thr` with `P(i|c,within r)/P(i)` → rewrote to match → corr 1.0.
 
 ## Build batches (tractable → hard)
 1. ✅ DONE pp completions: filter_cells/genes, flag_gene_family, filter_highly_variable, calculate_qc_metrics
