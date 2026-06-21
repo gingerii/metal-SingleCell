@@ -23,7 +23,7 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 | flag_gene_family | ⬜ Batch 1 |
 | filter_highly_variable | ⬜ Batch 1 |
 | normalize_total / log1p | ✅ CSR methods |
-| highly_variable_genes | ✅ seurat; ⬜ cell_ranger / seurat_v3 / pearson_residuals |
+| highly_variable_genes | ✅ seurat / cell_ranger (log-norm) / seurat_v3 (raw counts). cell_ranger 0.62 overlap vs scanpy (binning/MAD deltas); seurat_v3 uses statsmodels lowess (skmisc unavailable) so loess fit approximate — verify vs scanpy at validation. ⬜ pearson_residuals flavor |
 | scale | ✅ |
 | pca | ✅ (full/arpack/randomized) |
 | regress_out | ✅ preprocess.py (OLS residuals; corr 1.0 vs scanpy) |
@@ -31,7 +31,7 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 | harmony_integrate | 🟡 integration.py `harmonize` (port of harmony-pytorch: cosine soft-kmeans + O/E diversity penalty + per-cluster ridge correction; matmuls on MLX, ridge solves numpy fp64). WORKS — synthetic 2-batch/2-bio: batch_sep 6.0→2.17, bio_sep 8.0→7.94 (biology preserved). ⚠ batch mixing only partial (0→0.08) — likely needs block-STOCHASTIC clustering updates (I used full-batch) and/or tuning; verify vs harmonypy at validation. |
 | scrublet / scrublet_simulate_doublets | ⬜ Batch 4 (sim doublets + kNN density) |
 | neighbors | ✅ |
-| bbknn | ⬜ Batch 4 (batch-balanced kNN) |
+| bbknn | ✅ neighbors.py (per-batch GPU KNN combined + UMAP fuzzy graph). Validated: forces 50/50 cross-batch neighbors (balanced) while keeping same-bio 100% |
 
 ## tl (tools)
 | fn | status |

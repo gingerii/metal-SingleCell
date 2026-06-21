@@ -39,6 +39,59 @@ def _knn_gpu(X: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
     return knn_indices, knn_dists
 
 
+def bbknn(X_pca: np.ndarray, batch, neighbors_within_batch: int = 3,
+          random_state: int = 0):
+    """Batch-balanced kNN (rapids-singlecell/scanpy ``pp.bbknn``).
+
+    For each cell, find ``neighbors_within_batch`` nearest neighbors *within each
+    batch* (GPU brute-force per batch), then build one fuzzy connectivity graph
+    over the combined neighbor set — this balances neighbors across batches so the
+    graph mixes them. Returns ``(distances, connectivities)`` scipy CSR matrices.
+    """
+    import mlx.core as mx
+    import scipy.sparse as sp
+    from umap.umap_ import fuzzy_simplicial_set
+
+    X = np.asarray(X_pca, dtype=np.float32)
+    n = X.shape[0]
+    batch = np.asarray(batch)
+    cats = np.unique(batch)
+    k = neighbors_within_batch
+
+    Xg = mx.array(X)
+    xsq = mx.sum(Xg * Xg, axis=1)
+    idx_parts, dist_parts = [], []
+    for b in cats:
+        bidx = np.flatnonzero(batch == b)
+        Xb = Xg[mx.array(bidx.astype(np.int32))]
+        D2 = mx.maximum(xsq[:, None] + mx.sum(Xb * Xb, axis=1)[None, :]
+                        - 2.0 * (Xg @ Xb.T), 0.0)
+        kk = min(k, bidx.size)
+        loc = mx.argpartition(D2, kth=kk, axis=1)[:, :kk]
+        mx.eval(loc, D2)
+        loc = np.asarray(loc)
+        d = np.take_along_axis(np.asarray(D2), loc, axis=1)
+        idx_parts.append(bidx[loc])                      # map local -> global
+        dist_parts.append(np.sqrt(np.maximum(d, 0.0)))
+
+    knn_indices = np.concatenate(idx_parts, axis=1)
+    knn_dists = np.concatenate(dist_parts, axis=1)
+    order = np.argsort(knn_dists, axis=1)                # sort combined neighbors by distance
+    knn_indices = np.take_along_axis(knn_indices, order, axis=1)
+    knn_dists = np.take_along_axis(knn_dists, order, axis=1)
+
+    n_neighbors = knn_indices.shape[1]
+    conn = fuzzy_simplicial_set(
+        sp.coo_matrix((n, 1)), n_neighbors, random_state, metric="euclidean",
+        knn_indices=knn_indices, knn_dists=knn_dists,
+        set_op_mix_ratio=1.0, local_connectivity=1.0)
+    if isinstance(conn, tuple):
+        conn = conn[0]
+    rows = np.repeat(np.arange(n), n_neighbors)
+    distances = sp.csr_matrix((knn_dists.ravel(), (rows, knn_indices.ravel())), shape=(n, n))
+    return distances, conn.tocsr()
+
+
 def neighbors(X_pca: np.ndarray, n_neighbors: int = 15, random_state: int = 0):
     """Compute distance + connectivity graphs from a PCA embedding.
 

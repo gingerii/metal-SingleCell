@@ -173,17 +173,59 @@ def scale(csr, max_value: float | None = 10.0, zero_center: bool = True) -> np.n
     return np.asarray(x)
 
 
-def highly_variable_genes(
-    csr,
-    n_top_genes: int = 2000,
-    n_bins: int = 20,
-) -> "object":
-    """Seurat-flavor HVG on a log-normalized :class:`~metasinglecell.sparse.CSR`.
+def highly_variable_genes(csr, n_top_genes: int = 2000, n_bins: int = 20,
+                          flavor: str = "seurat") -> "object":
+    """Highly variable genes (scanpy ``pp.highly_variable_genes``).
 
-    Returns a pandas DataFrame with columns ``means``, ``dispersions``,
-    ``dispersions_norm`` and ``highly_variable`` (one row per gene), matching
-    scanpy's ``flavor="seurat"`` output. ``csr`` must hold log1p-normalized data.
+    ``flavor`` ∈ {"seurat", "cell_ranger", "seurat_v3"}. seurat/cell_ranger expect
+    **log-normalized** data; seurat_v3 expects **raw counts**. Returns a pandas
+    DataFrame with per-gene metrics and a ``highly_variable`` flag.
     """
+    if flavor == "seurat_v3":
+        return _hvg_seurat_v3(csr, n_top_genes)
+    if flavor in ("seurat", "cell_ranger"):
+        return _hvg_dispersion(csr, n_top_genes, n_bins, flavor)
+    raise ValueError(f"unknown flavor {flavor!r}")
+
+
+def _hvg_seurat_v3(csr, n_top_genes: int):
+    """seurat_v3 HVG on raw counts: rank genes by clipped normalized variance."""
+    import mlx.core as mx
+    import pandas as pd
+    from statsmodels.nonparametric.smoothers_lowess import lowess
+
+    col = csr.indices
+    data = csr.data
+    N, ng = csr.shape
+    total = np.asarray(mx.zeros((ng,), dtype=mx.float32).at[col].add(data), dtype=np.float64)
+    sumsq = np.asarray(mx.zeros((ng,), dtype=mx.float32).at[col].add(data * data), dtype=np.float64)
+    mean = total / N
+    var = (sumsq - N * mean ** 2) / (N - 1)
+
+    not_const = var > 0
+    # loess of log10(var) ~ log10(mean) (skmisc unavailable -> statsmodels lowess, frac 0.3)
+    x = np.log10(mean[not_const]); y = np.log10(var[not_const])
+    fit = lowess(y, x, frac=0.3, return_sorted=True)
+    estimat = np.interp(np.log10(np.where(mean > 0, mean, 1e-12)), fit[:, 0], fit[:, 1])
+    reg_std = np.sqrt(10 ** estimat)
+
+    clip_val = reg_std * np.sqrt(N) + mean
+    clipped = mx.minimum(data, mx.array(clip_val[col].astype(np.float32)))
+    sc = np.asarray(mx.zeros((ng,), dtype=mx.float32).at[col].add(clipped), dtype=np.float64)
+    scsq = np.asarray(mx.zeros((ng,), dtype=mx.float32).at[col].add(clipped * clipped), dtype=np.float64)
+    norm_var = (scsq - 2 * mean * sc + N * mean ** 2) / ((N - 1) * np.maximum(reg_std ** 2, 1e-12))
+    norm_var[~not_const] = 0.0
+
+    order = np.argsort(-norm_var)
+    hv = np.zeros(ng, dtype=bool); hv[order[:n_top_genes]] = True
+    df = pd.DataFrame({"means": mean, "variances": var,
+                       "variances_norm": norm_var, "highly_variable": hv})
+    df["highly_variable_rank"] = np.argsort(np.argsort(-norm_var)).astype(float)
+    return df
+
+
+def _hvg_dispersion(csr, n_top_genes: int, n_bins: int, flavor: str):
+    """seurat / cell_ranger dispersion-based HVG on log-normalized data."""
     import pandas as pd
 
     # GPU: per-gene mean/var of expm1(lognorm). Host math in float64 for parity.
@@ -199,16 +241,23 @@ def highly_variable_genes(
 
     df = pd.DataFrame({"means": mean, "dispersions": dispersion})
 
-    # Equal-width mean bins; per-bin dispersion mean/std (ddof=1) -> z-score.
-    df["mean_bin"] = pd.cut(df["means"], bins=n_bins)
-    stats = df.groupby("mean_bin", observed=True)["dispersions"].agg(avg="mean", dev="std")
+    if flavor == "cell_ranger":
+        # percentile mean-bins; per-bin median + MAD-based dispersion z-score.
+        bins = np.r_[-np.inf, np.percentile(df["means"], np.arange(10, 105, 5)), np.inf]
+        df["mean_bin"] = pd.cut(df["means"], bins=bins)
+        grouped = df.groupby("mean_bin", observed=True)["dispersions"]
+        avg = grouped.median()
+        dev = grouped.apply(lambda g: np.median(np.abs(g - np.median(g)))) * 1.4826
+        stats = pd.DataFrame({"avg": avg, "dev": dev})
+    else:  # seurat: equal-width bins; per-bin mean/std (ddof=1)
+        df["mean_bin"] = pd.cut(df["means"], bins=n_bins)
+        stats = df.groupby("mean_bin", observed=True)["dispersions"].agg(avg="mean", dev="std")
+        # bins with a single gene have NaN std -> treat as mean 0, dev = avg.
+        one_gene = stats["dev"].isnull()
+        stats.loc[one_gene, "dev"] = stats.loc[one_gene, "avg"]
+        stats.loc[one_gene, "avg"] = 0
 
-    # scanpy: bins with a single gene have NaN std -> treat as mean 0, dev = avg.
-    one_gene = stats["dev"].isnull()
-    stats.loc[one_gene, "dev"] = stats.loc[one_gene, "avg"]
-    stats.loc[one_gene, "avg"] = 0
     per_gene = stats.loc[df["mean_bin"]].set_index(df.index)
-
     df["dispersions_norm"] = (df["dispersions"] - per_gene["avg"]) / per_gene["dev"]
 
     # Select the top n_top_genes by normalized dispersion (NaNs -> -inf).
