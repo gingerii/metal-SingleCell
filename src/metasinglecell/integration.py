@@ -77,20 +77,34 @@ def harmonize(Z, batch, n_clusters: int | None = None, sigma: float = 0.1,
         diversity = sigma * theta * mx.sum(R * (mx.log((O + 1e-12) / (E + 1e-12)) @ Phi_g.T))
         return float((kmeans_err + entropy + diversity).item())
 
+    rng = np.random.default_rng(random_state)
+    block_size = max(1, int(0.05 * N))
     prev_obj = objective()
     for _ in range(max_iter_harmony):
-        # ---- clustering: alternate centroid update and penalized assignment ----
+        # ---- clustering: BLOCK-STOCHASTIC penalized assignment (harmony) ----
+        # Cells are updated in random blocks; each block's contribution is removed
+        # from O/E before re-assigning, so the diversity penalty (E/O) reflects the
+        # rest of the data — this is what actually drives batch mixing.
         for _ in range(max_iter_clustering):
             Y = _l2_normalize(R @ Z_norm)                    # K × d centroids
-            omega = mx.power((E + 1e-12) / (O + 1e-12), theta)   # K × B penalty
-            omega_n = omega @ Phi_g.T                        # K × N (each cell's batch)
-            R_new = assign(Y, omega_n)
-            O = R_new @ Phi_g
-            E = mx.sum(R_new, axis=1, keepdims=True) * Pr_g[None, :]
-            shift = float(mx.mean(mx.abs(R_new - R)).item())
-            R = R_new
+            R_prev = R
+            perm = rng.permutation(N)                         # random blocks
+            for start in range(0, N, block_size):
+                blk = perm[start:start + block_size]
+                bg = mx.array(blk.astype(np.int32))
+                Phi_b = Phi_g[bg]
+                Rb_old = R[:, bg]
+                O = O - Rb_old @ Phi_b                       # remove block
+                E = E - mx.sum(Rb_old, axis=1, keepdims=True) * Pr_g[None, :]
+                omega = mx.power((E + 1e-12) / (O + 1e-12), theta)
+                dist = 2.0 * (1.0 - Y @ Z_norm[bg].T)        # K × |blk|
+                Rb = mx.exp(-dist / sigma) * (omega @ Phi_b.T)
+                Rb = Rb / (mx.sum(Rb, axis=0, keepdims=True) + 1e-12)
+                R = R.at[:, bg].add(Rb - Rb_old)             # write block
+                O = O + Rb @ Phi_b                           # add block back
+                E = E + mx.sum(Rb, axis=1, keepdims=True) * Pr_g[None, :]
             mx.eval(R, O, E)
-            if shift < tol_clustering:
+            if float(mx.mean(mx.abs(R - R_prev)).item()) < tol_clustering:
                 break
 
         # ---- correction: per-cluster ridge regression removing batch shift ----
