@@ -29,7 +29,7 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 | regress_out | ✅ preprocess.py (OLS residuals; corr 1.0 vs scanpy) |
 | normalize_pearson_residuals | ✅ preprocess.py (corr 1.0, max_diff 7e-7 vs scanpy) |
 | harmony_integrate | 🟡 integration.py `harmonize` (port of harmony-pytorch: cosine soft-kmeans + O/E diversity penalty + per-cluster ridge correction; matmuls on MLX, ridge solves numpy fp64). WORKS — synthetic 2-batch/2-bio: batch_sep 6.0→2.17, bio_sep 8.0→7.94 (biology preserved). ⚠ batch mixing only partial (0→0.08) — likely needs block-STOCHASTIC clustering updates (I used full-batch) and/or tuning; verify vs harmonypy at validation. |
-| scrublet / scrublet_simulate_doublets | ⬜ Batch 4 (sim doublets + kNN density) |
+| scrublet / scrublet_simulate_doublets | ✅ preprocess.py (sim doublets + combined PCA/kNN; doublet-score AUC 0.96 on injected) |
 | neighbors | ✅ |
 | bbknn | ✅ neighbors.py (per-batch GPU KNN combined + UMAP fuzzy graph). Validated: forces 50/50 cross-batch neighbors (balanced) while keeping same-bio 100% |
 
@@ -43,7 +43,7 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 | rank_genes_groups | ✅ tools.py (t-test; t-stat corr 0.993 vs scanpy; ⚠ marker-overlap 0.54, scanpy overestim_var/p-tiebreak not matched) |
 | tsne | ⬜ Batch 3+ (fft/BH — hard) |
 | diffmap | ✅ tools.py (eigsh of symmetric transition; eigvals 1.0→0.97 on PBMC) |
-| draw_graph | ⬜ Batch 3+ (ForceAtlas2 — like umap layout) |
+| draw_graph | ✅ tools.py (FA2-style force layout on MLX; cluster-preservation 1.0) |
 
 ## gr (squidpy spatial) — high value for the user's Xenium work
 | fn | status |
