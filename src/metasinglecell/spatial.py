@@ -105,15 +105,20 @@ def ligrec(X, labels, lr_pairs, var_names, n_perms: int = 100,
             "lr_pairs": [(lr_pairs[i]) for i in range(len(pairs))]}
 
 
-def co_occurrence(coords, labels, n_intervals: int = 50, max_dist=None) -> dict:
-    """Distance-binned cluster co-occurrence ratio (squidpy ``gr.co_occurrence``).
+def co_occurrence(coords, labels, n_intervals: int = 50, interval=None,
+                  max_dist=None) -> dict:
+    """Cumulative cluster co-occurrence ratio (squidpy ``gr.co_occurrence``).
 
-    For each distance interval, the conditional probability P(type j | type i at
-    distance) divided by the unconditional P(type j) — values > 1 mean enrichment.
-    Pairwise distances are computed on the GPU; counts per (i, j, bin) via one-hot
-    matmuls. O(n²) memory, so suited to moderate n (tile for very large sections).
+    Matches squidpy's definition exactly: for each distance threshold the pairs
+    *within* that radius are counted (cumulative, ``d <= threshold``), and the
+    enrichment of type i around type c is ``P(i | c, within r) / P(i)``. Pairwise
+    distances are computed on the GPU; cumulative counts per (i, j, threshold) via
+    one-hot matmuls. O(n²) memory, so suited to moderate n (tile for large sections).
 
-    Returns ``occ`` of shape (K, K, n_intervals) and the interval edges.
+    ``interval`` may be an explicit ascending array of distance thresholds (as
+    squidpy stores in ``uns[...]['interval']``); otherwise ``n_intervals`` evenly
+    spaced thresholds are built (squidpy-style, from the min nonzero to max distance).
+    Returns ``occ`` of shape (K, K, len(thresholds)-1) and the thresholds.
     """
     import mlx.core as mx
 
@@ -122,29 +127,41 @@ def co_occurrence(coords, labels, n_intervals: int = 50, max_dist=None) -> dict:
     cats = np.unique(labels)
     code = np.searchsorted(cats, labels).astype(np.int32)
     K = len(cats)
-    n = X.shape[0]
 
     sq = mx.sum(X * X, axis=1)
     D2 = mx.maximum(sq[:, None] + sq[None, :] - 2.0 * (X @ X.T), 0.0)
-    D = mx.sqrt(D2)
-    mx.eval(D)
-    Dnp = np.asarray(D)
-    if max_dist is None:
-        max_dist = float(np.percentile(Dnp[Dnp > 0], 95))
-    edges = np.linspace(0, max_dist, n_intervals + 1)
+    mx.eval(D2)
+    D2np = np.asarray(D2)
+
+    if interval is not None:
+        thr = np.asarray(interval, dtype=np.float64)
+    else:
+        d = np.sqrt(D2np[D2np > 0])
+        if max_dist is None:
+            max_dist = float(d.max())
+        thr = np.linspace(float(d.min()), max_dist, n_intervals + 1)
+    thr2 = thr[1:] ** 2                                             # squidpy: skip first
+    L = len(thr2)
 
     onehot = mx.array((code[:, None] == np.arange(K)[None, :]).astype(np.float32))  # n×K
-    p_uncond = np.bincount(code, minlength=K) / n
+    np.fill_diagonal(D2np, np.inf)                                  # exclude self-pairs
 
-    occ = np.zeros((K, K, n_intervals))
-    for b in range(n_intervals):
-        mask = mx.array(((Dnp >= edges[b]) & (Dnp < edges[b + 1])).astype(np.float32))
-        # pair counts per (cat_i, cat_j): onehot.T @ mask @ onehot
-        cnt = np.asarray(onehot.T @ (mask @ onehot))                # K×K
-        row = cnt.sum(axis=1, keepdims=True)
-        cond = cnt / np.maximum(row, 1e-12)                         # P(j | i, bin)
-        occ[:, :, b] = cond / np.maximum(p_uncond[None, :], 1e-12)
-    return {"occ": occ, "interval": edges, "categories": cats}
+    # counts[a, b, r] = # ordered pairs (type a, type b) within threshold r (cumulative)
+    counts = np.zeros((K, K, L))
+    for r in range(L):
+        mask = mx.array((D2np <= thr2[r]).astype(np.float32))
+        counts[:, :, r] = np.asarray(onehot.T @ (mask @ onehot))    # K×K, symmetric
+
+    # squidpy conditional normalization (counts symmetric in the ordered sum)
+    row_sums = counts.sum(axis=0)                                   # (K, L)
+    totals = row_sums.sum(axis=0)                                   # (L,)
+    occ = np.zeros((K, K, L))
+    for r in range(L):
+        probs = row_sums[:, r] / np.maximum(totals[r], 1e-12)       # marginal P(type)
+        for c in range(K):
+            if row_sums[c, r] != 0.0:
+                occ[:, c, r] = (counts[c, :, r] / row_sums[c, r]) / np.maximum(probs, 1e-12)
+    return {"occ": occ, "interval": thr, "categories": cats}
 
 
 def _spmm_scatter(src, dst, w, Xc):
@@ -171,7 +188,6 @@ def spatial_autocorr(X, connectivity, mode: str = "moran", n_perms: int = 100,
     w = mx.array(coo.data.astype(np.float32))
     W_sum = float(coo.data.sum())
     n = X.shape[0]
-    deg = mx.array(np.asarray(connectivity.sum(axis=1)).ravel().astype(np.float32))
 
     Xg = mx.array(np.asarray(X, dtype=np.float32))
 
@@ -182,9 +198,10 @@ def spatial_autocorr(X, connectivity, mode: str = "moran", n_perms: int = 100,
         if mode == "moran":
             num = mx.sum(Xc * _spmm_scatter(src, dst, w, Xc), axis=0)
             return (n / W_sum) * num / denom
-        # Geary's C: sum_ij w_ij (x_i - x_j)^2 = 2(sum_i d_i x_i^2 - sum_i x_i (Wx)_i)
-        num = 2.0 * (mx.sum(deg[:, None] * Xmat * Xmat, axis=0)
-                     - mx.sum(Xmat * _spmm_scatter(src, dst, w, Xmat), axis=0))
+        # Geary's C: sum_ij w_ij (x_i - x_j)^2, summed directly over the edge list
+        # (exact for any graph, no symmetry assumption).
+        de = Xmat[src] - Xmat[dst]
+        num = mx.sum(w[:, None] * de * de, axis=0)
         return (n - 1) / (2.0 * W_sum) * num / denom
 
     obs = stat(Xg)
