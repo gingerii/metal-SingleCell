@@ -30,6 +30,81 @@ def spatial_neighbors(coords, n_neighs: int = 6):
     return A.tocsr()
 
 
+def calculate_niche(connectivity, labels, n_niches: int = 10,
+                    random_state: int = 0) -> dict:
+    """Spatial niches from neighborhood composition (squidpy ``gr.calculate_niche``).
+
+    For each cell, the cell-type composition of its spatial neighborhood (W·onehot,
+    row-normalized, via scatter-SpMM on the GPU), then cluster those composition
+    vectors (k-means) into ``n_niches`` niches. Returns niche labels + compositions.
+    """
+    import mlx.core as mx
+    import scipy.sparse as sp
+
+    from .tools import kmeans
+
+    labels = np.asarray(labels)
+    cats = np.unique(labels)
+    code = np.searchsorted(cats, labels).astype(np.int32)
+    onehot = mx.array((code[:, None] == np.arange(len(cats))[None, :]).astype(np.float32))
+
+    coo = sp.coo_matrix(connectivity)
+    comp = _spmm_scatter(mx.array(coo.row.astype(np.int32)),
+                         mx.array(coo.col.astype(np.int32)),
+                         mx.array(coo.data.astype(np.float32)), onehot)
+    comp = comp / (mx.sum(comp, axis=1, keepdims=True) + 1e-12)
+    mx.eval(comp)
+    comp = np.asarray(comp)
+    niches = kmeans(comp, n_clusters=n_niches, random_state=random_state)
+    return {"niche": niches, "composition": comp, "categories": cats}
+
+
+def ligrec(X, labels, lr_pairs, var_names, n_perms: int = 100,
+           random_state: int = 0) -> dict:
+    """Ligand-receptor interaction permutation test (squidpy ``gr.ligrec``).
+
+    CellPhoneDB-style: for each L-R pair and ordered cluster pair (A, B), the score
+    is the mean of (ligand mean in A, receptor mean in B). A permutation null
+    (shuffling cluster labels) gives one-sided p-values. Cluster means are computed
+    on the GPU by scatter-add over the label. ``lr_pairs`` is a list of
+    (ligand_gene, receptor_gene) symbol pairs.
+    """
+    import mlx.core as mx
+
+    Xd = np.asarray(X.todense() if hasattr(X, "todense") else X, dtype=np.float32)
+    Xg = mx.array(Xd)
+    n, n_genes = Xg.shape
+    labels = np.asarray(labels)
+    cats = np.unique(labels)
+    K = len(cats)
+    name_to_idx = {g: i for i, g in enumerate(np.asarray(var_names).astype(str))}
+    pairs = [(name_to_idx[l], name_to_idx[r]) for l, r in lr_pairs
+             if l in name_to_idx and r in name_to_idx]
+    lig = np.array([p[0] for p in pairs]); rec = np.array([p[1] for p in pairs])
+
+    def cluster_means(code):
+        gsum = mx.zeros((K, n_genes), dtype=mx.float32).at[mx.array(code)].add(Xg)
+        ng = np.bincount(code, minlength=K).astype(np.float32)
+        return np.asarray(gsum) / np.maximum(ng[:, None], 1.0)
+
+    def score(means):                                   # (n_pairs, K_A, K_B)
+        L = means[:, lig].T                             # n_pairs × K (ligand in A)
+        R = means[:, rec].T                             # n_pairs × K (receptor in B)
+        return 0.5 * (L[:, :, None] + R[:, None, :])
+
+    code = np.searchsorted(cats, labels).astype(np.int32)
+    obs = score(cluster_means(code))
+
+    rng = np.random.default_rng(random_state)
+    count = np.zeros_like(obs)
+    for _ in range(n_perms):
+        count += score(cluster_means(rng.permutation(code))) >= obs
+    pval = (count + 1.0) / (n_perms + 1.0)
+
+    return {"means": obs, "pvalues": pval, "categories": cats,
+            "lr_pairs": [(lr_pairs[i]) for i in range(len(pairs))]}
+
+
 def co_occurrence(coords, labels, n_intervals: int = 50, max_dist=None) -> dict:
     """Distance-binned cluster co-occurrence ratio (squidpy ``gr.co_occurrence``).
 
