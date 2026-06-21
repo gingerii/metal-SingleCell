@@ -187,7 +187,7 @@ def _knn_ivf(X, k, nlist=None, nprobe=5, seed=0):
     np.add.at(cent, lab, X); cent /= np.maximum(cnt[:, None], 1)
     cg = mx.array(cent)
     cd = mx.sum(Xg * Xg, 1)[:, None] + mx.sum(cg * cg, 1)[None, :] - 2 * (Xg @ cg.T)
-    probe = np.asarray(mx.argpartition(cd, kth=nprobe, axis=1)[:, :nprobe])
+    probe = np.asarray(mx.argpartition(cd, kth=min(nprobe, nlist - 1), axis=1)[:, :nprobe])
 
     order = np.argsort(lab, kind="stable"); sl = lab[order]
     st = np.searchsorted(sl, np.arange(nlist)); en = np.searchsorted(sl, np.arange(nlist), side="right")
