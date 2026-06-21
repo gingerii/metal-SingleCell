@@ -49,14 +49,28 @@ def _center_gpu(X: np.ndarray):
 
 
 def pca(
-    X: np.ndarray,
+    X,
     n_comps: int = 50,
     solver: str = "randomized",
     random_state: int = 0,
     n_oversamples: int = 10,
     n_iter: int = 7,
 ):
-    """Principal component analysis. See module docstring for solver semantics."""
+    """Principal component analysis. See module docstring for solver semantics.
+
+    ``X`` may be a dense array OR a ``sparse.CSR``. For a CSR the randomized solver
+    runs **sparse-aware**: implicit mean-centering (zero_center=True) with a Metal
+    SpMM range-finder, never densifying — this is the scalable atlas path (matches
+    ``rapids-singlecell``/scanpy PCA on sparse lognorm). Scaling (z-scoring) is the
+    dense path on purpose, since z-scoring destroys sparsity.
+    """
+    from .sparse import CSR
+
+    if isinstance(X, CSR):
+        if solver != "randomized":
+            raise ValueError("CSR input supports solver='randomized' only (sparse path)")
+        return _pca_randomized_sparse(X, n_comps, random_state, n_oversamples, n_iter)
+
     n_samples = X.shape[0]
     Xc = _center_gpu(X)
 
@@ -81,6 +95,20 @@ def pca(
     return _finalize(U, S, Vt, n_samples, n_comps, total_var)
 
 
+def _ortho(Z):
+    """Gram-matrix orthonormalization ``Z(ZᵀZ)^{-1/2}`` (GPU matmuls + tiny host eigh).
+
+    Replaces a CPU QR (MLX has no GPU QR): the tall n×size work stays on the GPU and
+    only a size×size eigendecomposition touches the host — the range-finder's hot path.
+    """
+    import mlx.core as mx
+
+    G = Z.T @ Z                                       # size × size (GPU)
+    w, V = mx.linalg.eigh(G, stream=mx.cpu)           # tiny eigendecomposition
+    inv_sqrt = V @ (mx.diag(1.0 / mx.sqrt(mx.maximum(w, 1e-12))) @ V.T)
+    return Z @ inv_sqrt                               # orthonormal columns (GPU)
+
+
 def _pca_randomized(Xc, n_samples: int, n_comps: int, random_state: int,
                     n_oversamples: int, n_iter: int):
     """Randomized SVD: GPU matmuls (fp32) + fp64 core SVD of the projection."""
@@ -90,16 +118,6 @@ def _pca_randomized(Xc, n_samples: int, n_comps: int, random_state: int,
     size = n_comps + n_oversamples
     n_features = Xc.shape[1]
     Q = mx.array(rng.normal(size=(n_features, size)).astype(np.float32))
-
-    # Range finder. The orthonormalization in each power iteration uses the Gram
-    # matrix (Q := Z(ZᵀZ)^{-1/2}) instead of QR: the tall n×size work stays as GPU
-    # matmuls and only a tiny size×size eigh runs on host — ~10× cheaper than the
-    # CPU QR MLX would otherwise force (MLX has no GPU QR), and the dominant cost.
-    def _ortho(Z):
-        G = Z.T @ Z                                       # size × size (GPU)
-        w, V = mx.linalg.eigh(G, stream=mx.cpu)           # tiny eigendecomposition
-        inv_sqrt = V @ (mx.diag(1.0 / mx.sqrt(mx.maximum(w, 1e-12))) @ V.T)
-        return Z @ inv_sqrt                               # orthonormal columns (GPU)
 
     for _ in range(n_iter):
         Q = _ortho(Xc @ Q)                                # n × size
@@ -114,3 +132,43 @@ def _pca_randomized(Xc, n_samples: int, n_comps: int, random_state: int,
     U = np.asarray(Q).astype(np.float64) @ Uhat
     total_var = np.asarray(Xc).astype(np.float64).var(axis=0, ddof=1).sum()
     return _finalize(U, S, Vt, n_samples, n_comps, total_var)
+
+
+def _pca_randomized_sparse(csr, n_comps: int, random_state: int,
+                           n_oversamples: int, n_iter: int):
+    """Sparse-aware randomized PCA with implicit mean-centering (no densify).
+
+    The centered matrix is ``Xc = X - 1·μᵀ`` (μ = column means). Every product with
+    ``Xc`` is the sparse product with ``X`` (GPU SpMM kernel) plus a rank-1 correction,
+    so X is never densified and the lognorm sparsity is preserved end-to-end:
+        ``Xc·Q  = X·Q  − 1·(μᵀQ)``           (subtract μ·Q from every row)
+        ``Xcᵀ·Q = Xᵀ·Q − μ·(1ᵀQ)``           (subtract outer(μ, colsum Q))
+    """
+    import mlx.core as mx
+
+    n, f = csr.shape
+    size = n_comps + n_oversamples
+    mean, var = csr.col_moments()                         # μ and per-gene variance (GPU)
+    mu = mean                                             # (f,)
+
+    rng = np.random.RandomState(random_state)
+    Q = mx.array(rng.normal(size=(f, size)).astype(np.float32))
+
+    def AQ(Qf):                                           # Xc · Qf : (f,size) -> (n,size)
+        return csr.spmm(Qf) - (mu @ Qf)[None, :]
+
+    def ATQ(Qn):                                          # Xcᵀ · Qn : (n,size) -> (f,size)
+        return csr.spmm_t(Qn) - mu[:, None] * mx.sum(Qn, axis=0)[None, :]
+
+    for _ in range(n_iter):
+        Q = _ortho(AQ(Q))                                 # n × size
+        Q = _ortho(ATQ(Q))                                # f × size
+    Q = _ortho(AQ(Q))                                     # n × size (range basis)
+
+    B = ATQ(Q).T                                          # (size × f) = Qᵀ Xc
+    mx.eval(B, Q)
+
+    Uhat, S, Vt = np.linalg.svd(np.asarray(B).astype(np.float64), full_matrices=False)
+    U = np.asarray(Q).astype(np.float64) @ Uhat
+    total_var = float(np.asarray(mx.sum(var)))
+    return _finalize(U, S, Vt, n, n_comps, total_var)

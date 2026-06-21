@@ -25,7 +25,7 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 | normalize_total / log1p | ✅ CSR methods |
 | highly_variable_genes | ✅ ALL flavors: seurat / cell_ranger (log-norm) / seurat_v3 (raw) / pearson_residuals (raw, EXACT 2000/2000 vs scanpy). cell_ranger 0.62 overlap (binning deltas); seurat_v3 lowess approximate (skmisc unavailable). |
 | scale | ✅ |
-| pca | ✅ (full/arpack/randomized) |
+| pca | ✅ (full/arpack/randomized; dense OR sparse.CSR input). CSR → sparse-aware randomized PCA: implicit mean-centering (zero_center) via Metal CSR×dense SpMM kernel (`sparse.spmm`/`CSR.spmm`/`spmm_t`), NO densify. Subspace overlap 1.0 vs sklearn, 2× faster than dense @104k, runs at full 2M where dense OOMs (~32GB). Scaling stays dense on purpose (z-score destroys sparsity). |
 | regress_out | ✅ preprocess.py (OLS residuals; corr 1.0 vs scanpy) |
 | normalize_pearson_residuals | ✅ preprocess.py (corr 1.0, max_diff 7e-7 vs scanpy) |
 | harmony_integrate | ✅ integration.py `harmonize` (harmony-pytorch port: cosine soft-kmeans + O/E diversity penalty + ridge correction). BLOCK-STOCHASTIC clustering -> batch_sep 6.0→0.55 (removed), mixing 0→0.42 (~ideal 0.5), bio_sep 8.0→7.92 (preserved). Verify vs harmonypy at validation. |
@@ -83,8 +83,9 @@ Drivers in `validation_notebooks/`: `v_realdata.py` (PBMC3k), `v_realspatial.py`
   spatial_neighbors Jaccard 0.97 (Visium grid) / 0.76 (irregular Xenium coords).
 - **2M-cell scale**: real Xenium normalize+log1p+HVG on 2,035,266 × 5,101 in **3.9s, no OOM**.
 - **HARDWARE boundary**: full 1.3M × 27,998 neuron counts (~16GB, ~1.5B nnz) OOMs the 24GB M3 even
-  sparse; dense `scale`→`pca` path caps ~500k–1M on-laptop. True hardware limit (runs on 40–80GB GPU).
-  IMPLEMENTATION fix flagged: sparse-aware GPU randomized PCA (no densify) would raise the ceiling.
+  sparse; the 28k-gene full atlas is a true hardware limit (runs on 40–80GB GPU). The dense
+  `scale`→`pca` path caps ~500k–1M on-laptop, BUT the sparse-aware PCA (see pca row) now runs at
+  full 2M on the lognorm — the prior implementation limit on this path is LIFTED.
 - **Two bugs only real data exposed**: Geary's-C symmetric-identity (wrong on asymmetric W) → edge-sum;
   co_occurrence disjoint-bins → squidpy cumulative `d≤thr`. Both now exact. See `RESULTS_v_real*.md`.
 
