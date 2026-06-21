@@ -20,4 +20,16 @@ Accuracy vs scanpy/sklearn on the same data.
 3. **hvg_seurat / pca_randomized**: only ~1.4–1.8×. Implementation-bound (HVG host binning + CSC
    build; PCA QR-on-CPU + host round-trips). Secondary optimization targets.
 
-Next: replace brute-force KNN with a GPU approximate-NN, then revisit hvg/pca.
+## KNN resolution — a hardware/workload finding
+Investigated a GPU NN-descent (added reverse neighbors, tiled distances). It reached recall
+~0.7–0.9 but stayed **5–15× slower than sklearn/pynndescent** on M3. Root cause: d≈50 PCA
+embeddings are low-dim + the workload is irregular/memory-bound — exactly where CPU KD-trees and
+pynndescent excel and the M3 GPU has **no advantage** (its strength is dense regular compute). This
+is a legitimate "the hardware doesn't favor GPU here" result; **not every op GPU-accelerates on M3**.
+
+**Decision** (consistent with "optimize until hardware-limited"): `neighbors()` uses exact GPU
+brute-force for small n (fast + exact there) and **pynndescent — scanpy's own default — for n>30k**
+(fast, scales to millions, matches scanpy exactly). The GPU NN-descent stays as `_knn_descent` for
+the record. KNN is therefore parity-with-scanpy (CPU), not a GPU win.
+
+Next: revisit hvg/pca (~1.4×) optimization; then scale the sweep to 1M/2M (now feasible — no O(n²)).
