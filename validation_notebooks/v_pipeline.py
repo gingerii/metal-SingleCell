@@ -96,12 +96,14 @@ def main():
         cpu = _best(lambda: randomized_svd(Xc, 50, n_iter=7, random_state=0), repeats=1)
         add("pca_randomized", n, gpu, cpu, "(seeded)")
 
-        # KNN (brute-force GPU vs sklearn)
+        # KNN: our neighbors() uses exact GPU brute-force for small n, pynndescent
+        # (scanpy's own default) for large n — the M3 GPU does not win this workload.
+        from metasinglecell.neighbors import neighbors as _nbrs
         emb = X[:, :50].astype(np.float32)
         from sklearn.neighbors import NearestNeighbors
-        gpu = _best(lambda: _knn_gpu(emb, 15))
+        gpu = _best(lambda: _nbrs(emb, n_neighbors=15)[0], repeats=1)
         cpu = _best(lambda: NearestNeighbors(n_neighbors=15).fit(emb).kneighbors(emb), repeats=1)
-        add("knn", n, gpu, cpu, "(exact)")
+        add("knn(ours)", n, gpu, cpu, "brute<30k/pynndescent")
 
     path = validation.write_report(records, "validation", "v_pipeline.csv")
     neg = [r for r in records if r["speedup"] < 1.0]

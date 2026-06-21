@@ -101,7 +101,72 @@ def bbknn(X_pca: np.ndarray, batch, neighbors_within_batch: int = 3,
     return distances, conn.tocsr()
 
 
-def neighbors(X_pca: np.ndarray, n_neighbors: int = 15, random_state: int = 0):
+def _knn_descent(X, k, n_iters: int = 8, seed: int = 0, tile: int = 20000):
+    """Approximate k-NN via NN-descent (GPU distances, tiled). Returns (idx, dist).
+
+    Brute-force k-NN is O(n²) and loses to tree methods past ~30k cells. NN-descent
+    starts from random neighbors and refines using neighbors-of-neighbors — O(n·k²)
+    per iteration — converging to a high-recall graph. The candidate distance
+    computation (gather + norm) runs on the GPU in node tiles.
+    """
+    import mlx.core as mx
+
+    X = np.asarray(X, dtype=np.float32)
+    n = X.shape[0]
+    Xg = mx.array(X)
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, n, size=(n, k)).astype(np.int32)
+
+    def tile_dists(nodes, cand):
+        """Squared distances from each node to its candidate columns (block × m)."""
+        out = np.empty(cand.shape, dtype=np.float32)
+        for s in range(0, nodes.size, tile):
+            nb = nodes[s:s + tile]
+            cb = cand[s:s + tile]
+            Xc = Xg[mx.array(cb.ravel())].reshape(nb.size, cb.shape[1], -1)
+            diff = Xc - Xg[mx.array(nb)][:, None, :]
+            out[s:s + tile] = np.asarray(mx.sum(diff * diff, axis=2))
+        return out
+
+    import scipy.sparse as sp
+
+    nodes = np.arange(n, dtype=np.int32)
+    dist = tile_dists(nodes, idx)
+    src = np.repeat(nodes, k)
+    for _ in range(n_iters):
+        # candidates = current ∪ neighbors-of-neighbors ∪ reverse-neighbors.
+        # Reverse neighbors (who points to me) are essential for recall.
+        nn_of_nn = idx[idx.reshape(-1)].reshape(n, k * k)
+        GT = sp.csr_matrix((np.ones(n * k, np.int8), (idx.ravel(), src)), shape=(n, n))
+        ind, ptr = GT.indices, GT.indptr                          # reverse adjacency
+        deg = np.diff(ptr)
+        pos = np.arange(ind.size) - np.repeat(ptr[:-1], deg)       # position within row
+        m = pos < k                                               # keep first k per node
+        rev = np.full((n, k), -1, np.int32)
+        rev[np.repeat(np.arange(n), deg)[m], pos[m]] = ind[m]     # vectorized first-k reverse
+        cand = np.concatenate([idx, nn_of_nn, rev], axis=1)
+        cand[cand == nodes[:, None]] = -1                          # drop self
+        cd = tile_dists(nodes, np.where(cand < 0, 0, cand))
+        cd[cand < 0] = np.inf
+        # dedup: for each row keep the first occurrence of each index
+        order = np.argsort(cd, axis=1)
+        cand_s = np.take_along_axis(cand, order, axis=1)
+        cd_s = np.take_along_axis(cd, order, axis=1)
+        dup = np.zeros_like(cand_s, dtype=bool)
+        dup[:, 1:] = cand_s[:, 1:] == cand_s[:, :-1]
+        cd_s[dup] = np.inf
+        keep = np.argsort(cd_s, axis=1)[:, :k]
+        new_idx = np.take_along_axis(cand_s, keep, axis=1).astype(np.int32)
+        new_dist = np.take_along_axis(cd_s, keep, axis=1)
+        if np.array_equal(new_idx, idx):
+            idx, dist = new_idx, new_dist
+            break
+        idx, dist = new_idx, new_dist
+    return idx, np.sqrt(np.maximum(dist, 0.0))
+
+
+def neighbors(X_pca: np.ndarray, n_neighbors: int = 15, random_state: int = 0,
+              approx: bool | None = None):
     """Compute distance + connectivity graphs from a PCA embedding.
 
     Returns ``(distances, connectivities)`` as scipy CSR matrices, matching
@@ -112,7 +177,20 @@ def neighbors(X_pca: np.ndarray, n_neighbors: int = 15, random_state: int = 0):
     from umap.umap_ import fuzzy_simplicial_set
 
     n = X_pca.shape[0]
-    knn_indices, knn_dists = _knn_gpu(X_pca, n_neighbors)
+    # KNN is the one front-end step the M3 GPU does NOT win: d≈50 embeddings are
+    # low-dim + irregular, exactly where CPU KD-trees / NN-descent excel and the
+    # GPU has no edge (validated: our GPU KNN is ~5-15x SLOWER than sklearn/
+    # pynndescent). So: exact GPU brute-force for small n (fast + exact there);
+    # pynndescent (scanpy's own default, scales to millions) for large n.
+    if approx is None:
+        approx = n > 30_000
+    if approx:
+        from pynndescent import NNDescent
+        index = NNDescent(np.asarray(X_pca, dtype=np.float32), n_neighbors=n_neighbors,
+                          random_state=random_state)
+        knn_indices, knn_dists = index.neighbor_graph
+    else:
+        knn_indices, knn_dists = _knn_gpu(X_pca, n_neighbors)
 
     # UMAP fuzzy simplicial set — same call scanpy uses for method="umap".
     conn = fuzzy_simplicial_set(
