@@ -49,4 +49,39 @@ Profiling pinpointed host bottlenecks; both fixed, accuracy preserved:
 | pca_randomized | 2.5× | 2.8× | 2.6× | exact (overlap 1.0) |
 | knn | (pynndescent, parity w/ scanpy — M3 GPU doesn't win this workload) | | | |
 
-Next: scale the sweep to 1M/2M (now feasible — no O(n²)); revisit clustering/umap at scale.
+## At scale (1M cells) — 0 negative speedups
+| op | 1M speedup | accuracy |
+|----|-----------|----------|
+| normalize+log1p | **49×** | exact (r=1.0) |
+| hvg_seurat | **42×** | overlap 0.994 |
+| pca_randomized | 1.48× | exact |
+| knn (pynndescent) | **9×** vs sklearn (38s vs 347s) | — |
+
+- **Sparse front-end gets *better* at scale** (40–49×) — the scatter/elementwise kernels dominate
+  the cheap CPU loops more as n grows.
+- **pynndescent at 1M crushes sklearn KD-tree** (9×) — confirms KNN should use it at scale.
+- **PCA dropped 2.6×→1.48× at 1M**: the dense host→GPU upload (1M×1000×4 ≈ 4GB) per call now
+  dominates; in a real pipeline the data is already on-GPU. Pipeline-integration follow-up (accept
+  MLX arrays to avoid re-upload); still positive.
+
+## At 2M cells (memory-guarded; prohibitive CPU baselines skipped)
+| op | 2M | accuracy / note |
+|----|----|-----------------|
+| normalize+log1p | **56×** | exact (acc check subsampled) |
+| hvg_seurat | **50×** | overlap 0.990 |
+| pca_randomized | 43s (CPU prohibitive) | exact; dense 8GB upload dominates |
+| knn (pynndescent) | 70s (sklearn prohibitive) | scales to 2M |
+
+Sparse front-end scales perfectly to 2M (50–56×). PCA/KNN ran without OOM. The whole sweep ran on
+the M3 within unified memory (dense PCA bounded to a 1000-gene HVG subset).
+
+## Summary across the size sweep (the validation verdict)
+- **normalize/log1p, hvg = the headline GPU wins**: 3× small → **40–56× at 1–2M**, exact/near-exact.
+  Our scatter/elementwise sparse kernels are genuinely GPU-bound and scale.
+- **pca = positive but upload-bound at scale** (2.6×@100k → 1.48×@1M → 43s@2M). Exact. The dense
+  host→GPU upload per call dominates; keep data on-GPU across the pipeline to fix (integration TODO).
+- **knn = CPU-favored on M3** → pynndescent (scanpy's default); 9× faster than sklearn at 1M, scales.
+- **0 negative speedups** at 1M after the hvg/pca optimizations.
+
+Remaining validation: end-to-end pipeline (incl. clustering/umap) at scale; then per-function accuracy
+on PBMC vs scanpy for the full function set (the rapids-api parity gaps).

@@ -1,0 +1,5 @@
+accuracy,cpu_s,gpu_s,n,op,speedup
+r=nan,1.4113,0.0253,2000000,normalize+log1p,55.86
+overlap=0.990,1.8676,0.0377,2000000,hvg_seurat,49.5
+(seeded),nan,43.0419,2000000,pca_randomized,nan
+brute<30k/pynndescent,nan,70.35,2000000,knn(ours),nan
