@@ -59,6 +59,12 @@ limit is the **hardware, not our implementation**.
 * **Dataset sweep**: PBMC3k (real, ~2.7K), then **10K, 50K, 100K, 1M, 2M cells**. Larger sizes are
   synthesized (replicate/sample real cells or realistic sparse counts ~6–7% density) so they are
   reproducible; accuracy is anchored on sizes where a scanpy/sklearn CPU reference is computable.
+* **MUST test on REAL data too, not only simulations.** Synthetic counts are random/structureless,
+  which is a *worst case* for structure-dependent ops (clustering can't converge → misleadingly slow;
+  KNN/UMAP recall pessimistic). Every speed/accuracy claim must be re-confirmed on real datasets
+  (e.g. PBMC3k/68k, a 10x 1.3M-neuron subset, or a Xenium section) — especially clustering, neighbors,
+  UMAP, HVG, where synthetic data distorts results. Treat synthetic numbers as provisional until
+  reproduced on real data.
 * **Accuracy**: compare each GPU function to its scanpy/sklearn CPU reference on the *same* data,
   using the per-function metric + tolerance from the `rapids-api` skill (exact where deterministic;
   fp32 tolerance otherwise; structure/ARI/correlation for stochastic methods). Record max-abs/rel
