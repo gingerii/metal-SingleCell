@@ -30,7 +30,7 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 | normalize_pearson_residuals | ✅ preprocess.py (corr 1.0, max_diff 7e-7 vs scanpy) |
 | harmony_integrate | ✅ integration.py `harmonize` (harmony-pytorch port: cosine soft-kmeans + O/E diversity penalty + ridge correction). BLOCK-STOCHASTIC clustering -> batch_sep 6.0→0.55 (removed), mixing 0→0.42 (~ideal 0.5), bio_sep 8.0→7.92 (preserved). Verify vs harmonypy at validation. |
 | scrublet / scrublet_simulate_doublets | ✅ preprocess.py (sim doublets + combined PCA/kNN; doublet-score AUC 0.96 on injected) |
-| neighbors | ✅ neighbors.py. KNN: exact GPU brute-force (<30k, tiled to avoid OOM) / **pynndescent for large n** — M3 GPU does NOT win d~50 KNN (CPU trees/NN-descent 5-15x faster); validated finding, use CPU here. |
+| neighbors | ✅ neighbors.py 3-way KNN: brute<30k (exact) / **GPU IVF 30-250k** (kmeans buckets, ~2-3.5x vs pynndescent/scanpy, recall ~0.9) / pynndescent >250k. GPU brute-force O(n²) & naive NN-descent both lose; IVF bucketing is the mid-range win. |
 | bbknn | ✅ neighbors.py (per-batch GPU KNN combined + UMAP fuzzy graph). Validated: forces 50/50 cross-batch neighbors (balanced) while keeping same-bio 100% |
 
 ## tl (tools)

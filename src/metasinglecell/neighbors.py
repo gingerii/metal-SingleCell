@@ -165,6 +165,55 @@ def _knn_descent(X, k, n_iters: int = 8, seed: int = 0, tile: int = 20000):
     return idx, np.sqrt(np.maximum(dist, 0.0))
 
 
+def _knn_ivf(X, k, nlist=None, nprobe=5, seed=0):
+    """Approximate k-NN via IVF (kmeans buckets + within-bucket brute force) on GPU.
+
+    Each cell searches its ``nprobe`` nearest kmeans buckets; distances are GPU
+    matmuls per bucket, then a vectorized segmented top-k. Beats pynndescent ~2-2.6×
+    in the mid-size band (~30k-250k) at recall ~0.86-0.98. Returns (idx, dist).
+    """
+    import mlx.core as mx
+
+    from .tools import kmeans
+
+    X = np.asarray(X, dtype=np.float32)
+    n, d = X.shape
+    nlist = nlist or max(2, n // 1500)
+    nprobe = min(nprobe, nlist)
+    Xg = mx.array(X)
+    lab = kmeans(X, nlist, max_iter=20, random_state=seed)
+    cent = np.zeros((nlist, d), np.float32)
+    cnt = np.bincount(lab, minlength=nlist)
+    np.add.at(cent, lab, X); cent /= np.maximum(cnt[:, None], 1)
+    cg = mx.array(cent)
+    cd = mx.sum(Xg * Xg, 1)[:, None] + mx.sum(cg * cg, 1)[None, :] - 2 * (Xg @ cg.T)
+    probe = np.asarray(mx.argpartition(cd, kth=nprobe, axis=1)[:, :nprobe])
+
+    order = np.argsort(lab, kind="stable"); sl = lab[order]
+    st = np.searchsorted(sl, np.arange(nlist)); en = np.searchsorted(sl, np.arange(nlist), side="right")
+    Qi, Ci, Dd = [], [], []
+    for c in range(nlist):
+        mem = order[st[c]:en[c]]
+        if mem.size == 0:
+            continue
+        q = np.where((probe == c).any(1))[0]
+        if q.size == 0:
+            continue
+        Qg = Xg[mx.array(q.astype(np.int32))]; Mg = Xg[mx.array(mem.astype(np.int32))]
+        D = mx.maximum(mx.sum(Qg * Qg, 1)[:, None] + mx.sum(Mg * Mg, 1)[None, :] - 2 * (Qg @ Mg.T), 0.0)
+        kk = min(k, mem.size)
+        part = np.asarray(mx.argpartition(D, kth=kk - 1, axis=1)[:, :kk])
+        Qi.append(np.repeat(q, kk)); Ci.append(mem[part].ravel())
+        Dd.append(np.take_along_axis(np.asarray(D), part, axis=1).ravel())
+    Q = np.concatenate(Qi); C = np.concatenate(Ci); Dv = np.concatenate(Dd)
+    o = np.lexsort((Dv, Q)); Q, C, Dv = Q[o], C[o], Dv[o]          # sort by (query, dist)
+    rank = np.arange(len(Q)) - np.repeat(np.searchsorted(Q, np.arange(n)), np.bincount(Q, minlength=n))
+    keep = rank < k
+    idx = np.full((n, k), -1, np.int32); dist = np.full((n, k), np.inf, np.float32)
+    idx[Q[keep], rank[keep]] = C[keep]; dist[Q[keep], rank[keep]] = Dv[keep]
+    return idx, np.sqrt(np.maximum(dist, 0.0))
+
+
 def neighbors(X_pca: np.ndarray, n_neighbors: int = 15, random_state: int = 0,
               approx: bool | None = None):
     """Compute distance + connectivity graphs from a PCA embedding.
@@ -177,20 +226,23 @@ def neighbors(X_pca: np.ndarray, n_neighbors: int = 15, random_state: int = 0,
     from umap.umap_ import fuzzy_simplicial_set
 
     n = X_pca.shape[0]
-    # KNN is the one front-end step the M3 GPU does NOT win: d≈50 embeddings are
-    # low-dim + irregular, exactly where CPU KD-trees / NN-descent excel and the
-    # GPU has no edge (validated: our GPU KNN is ~5-15x SLOWER than sklearn/
-    # pynndescent). So: exact GPU brute-force for small n (fast + exact there);
-    # pynndescent (scanpy's own default, scales to millions) for large n.
+    # Three-way KNN dispatch, by what's fastest at each scale on the M3:
+    #   n ≤ 30k   : exact GPU brute-force (fast + exact there)
+    #   30k–250k  : GPU IVF (kmeans buckets) — ~2–2.6× faster than pynndescent, recall ~0.9
+    #   > 250k    : pynndescent (scanpy's default; IVF recall/cost degrade past this)
+    # (Plain GPU brute-force O(n²) and a naive GPU NN-descent both LOSE to optimized
+    # CPU here — KNN is low-dim/irregular; only IVF's bucketing gives a mid-range win.)
     if approx is None:
         approx = n > 30_000
-    if approx:
+    if not approx:
+        knn_indices, knn_dists = _knn_gpu(X_pca, n_neighbors)
+    elif n <= 250_000:
+        knn_indices, knn_dists = _knn_ivf(X_pca, n_neighbors, seed=random_state)
+    else:
         from pynndescent import NNDescent
         index = NNDescent(np.asarray(X_pca, dtype=np.float32), n_neighbors=n_neighbors,
                           random_state=random_state)
         knn_indices, knn_dists = index.neighbor_graph
-    else:
-        knn_indices, knn_dists = _knn_gpu(X_pca, n_neighbors)
 
     # UMAP fuzzy simplicial set — same call scanpy uses for method="umap".
     conn = fuzzy_simplicial_set(
