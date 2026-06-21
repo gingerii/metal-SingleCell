@@ -72,10 +72,25 @@ rewrote to sum `Σwᵢⱼ(xᵢ−xⱼ)²` directly over edges → exact. (2) co_
    Then: draw_graph, tsne, HVG flavors (cell_ranger/seurat_v3/pearson).
 4. ⬜ pp: harmony_integrate, scrublet, bbknn; gr: ligrec, calculate_niche.
 
+## REAL-DATA validation (done — PBMC + Visium + 1.3M neurons + 2M Xenium)
+Drivers in `validation_notebooks/`: `v_realdata.py` (PBMC3k), `v_realspatial.py` (Visium, squidpy),
+`v_realatlas.py` (10x 1.3M neurons), `v_realxenium.py` (user's 2M Xenium object, READ-ONLY).
+- **pp/tl on real data**: normalize+log1p exact (Δ~1e-6), HVG overlap 1.000, PCA subspace 0.96–0.98,
+  neighbors agreement 0.80–0.98 (IVF recall is dataset-dependent), leiden cluster COUNTS match igraph
+  (ARI 0.59–0.85, RNG floor). Holds across PBMC, neuron atlas, and Xenium.
+- **gr on real spatial (Visium + Xenium, vs squidpy 1.8.2)**: Moran's I & Geary's C **exact** (corr
+  1.0), co_occurrence **exact** (corr 1.0), calculate_niche composition exact (Δ0), ligrec means exact,
+  spatial_neighbors Jaccard 0.97 (Visium grid) / 0.76 (irregular Xenium coords).
+- **2M-cell scale**: real Xenium normalize+log1p+HVG on 2,035,266 × 5,101 in **3.9s, no OOM**.
+- **HARDWARE boundary**: full 1.3M × 27,998 neuron counts (~16GB, ~1.5B nnz) OOMs the 24GB M3 even
+  sparse; dense `scale`→`pca` path caps ~500k–1M on-laptop. True hardware limit (runs on 40–80GB GPU).
+  IMPLEMENTATION fix flagged: sparse-aware GPU randomized PCA (no densify) would raise the ceiling.
+- **Two bugs only real data exposed**: Geary's-C symmetric-identity (wrong on asymmetric W) → edge-sum;
+  co_occurrence disjoint-bins → squidpy cumulative `d≤thr`. Both now exact. See `RESULTS_v_real*.md`.
+
 ## WHERE WE ARE (checkpoint)
 **ALL ~32 rsc pp/tl/gr functions implemented & pushed.** Modules: sparse, preprocess, decomposition,
-neighbors, embedding, cluster, graph/, tools, spatial, integration. Each spot-checked vs scanpy/
-sklearn at build (notes per row). Validation DEFERRED to project end (user's call).
+neighbors, embedding, cluster, graph/, tools, spatial, integration. Validated on real data (above).
 ONLY OPEN ITEMS (refinement/parity, not missing functions):
 - harmony: block-stochastic clustering DONE (mixing 0.42); verify vs harmonypy at validation.
 - parity deltas to revisit: score_genes control sampling, rank_genes_groups ranking (overestim_var),
