@@ -24,16 +24,25 @@ def _knn_gpu(X: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
 
     Xg = mx.array(X.astype(np.float32))
     sq = mx.sum(Xg * Xg, axis=1)
-    # D2[i,j] = |x_i|^2 + |x_j|^2 - 2 x_i·x_j  (squared distance, n x n)
-    D2 = sq[:, None] + sq[None, :] - 2.0 * (Xg @ Xg.T)
-    D2 = mx.maximum(D2, 0.0)
-    idx = mx.argpartition(D2, kth=k, axis=1)[:, :k]  # k smallest (unordered)
-    mx.eval(idx, D2)
-
-    knn_indices = np.asarray(idx)
     n = X.shape[0]
-    d2 = np.asarray(D2)[np.arange(n)[:, None], knn_indices]
-    order = np.argsort(d2, axis=1)  # sort the k by distance, self (0) first
+
+    # Tile over query rows so we never materialize the full n×n distance matrix
+    # (that OOMs the GPU past ~30k cells). Each tile is block×n.
+    block = max(1, min(n, 16_000_000 // max(n, 1)))      # cap tile at ~16M entries
+    idx_parts, d2_parts = [], []
+    for s in range(0, n, block):
+        Xb = Xg[s:s + block]
+        D2 = mx.maximum(mx.sum(Xb * Xb, axis=1)[:, None] + sq[None, :]
+                        - 2.0 * (Xb @ Xg.T), 0.0)         # block × n
+        bidx = mx.argpartition(D2, kth=k, axis=1)[:, :k]
+        mx.eval(bidx)
+        bidx = np.asarray(bidx)
+        bd2 = np.take_along_axis(np.asarray(D2), bidx, axis=1)
+        idx_parts.append(bidx); d2_parts.append(bd2)
+    knn_indices = np.concatenate(idx_parts, axis=0)
+    d2 = np.concatenate(d2_parts, axis=0)
+
+    order = np.argsort(d2, axis=1)                        # sort k by distance, self first
     knn_indices = np.take_along_axis(knn_indices, order, axis=1)
     knn_dists = np.sqrt(np.take_along_axis(d2, order, axis=1))
     return knn_indices, knn_dists
