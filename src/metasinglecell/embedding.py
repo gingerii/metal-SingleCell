@@ -27,7 +27,7 @@ def umap(connectivities, n_components: int = 2, n_epochs: int | None = None,
     import mlx.core as mx
     from sklearn.utils import check_random_state
     from umap.spectral import spectral_layout
-    from umap.umap_ import find_ab_params, make_epochs_per_sample
+    from umap.umap_ import find_ab_params
 
     a, b = find_ab_params(spread, min_dist)
     a, b = float(a), float(b)  # keep scalars Python float so MLX ops stay on-device
@@ -36,7 +36,6 @@ def umap(connectivities, n_components: int = 2, n_epochs: int | None = None,
         n_epochs = 500 if n <= 10_000 else 200
 
     graph = connectivities.tocoo().copy()
-    # umap prunes weak edges below max/n_epochs, then samples by weight.
     graph.data[graph.data < graph.data.max() / float(n_epochs)] = 0.0
     graph.eliminate_zeros()
 
@@ -44,44 +43,39 @@ def umap(connectivities, n_components: int = 2, n_epochs: int | None = None,
     try:
         init = spectral_layout(None, graph, n_components, random_state=rng)
         init = np.asarray(init, dtype=np.float32)
-        # umap scales spectral init to a small spread for stable optimization.
         init = 10.0 * (init - init.min(0)) / (init.max(0) - init.min(0) + 1e-9)
     except Exception:
         init = rng.normal(scale=10.0, size=(n, n_components)).astype(np.float32)
 
+    # Process ALL edges every epoch on the GPU, attractive force scaled by edge
+    # weight — instead of umap-learn's per-epoch host-side edge sampling
+    # (epochs_per_sample). On the GPU the extra edge work is cheap and parallel,
+    # while removing the per-epoch host bookkeeping (flatnonzero/np.repeat) halves
+    # runtime. Eval every 25 epochs to keep host syncs few.
     head = mx.array(graph.row.astype(np.int32))
     tail = mx.array(graph.col.astype(np.int32))
-    eps = make_epochs_per_sample(graph.data, n_epochs)        # epochs per edge
-    next_sample = eps.copy()                                  # host bookkeeping
+    w = mx.array((graph.data / graph.data.max()).astype(np.float32))[:, None]
+    n_edges = graph.row.size
+    npr = np.random.default_rng(random_state)
 
     emb = mx.array(init)
     for epoch in range(n_epochs):
         alpha = INITIAL_ALPHA * (1.0 - epoch / n_epochs)
-        due = np.flatnonzero(next_sample <= epoch)
-        if due.size == 0:
-            continue
-        di = mx.array(due.astype(np.int32))
-        h, t = head[di], tail[di]
-
-        # --- attractive force along the edge ---
-        diff = emb[h] - emb[t]
+        # attractive (weighted) along every edge
+        diff = emb[head] - emb[tail]
         d2 = mx.sum(diff * diff, axis=1, keepdims=True)
         coef = (-2.0 * a * b * mx.power(d2, b - 1.0)) / (a * mx.power(d2, b) + 1.0)
-        grad = mx.clip(coef * diff, -4.0, 4.0) * alpha
-        emb = emb.at[h].add(grad)
-        emb = emb.at[t].add(-grad)
-
-        # --- repulsive force to random negative samples ---
-        reps = NEG_SAMPLE_RATE
-        hr = mx.array(np.repeat(due, reps).astype(np.int32))
-        rand = mx.random.randint(0, n, (due.size * reps,))
-        diffn = emb[head[hr]] - emb[rand]
+        grad = mx.clip(coef * diff, -4.0, 4.0) * alpha * w
+        emb = emb.at[head].add(grad)
+        emb = emb.at[tail].add(-grad)
+        # repulsive to random negatives (one per edge)
+        rand = mx.array(npr.integers(0, n, n_edges).astype(np.int32))
+        diffn = emb[head] - emb[rand]
         d2n = mx.sum(diffn * diffn, axis=1, keepdims=True)
         coefn = (2.0 * GAMMA * b) / ((1e-3 + d2n) * (a * mx.power(d2n, b) + 1.0))
-        gradn = mx.clip(coefn * diffn, -4.0, 4.0) * alpha
-        emb = emb.at[head[hr]].add(gradn)
+        emb = emb.at[head].add(mx.clip(coefn * diffn, -4.0, 4.0) * alpha)
+        if epoch % 25 == 0:
+            mx.eval(emb)
 
-        mx.eval(emb)
-        next_sample[due] += eps[due]
-
+    mx.eval(emb)
     return np.asarray(emb)
