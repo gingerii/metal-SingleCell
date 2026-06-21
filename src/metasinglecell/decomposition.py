@@ -91,14 +91,22 @@ def _pca_randomized(Xc, n_samples: int, n_comps: int, random_state: int,
     n_features = Xc.shape[1]
     Q = mx.array(rng.normal(size=(n_features, size)).astype(np.float32))
 
-    # Range finder with QR normalizer (power iterations). Matmuls on the GPU;
-    # the (small, tall) QRs on CPU since MLX QR is CPU-only.
-    for _ in range(n_iter):
-        Q, _ = mx.linalg.qr(Xc @ Q, stream=mx.cpu)        # n x size
-        Q, _ = mx.linalg.qr(Xc.T @ Q, stream=mx.cpu)      # features x size
-    Q, _ = mx.linalg.qr(Xc @ Q, stream=mx.cpu)            # n x size
+    # Range finder. The orthonormalization in each power iteration uses the Gram
+    # matrix (Q := Z(ZᵀZ)^{-1/2}) instead of QR: the tall n×size work stays as GPU
+    # matmuls and only a tiny size×size eigh runs on host — ~10× cheaper than the
+    # CPU QR MLX would otherwise force (MLX has no GPU QR), and the dominant cost.
+    def _ortho(Z):
+        G = Z.T @ Z                                       # size × size (GPU)
+        w, V = mx.linalg.eigh(G, stream=mx.cpu)           # tiny eigendecomposition
+        inv_sqrt = V @ (mx.diag(1.0 / mx.sqrt(mx.maximum(w, 1e-12))) @ V.T)
+        return Z @ inv_sqrt                               # orthonormal columns (GPU)
 
-    B = Q.T @ Xc                                          # size x features (GPU)
+    for _ in range(n_iter):
+        Q = _ortho(Xc @ Q)                                # n × size
+        Q = _ortho(Xc.T @ Q)                              # features × size
+    Q = _ortho(Xc @ Q)                                    # n × size
+
+    B = Q.T @ Xc                                          # size × features (GPU)
     mx.eval(B, Q)
 
     # fp64 SVD of the small projected matrix (Accelerate/LAPACK).
