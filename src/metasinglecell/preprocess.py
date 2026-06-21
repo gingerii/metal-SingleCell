@@ -241,9 +241,24 @@ def highly_variable_genes(csr, n_top_genes: int = 2000, n_bins: int = 20,
     """
     if flavor == "seurat_v3":
         return _hvg_seurat_v3(csr, n_top_genes)
+    if flavor == "pearson_residuals":
+        return _hvg_pearson_residuals(csr, n_top_genes)
     if flavor in ("seurat", "cell_ranger"):
         return _hvg_dispersion(csr, n_top_genes, n_bins, flavor)
     raise ValueError(f"unknown flavor {flavor!r}")
+
+
+def _hvg_pearson_residuals(csr, n_top_genes: int, theta: float = 100.0):
+    """HVG by Pearson-residual variance (scanpy ``flavor='pearson_residuals'``), raw counts."""
+    import pandas as pd
+
+    resid = normalize_pearson_residuals(csr.toarray(), theta=theta)
+    var = resid.var(axis=0, ddof=1)
+    order = np.argsort(-var)
+    hv = np.zeros(csr.shape[1], dtype=bool); hv[order[:n_top_genes]] = True
+    df = pd.DataFrame({"residual_variances": var, "highly_variable": hv})
+    df["highly_variable_rank"] = np.argsort(np.argsort(-var)).astype(float)
+    return df
 
 
 def _hvg_seurat_v3(csr, n_top_genes: int):

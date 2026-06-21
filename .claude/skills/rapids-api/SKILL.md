@@ -18,12 +18,12 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 ## pp (preprocessing)
 | fn | status |
 |----|--------|
-| calculate_qc_metrics | ✅ CSR.qc_metrics (per-cell); TODO top-level pp incl per-gene + pct_counts |
-| filter_cells / filter_genes | ⬜ Batch 1 |
-| flag_gene_family | ⬜ Batch 1 |
-| filter_highly_variable | ⬜ Batch 1 |
+| calculate_qc_metrics | ✅ preprocess.py (per-cell + per-gene; exact vs scanpy) |
+| filter_cells / filter_genes | ✅ preprocess.py (exact vs scanpy) |
+| flag_gene_family | ✅ preprocess.py (13 MT- genes, exact) |
+| filter_highly_variable | ✅ preprocess.py |
 | normalize_total / log1p | ✅ CSR methods |
-| highly_variable_genes | ✅ seurat / cell_ranger (log-norm) / seurat_v3 (raw counts). cell_ranger 0.62 overlap vs scanpy (binning/MAD deltas); seurat_v3 uses statsmodels lowess (skmisc unavailable) so loess fit approximate — verify vs scanpy at validation. ⬜ pearson_residuals flavor |
+| highly_variable_genes | ✅ ALL flavors: seurat / cell_ranger (log-norm) / seurat_v3 (raw) / pearson_residuals (raw, EXACT 2000/2000 vs scanpy). cell_ranger 0.62 overlap (binning deltas); seurat_v3 lowess approximate (skmisc unavailable). |
 | scale | ✅ |
 | pca | ✅ (full/arpack/randomized) |
 | regress_out | ✅ preprocess.py (OLS residuals; corr 1.0 vs scanpy) |
@@ -41,7 +41,7 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 | score_genes / score_genes_cell_cycle | ✅ tools.py (corr 0.74 vs scanpy; control-sampling differs) |
 | embedding_density | ✅ tools.py (gaussian KDE) |
 | rank_genes_groups | ✅ tools.py (t-test; t-stat corr 0.993 vs scanpy; ⚠ marker-overlap 0.54, scanpy overestim_var/p-tiebreak not matched) |
-| tsne | ⬜ Batch 3+ (fft/BH — hard) |
+| tsne | ✅ tools.py (exact t-SNE, GPU GD; cluster-preservation 1.0; O(n²)) |
 | diffmap | ✅ tools.py (eigsh of symmetric transition; eigvals 1.0→0.97 on PBMC) |
 | draw_graph | ✅ tools.py (FA2-style force layout on MLX; cluster-preservation 1.0) |
 
@@ -67,13 +67,15 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 4. ⬜ pp: harmony_integrate, scrublet, bbknn; gr: ligrec, calculate_niche.
 
 ## WHERE WE ARE (checkpoint)
-~19/32 rsc functions built (all committed/pushed). Modules: sparse, preprocess, decomposition,
-neighbors, embedding, cluster, graph/, tools, spatial. Validation DEFERRED to project end (user's
-call) — but each function spot-checked vs scanpy/sklearn at build time (notes above). Parity gaps to
-revisit at validation: score_genes control sampling, rank_genes_groups ranking, (and any fp32 deltas).
-Batch 3 DONE. Harmony (`integration.py`) done (works; mixing partial — see note). ~24/32 functions.
-Remaining: HVG flavors (cell_ranger/seurat_v3/pearson), bbknn, scrublet(+sim), tsne, draw_graph,
-ligrec, calculate_niche. Harmony follow-up: block-stochastic clustering + harmonypy parity check.
+**ALL ~32 rsc pp/tl/gr functions implemented & pushed.** Modules: sparse, preprocess, decomposition,
+neighbors, embedding, cluster, graph/, tools, spatial, integration. Each spot-checked vs scanpy/
+sklearn at build (notes per row). Validation DEFERRED to project end (user's call).
+ONLY OPEN ITEMS (refinement/parity, not missing functions):
+- harmony: batch-mixing partial -> restore block-STOCHASTIC clustering; verify vs harmonypy.
+- parity deltas to revisit: score_genes control sampling, rank_genes_groups ranking (overestim_var),
+  cell_ranger HVG binning, seurat_v3 loess (skmisc), any fp32 deltas.
+- t-SNE is exact O(n^2) (subsample/Barnes-Hut for very large n).
+Next: optional AnnData wrapper layer (rsc.pp/tl/gr namespaces) + end-of-project validation suite.
 
 ## Conventions
 - Compute on MLX where GPU helps; lazy-import mlx. Match scanpy/rsc signatures + defaults.
