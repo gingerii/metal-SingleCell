@@ -28,7 +28,7 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 | pca | ✅ (full/arpack/randomized) |
 | regress_out | ✅ preprocess.py (OLS residuals; corr 1.0 vs scanpy) |
 | normalize_pearson_residuals | ✅ preprocess.py (corr 1.0, max_diff 7e-7 vs scanpy) |
-| harmony_integrate | 🟡 integration.py `harmonize` (port of harmony-pytorch: cosine soft-kmeans + O/E diversity penalty + per-cluster ridge correction; matmuls on MLX, ridge solves numpy fp64). WORKS — synthetic 2-batch/2-bio: batch_sep 6.0→2.17, bio_sep 8.0→7.94 (biology preserved). ⚠ batch mixing only partial (0→0.08) — likely needs block-STOCHASTIC clustering updates (I used full-batch) and/or tuning; verify vs harmonypy at validation. |
+| harmony_integrate | ✅ integration.py `harmonize` (harmony-pytorch port: cosine soft-kmeans + O/E diversity penalty + ridge correction). BLOCK-STOCHASTIC clustering -> batch_sep 6.0→0.55 (removed), mixing 0→0.42 (~ideal 0.5), bio_sep 8.0→7.92 (preserved). Verify vs harmonypy at validation. |
 | scrublet / scrublet_simulate_doublets | ✅ preprocess.py (sim doublets + combined PCA/kNN; doublet-score AUC 0.96 on injected) |
 | neighbors | ✅ |
 | bbknn | ✅ neighbors.py (per-batch GPU KNN combined + UMAP fuzzy graph). Validated: forces 50/50 cross-batch neighbors (balanced) while keeping same-bio 100% |
@@ -71,7 +71,7 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 neighbors, embedding, cluster, graph/, tools, spatial, integration. Each spot-checked vs scanpy/
 sklearn at build (notes per row). Validation DEFERRED to project end (user's call).
 ONLY OPEN ITEMS (refinement/parity, not missing functions):
-- harmony: batch-mixing partial -> restore block-STOCHASTIC clustering; verify vs harmonypy.
+- harmony: block-stochastic clustering DONE (mixing 0.42); verify vs harmonypy at validation.
 - parity deltas to revisit: score_genes control sampling, rank_genes_groups ranking (overestim_var),
   cell_ranger HVG binning, seurat_v3 loess (skmisc), any fp32 deltas.
 - t-SNE is exact O(n^2) (subsample/Barnes-Hut for very large n).
