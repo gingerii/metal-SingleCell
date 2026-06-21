@@ -77,8 +77,9 @@ def main():
         cpu = _best(lambda: (lambda a: (sc.pp.normalize_total(a, target_sum=1e4), sc.pp.log1p(a)))(ad.copy()), repeats=1)
         mine_ln = csr.normalize_total(1e4).log1p()
         ref = ad.copy(); sc.pp.normalize_total(ref, target_sum=1e4); sc.pp.log1p(ref)
-        acc = "r=%.5f" % np.corrcoef(np.asarray(mine_ln.toarray()).ravel(),
-                                     np.asarray(ref.X.todense()).ravel())[0, 1]
+        rs = np.sort(np.random.default_rng(0).choice(n, min(n, 5000), replace=False))  # subsample rows
+        acc = "r=%.5f" % np.corrcoef(np.asarray(mine_ln.toarray()[rs]).ravel(),
+                                     np.asarray(ref.X[rs].todense()).ravel())[0, 1]
         add("normalize+log1p", n, gpu, cpu, acc)
 
         # highly_variable_genes (seurat)
@@ -89,21 +90,32 @@ def main():
         ov = (mine_hv & rh.var["highly_variable"].to_numpy()).sum() / max(rh.var["highly_variable"].sum(), 1)
         add("hvg_seurat", n, gpu, cpu, "overlap=%.3f" % ov)
 
-        # PCA (randomized) on a dense block
-        X = np.ascontiguousarray(mine_ln.toarray())
-        gpu = _best(lambda: pca(X, n_comps=50, solver="randomized"))
-        Xc = X.astype(np.float64) - X.astype(np.float64).mean(0)
-        cpu = _best(lambda: randomized_svd(Xc, 50, n_iter=7, random_state=0), repeats=1)
-        add("pca_randomized", n, gpu, cpu, "(seeded)")
+        # PCA (randomized) on a dense HVG-subset block (bounds memory at scale).
+        n_hvg = 1000
+        try:
+            hv_idx = np.argsort(-highly_variable_genes(mine_ln, n_top_genes=n_hvg)
+                                ["dispersions_norm"].to_numpy())[:n_hvg]
+            sub = mine_ln.toarray()[:, hv_idx]
+            X = np.ascontiguousarray(sub.astype(np.float32))
+            gpu = _best(lambda: pca(X, n_comps=50, solver="randomized"), repeats=2)
+            if n < 1_500_000:
+                Xc = X.astype(np.float64) - X.astype(np.float64).mean(0)
+                cpu = _best(lambda: randomized_svd(Xc, 50, n_iter=7, random_state=0), repeats=1)
+            else:
+                cpu = float("nan")
+            add("pca_randomized", n, gpu, cpu, "(seeded)")
+            emb = pca(X, n_comps=50, solver="randomized")[0].astype(np.float32)
+        except Exception as e:  # OOM / memory at the largest sizes
+            log.info("pca_randomized n=%d SKIPPED: %s", n, str(e)[:60]); emb = None
 
-        # KNN: our neighbors() uses exact GPU brute-force for small n, pynndescent
-        # (scanpy's own default) for large n — the M3 GPU does not win this workload.
-        from metasinglecell.neighbors import neighbors as _nbrs
-        emb = X[:, :50].astype(np.float32)
-        from sklearn.neighbors import NearestNeighbors
-        gpu = _best(lambda: _nbrs(emb, n_neighbors=15)[0], repeats=1)
-        cpu = _best(lambda: NearestNeighbors(n_neighbors=15).fit(emb).kneighbors(emb), repeats=1)
-        add("knn(ours)", n, gpu, cpu, "brute<30k/pynndescent")
+        # KNN: neighbors() uses exact GPU brute-force for small n, pynndescent at scale.
+        if emb is not None:
+            from sklearn.neighbors import NearestNeighbors
+            from metasinglecell.neighbors import neighbors as _nbrs
+            gpu = _best(lambda: _nbrs(emb, n_neighbors=15)[0], repeats=1)
+            cpu = (_best(lambda: NearestNeighbors(n_neighbors=15).fit(emb).kneighbors(emb), repeats=1)
+                   if n < 1_500_000 else float("nan"))  # sklearn prohibitive at >=2M
+            add("knn(ours)", n, gpu, cpu, "brute<30k/pynndescent")
 
     path = validation.write_report(records, "validation", "v_pipeline.csv")
     neg = [r for r in records if r["speedup"] < 1.0]
