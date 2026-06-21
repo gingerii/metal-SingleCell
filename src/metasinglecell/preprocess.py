@@ -144,6 +144,64 @@ def normalize_pearson_residuals(X, theta: float = 100.0, clip: float | None = No
     return np.asarray(resid)
 
 
+def scrublet_simulate_doublets(counts, sim_doublet_ratio: float = 2.0,
+                               random_state: int = 0):
+    """Simulate doublets by summing random pairs of cells (scanpy ``pp.scrublet_simulate_doublets``)."""
+    import scipy.sparse as sp
+
+    C = sp.csr_matrix(counts)
+    n = C.shape[0]
+    n_sim = int(sim_doublet_ratio * n)
+    rng = np.random.default_rng(random_state)
+    pairs = rng.integers(0, n, size=(n_sim, 2))
+    sim = C[pairs[:, 0]] + C[pairs[:, 1]]               # combined transcript counts
+    return sim, pairs
+
+
+def scrublet(counts, sim_doublet_ratio: float = 2.0, n_neighbors: int | None = None,
+             expected_doublet_rate: float = 0.05, n_pcs: int = 30,
+             random_state: int = 0) -> dict:
+    """Doublet detection (scanpy/rapids-singlecell ``pp.scrublet``).
+
+    Simulate doublets, embed real+simulated together (normalize → log1p → PCA),
+    then score each real cell by how many of its nearest neighbors are simulated
+    doublets (adjusted for the simulation ratio and expected rate). Returns
+    ``doublet_scores`` per real cell and a boolean ``predicted_doublets``.
+    """
+    import scipy.sparse as sp
+
+    from .decomposition import pca
+    from .neighbors import _knn_gpu
+    from .sparse import CSR
+
+    C = sp.csr_matrix(counts)
+    n = C.shape[0]
+    sim, _ = scrublet_simulate_doublets(C, sim_doublet_ratio, random_state)
+    combined = sp.vstack([C, sim]).tocsr()
+    if n_neighbors is None:
+        n_neighbors = int(round(0.5 * np.sqrt(n)))
+
+    # normalize -> log1p -> scale-free PCA on the combined matrix
+    lognorm = CSR.from_scipy(combined).normalize_total(1e4).log1p().toarray()
+    X_pca, _, _ = pca(lognorm, n_comps=min(n_pcs, combined.shape[1] - 1),
+                      solver="randomized", random_state=random_state)
+
+    knn_idx, _ = _knn_gpu(X_pca.astype(np.float32), n_neighbors + 1)
+    knn_idx = knn_idx[:n, 1:]                           # real cells, exclude self
+    is_sim = knn_idx >= n                               # neighbor is a simulated doublet
+    frac_sim = is_sim.mean(axis=1)
+
+    # Bayesian-style adjustment for the simulation ratio rho (Scrublet eq.)
+    rho = expected_doublet_rate
+    r = sim_doublet_ratio
+    q = frac_sim
+    doublet_scores = (q * rho / r) / (q * rho / r + (1 - q) * (1 - rho) + 1e-12)
+    # threshold: Otsu-like split of the score distribution
+    thr = float(np.quantile(doublet_scores, 1 - rho))
+    return {"doublet_scores": doublet_scores,
+            "predicted_doublets": doublet_scores > thr, "threshold": thr}
+
+
 def scale(csr, max_value: float | None = 10.0, zero_center: bool = True) -> np.ndarray:
     """Z-score each gene then clip (scanpy ``sc.pp.scale``).
 

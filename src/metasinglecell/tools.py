@@ -154,6 +154,43 @@ def rank_genes_groups(X, groups, var_names=None, method: str = "t-test",
     return out
 
 
+def draw_graph(connectivities, n_iter: int = 500, random_state: int = 0) -> np.ndarray:
+    """Force-directed 2-D graph layout (scanpy ``tl.draw_graph``, ForceAtlas2-style).
+
+    Attractive forces along graph edges + repulsive forces to random negative
+    samples, optimized by SGD on the GPU (MLX), like our UMAP layout. Returns a
+    (cells × 2) embedding.
+    """
+    import mlx.core as mx
+    import scipy.sparse as sp
+
+    coo = sp.coo_matrix(connectivities).tocoo()
+    n = connectivities.shape[0]
+    rng = np.random.default_rng(random_state)
+    pos = mx.array(rng.normal(scale=1.0, size=(n, 2)).astype(np.float32))
+    head = mx.array(coo.row.astype(np.int32))
+    tail = mx.array(coo.col.astype(np.int32))
+    w = mx.array(coo.data.astype(np.float32))
+    n_edges = coo.row.size
+
+    alpha0 = 1.0
+    for it in range(n_iter):
+        alpha = alpha0 * (1.0 - it / n_iter)
+        # attractive: pull connected nodes together (FA2: F ∝ weight·dist)
+        diff = pos[head] - pos[tail]
+        grad = mx.clip(w[:, None] * diff, -4.0, 4.0) * alpha
+        pos = pos.at[head].add(-grad)
+        pos = pos.at[tail].add(grad)
+        # repulsive: push apart random pairs (F ∝ 1/dist)
+        ridx = mx.array(rng.integers(0, n, n_edges).astype(np.int32))
+        rdiff = pos[head] - pos[ridx]
+        d2 = mx.sum(rdiff * rdiff, axis=1, keepdims=True) + 1e-3
+        rgrad = mx.clip(rdiff / d2, -4.0, 4.0) * alpha
+        pos = pos.at[head].add(rgrad)
+        mx.eval(pos)
+    return np.asarray(pos)
+
+
 def diffmap(connectivities, n_comps: int = 15) -> dict:
     """Diffusion map from a neighbor connectivity graph (scanpy ``tl.diffmap``).
 
