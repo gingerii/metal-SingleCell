@@ -51,6 +51,30 @@ results/ * All .csv, .png, and .pdfs related to the project will live here. For 
 
 
 
+## Validation & benchmarking scheme (project-wide)
+The end-of-build validation of our Metal/MLX rapids-singlecell reimplementation. We measure
+**accuracy AND speed** of every function across a dataset-size sweep, and optimize until the
+limit is the **hardware, not our implementation**.
+
+* **Dataset sweep**: PBMC3k (real, ~2.7K), then **10K, 50K, 100K, 1M, 2M cells**. Larger sizes are
+  synthesized (replicate/sample real cells or realistic sparse counts ~6–7% density) so they are
+  reproducible; accuracy is anchored on sizes where a scanpy/sklearn CPU reference is computable.
+* **Accuracy**: compare each GPU function to its scanpy/sklearn CPU reference on the *same* data,
+  using the per-function metric + tolerance from the `rapids-api` skill (exact where deterministic;
+  fp32 tolerance otherwise; structure/ARI/correlation for stochastic methods). Record max-abs/rel
+  err, correlation, ARI, etc.
+* **Speed**: GPU walltime vs CPU (scanpy/sklearn) walltime → speedup factor, per size. Honest method:
+  **warm up** the GPU once (MLX compiles kernels on first launch), **best-of-N** for both GPU and CPU,
+  `mx.eval` to defeat lazy eval, include intrinsic host↔device transfer.
+* **The optimization loop**: any function with a **negative or poor speedup**, or that is
+  implementation-bound (Python-orchestration / sync overhead / O(d²) / no-sparse-matmul workarounds),
+  gets optimized — reduce host syncs, fuse kernels, batch launches, degree-bin, etc. — until the
+  bottleneck is genuinely the M-series GPU (bandwidth/cores), not our code. The clustering effort is
+  the template: profiling found coloring was 60% of runtime → recolor-every-3 + degree-binning.
+* **Outputs**: `results/validation/` — per-size CSV (function, accuracy metric, gpu_s, cpu_s, speedup,
+  bottleneck note) + a summary table/figure. Findings + chosen optimizations recorded in skills.
+* **Known fp32/parity caveats** to confirm here are tracked per-function in the `rapids-api` skill.
+
 ## Logging
 * Any code that does something writes a log to its `results/<analysis>/` folder.
 * When transforming data, offer to make tables/figures capturing the transformation.
