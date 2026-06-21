@@ -135,3 +135,17 @@ Phases 1–3 DONE + Louvain perf-optimized. **GPU Louvain: fast+correct, ~5–13
 (igraph timing noisy). **GPU Leiden: quality beats igraph Leiden** (PBMC 0.665 vs 0.660), ~par speed
 at 1M. Next: degree-binning for the O(d²) kernel (robustness + speed); incremental Σtot; Phase 4
 formal benchmark table + figures.
+
+
+## CLUSTERING SPEED FINDING (validation, flagged for optimization)
+At 50k: GPU louvain 3.1s (Q=0.95/20cl, correct) vs igraph 0.32s; leiden GPU 12s vs igraph 0.24s.
+igraph's hyper-optimized C wins below ~1M; GPU only (marginally) wins at atlas scale (1M louvain
+~10s vs igraph ~15-44s, noisy). Profiling: cost is the PER-COLOR kernel launches (~40/pass, dispatch
+overhead) + per-pass coloring — not the GPU math. At small/mid n the launch overhead is the floor.
+- Quality is fine via MULTILEVEL (level-0 may look over-fragmented in isolation, but contraction +
+  later levels converge to the right count; full louvain 50k -> 20 cl).
+- Tried Σtot once-per-pass (vs per-color): better small-n level-0 quality BUT 700s at 1M (far more
+  passes to converge). Reverted — per-color keeps atlas-scale speed.
+- The only real speed fix to lower the crossover is a FUSED single-kernel local-moving (cuGraph-style,
+  per-vertex hashing, colors looped inside one kernel) — large effort. Until then: `cluster.leiden`
+  defaults to backend="igraph" (fast/robust); backend="gpu" for atlas scale.

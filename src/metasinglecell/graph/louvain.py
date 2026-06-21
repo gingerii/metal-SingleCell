@@ -179,6 +179,11 @@ def _local_moving(graph: Graph, resolution: float, twom: float, seed: int = 0,
         if p % recolor_every == 0:
             color, n_colors = color_graph(graph, seed=seed + p)
         comm_before = comm
+        # Σtot per color (fresh community sizes each color). NB per-PASS Σtot gives
+        # better quality on small structureless synthetic graphs but needs far more
+        # passes to converge at 1M (700s vs ~10s) — per-color keeps the atlas-scale
+        # speed; small-n over-fragmentation is a synthetic-data artifact (verify on
+        # REAL data, per CLAUDE.md).
         for c in rng.permutation(n_colors):
             sigtot = mx.zeros((n,), dtype=mx.float32).at[comm].add(k)
             (comm,) = kernel(
