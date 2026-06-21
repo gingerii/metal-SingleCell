@@ -32,4 +32,21 @@ brute-force for small n (fast + exact there) and **pynndescent — scanpy's own 
 (fast, scales to millions, matches scanpy exactly). The GPU NN-descent stays as `_knn_descent` for
 the record. KNN is therefore parity-with-scanpy (CPU), not a GPU win.
 
-Next: revisit hvg/pca (~1.4×) optimization; then scale the sweep to 1M/2M (now feasible — no O(n²)).
+## Optimizations applied (hvg, pca)
+Profiling pinpointed host bottlenecks; both fixed, accuracy preserved:
+- **hvg**: `gene_moments` was rebuilding a CSC on the host (0.037s of 0.055s). Replaced with a pure
+  GPU **scatter-add over the gene index** (~22× faster, identical values). HVG speedup **1.4→13.6×**
+  at 100k (overlap ~1.0).
+- **pca_randomized**: the power-iteration **QR ran on CPU** (MLX has no GPU QR) — 1 QR = 0.055s × 15
+  ≈ 0.83s of 1.2s. Replaced with **Gram-matrix orthonormalization** `Q(QᵀQ)^{-1/2}` (tall work as GPU
+  matmuls + a tiny size×size eigh). PCA **1.4→2.6×**, subspace overlap vs sklearn = **1.0000** (exact).
+
+## Post-optimization speedups
+| op | 10K | 50K | 100K | accuracy |
+|----|-----|-----|------|----------|
+| normalize+log1p | 3.5× | 10× | 26× | exact |
+| hvg_seurat | 2.9× | 9.5× | 13.6× | overlap ~1.0 |
+| pca_randomized | 2.5× | 2.8× | 2.6× | exact (overlap 1.0) |
+| knn | (pynndescent, parity w/ scanpy — M3 GPU doesn't win this workload) | | | |
+
+Next: scale the sweep to 1M/2M (now feasible — no O(n²)); revisit clustering/umap at scale.
