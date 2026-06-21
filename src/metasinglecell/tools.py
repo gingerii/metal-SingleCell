@@ -154,6 +154,73 @@ def rank_genes_groups(X, groups, var_names=None, method: str = "t-test",
     return out
 
 
+def _perplexity_affinities(D2, perplexity, tol=1e-5, max_iter=50):
+    """Row affinities P_{j|i} calibrated to the target perplexity (host binary search)."""
+    n = D2.shape[0]
+    P = np.zeros((n, n))
+    logU = np.log(perplexity)
+    for i in range(n):
+        lo, hi, beta = -np.inf, np.inf, 1.0
+        Di = np.delete(D2[i], i)
+        for _ in range(max_iter):
+            Pi = np.exp(-Di * beta)
+            sumP = Pi.sum() + 1e-12
+            H = np.log(sumP) + beta * (Di * Pi).sum() / sumP
+            diff = H - logU
+            if abs(diff) < tol:
+                break
+            if diff > 0:
+                lo = beta; beta = beta * 2 if hi == np.inf else (beta + hi) / 2
+            else:
+                hi = beta; beta = beta / 2 if lo == -np.inf else (beta + lo) / 2
+        Pi = np.exp(-Di * beta); Pi /= Pi.sum() + 1e-12
+        P[i, np.arange(n) != i] = Pi
+    return P
+
+
+def tsne(X, n_components: int = 2, perplexity: float = 30.0, n_iter: int = 1000,
+         learning_rate: float = 200.0, early_exaggeration: float = 12.0,
+         random_state: int = 0) -> np.ndarray:
+    """Exact t-SNE on the GPU (scanpy/rapids ``tl.tsne``).
+
+    Perplexity-calibrated high-dim affinities (host binary search) then KL-minimizing
+    gradient descent in low-dim, with the O(n²) gradient as MLX matmuls. Exact (not
+    Barnes-Hut), so suited to moderate n; subsample very large datasets.
+    """
+    import mlx.core as mx
+
+    Xn = np.asarray(X, dtype=np.float64)
+    n = Xn.shape[0]
+    sq = np.sum(Xn * Xn, axis=1)
+    D2 = np.maximum(sq[:, None] + sq[None, :] - 2 * Xn @ Xn.T, 0.0)
+    P = _perplexity_affinities(D2, perplexity)
+    P = (P + P.T) / (2 * n)
+    P = np.maximum(P, 1e-12)
+
+    rng = np.random.default_rng(random_state)
+    Y = mx.array((1e-4 * rng.standard_normal((n, n_components))).astype(np.float32))
+    Pg = mx.array((P * early_exaggeration).astype(np.float32))
+    vel = mx.zeros_like(Y)
+    eye = mx.array(np.eye(n, dtype=np.float32))
+
+    for it in range(n_iter):
+        if it == 250:
+            Pg = mx.array(P.astype(np.float32))               # stop early exaggeration
+        ysq = mx.sum(Y * Y, axis=1)
+        d2 = mx.maximum(ysq[:, None] + ysq[None, :] - 2.0 * (Y @ Y.T), 0.0)
+        num = 1.0 / (1.0 + d2)
+        num = num * (1.0 - eye)                               # zero diagonal
+        Q = mx.maximum(num / mx.sum(num), 1e-12)
+        L = (Pg - Q) * num
+        grad = 4.0 * ((mx.sum(L, axis=1)[:, None] * Y) - (L @ Y))
+        momentum = 0.5 if it < 250 else 0.8
+        vel = momentum * vel - learning_rate * grad
+        Y = Y + vel
+        Y = Y - mx.mean(Y, axis=0)
+        mx.eval(Y)
+    return np.asarray(Y)
+
+
 def draw_graph(connectivities, n_iter: int = 500, random_state: int = 0) -> np.ndarray:
     """Force-directed 2-D graph layout (scanpy ``tl.draw_graph``, ForceAtlas2-style).
 
