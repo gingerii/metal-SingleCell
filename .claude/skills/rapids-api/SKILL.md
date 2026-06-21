@@ -51,8 +51,8 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 | spatial_neighbors | ✅ spatial.py (KNN on coords) |
 | spatial_autocorr | ✅ spatial.py (Moran's I / Geary's C, scatter-SpMM + permutation p) |
 | co_occurrence | ✅ spatial.py (distance-binned cluster co-occurrence ratio; GPU pairwise + one-hot; O(n²)) |
-| ligrec | ⬜ Batch 4 (ligand-receptor permutation test) |
-| calculate_niche | ⬜ Batch 4 (neighborhood composition clustering) |
+| ligrec | ✅ spatial.py (CellPhoneDB-style L-R: cluster-mean scatter + permutation p; validated A→B mean 3.1/p .005) |
+| calculate_niche | ✅ spatial.py (neighborhood composition via scatter-SpMM + kmeans; ARI 0.957 vs true regions) |
 
 ## Build batches (tractable → hard)
 1. ✅ DONE pp completions: filter_cells/genes, flag_gene_family, filter_highly_variable, calculate_qc_metrics
