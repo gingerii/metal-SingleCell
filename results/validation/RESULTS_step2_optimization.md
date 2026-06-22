@@ -33,6 +33,26 @@ GPU leiden loses at every size (0.08× even at 1M) because its refinement phase 
 local-moving per level (×n_iterations), and Metal cannot run cuGraph-style fused clustering
 (relaxed-only atomics, no grid barrier — proven earlier). igraph leiden is the right default.
 
+## Pushing the WINNERS higher (transfer + fp16)
+
+### CSR.from_scipy transfer — BIG, broad win
+At scale the host→device transfer dominated sparse ops: **10.06s** of a 12.5s normalize at
+1M×22k (2B nnz), vs only 2.4s of actual kernel compute. Most was **redundant `astype` copies**
+of arrays that already had the right dtype (data float32, indices int32 — `astype` always
+copies). Fix: skip the cast when dtype matches, don't re-CSR an already-CSR input, sort only if
+needed (on a copy). **from_scipy 10.06s → 3.35s**; normalize+log1p+transfer @1M **0.82× → 1.8×**
+vs scanpy. This speeds **every** sparse op (hvg/pca/pearson/scrublet all call `from_scipy`).
+Correctness unchanged (roundtrip exact; handles int64/unsorted input without mutating caller).
+
+### fp16 — narrow lever (kNN distance only)
+fp16 matmul on M3 MLX helps **only** large-output tall-thin shapes, and **only if the result
+stays fp16** (an fp32 cast-back of a block×n matrix costs back the gain); small-K outputs
+(kmeans assign, K≈15) get nothing, and square matmuls (PCA Gram) are slightly slower in fp16.
+Applied where it pays: `_knn_gpu` computes the whole distance + argpartition in fp16 → **1.27×**
+on the brute path (also feeds IVF buckets / bbknn), recall **0.961** vs exact; the k selected
+distances are recomputed in fp32 so returned values stay full precision. kmeans fp16 reverted
+(no win); kept the xsq hoist. **fp16 is not a broad win on M3.**
+
 ## Honest conclusion
 Of the three implementation-bound functions, **exactly one had a real, fixable bug** (harmonize's
 200-iter, now 2× faster + better quality). The others are **workload/hardware-bound on M3** —
