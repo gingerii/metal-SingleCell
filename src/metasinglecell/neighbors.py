@@ -73,15 +73,24 @@ def bbknn(X_pca: np.ndarray, batch, neighbors_within_batch: int = 3,
     for b in cats:
         bidx = np.flatnonzero(batch == b)
         Xb = Xg[mx.array(bidx.astype(np.int32))]
-        D2 = mx.maximum(xsq[:, None] + mx.sum(Xb * Xb, axis=1)[None, :]
-                        - 2.0 * (Xg @ Xb.T), 0.0)
+        xb_sq = mx.sum(Xb * Xb, axis=1)
         kk = min(k, bidx.size)
-        loc = mx.argpartition(D2, kth=kk, axis=1)[:, :kk]
-        mx.eval(loc, D2)
-        loc = np.asarray(loc)
-        d = np.take_along_axis(np.asarray(D2), loc, axis=1)
-        idx_parts.append(bidx[loc])                      # map local -> global
-        dist_parts.append(np.sqrt(np.maximum(d, 0.0)))
+        # Tile the query rows: the full n×|batch| distance matrix would be O(n²) on the
+        # GPU (e.g. 100k×50k ≈ 20GB → Metal OOM). Cap each tile to ~256M entries.
+        tile = max(1, 256_000_000 // max(bidx.size, 1))
+        loc_b = np.empty((n, kk), dtype=np.int64)
+        d_b = np.empty((n, kk), dtype=np.float32)
+        for s in range(0, n, tile):
+            e = min(s + tile, n)
+            D2 = mx.maximum(xsq[s:e][:, None] + xb_sq[None, :]
+                            - 2.0 * (Xg[s:e] @ Xb.T), 0.0)
+            loc = mx.argpartition(D2, kth=kk, axis=1)[:, :kk]
+            mx.eval(loc, D2)
+            loc = np.asarray(loc)
+            d_b[s:e] = np.sqrt(np.maximum(np.take_along_axis(np.asarray(D2), loc, axis=1), 0.0))
+            loc_b[s:e] = loc
+        idx_parts.append(bidx[loc_b])                    # map local -> global
+        dist_parts.append(d_b)
 
     knn_indices = np.concatenate(idx_parts, axis=1)
     knn_dists = np.concatenate(dist_parts, axis=1)
