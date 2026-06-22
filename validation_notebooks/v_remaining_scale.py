@@ -11,6 +11,7 @@ design and are NOT run at 100k (documented limitation); the rest scale.
     python validation_notebooks/v_remaining_scale.py
 """
 
+import gc
 import logging
 import time
 import warnings
@@ -82,6 +83,7 @@ def main():
         a2 = adl.copy(); sc.tl.score_genes(a2, gl, score_name="s", random_state=0)
         r = np.corrcoef(sm, a2.obs["s"].to_numpy())[0, 1]
         check("score_genes", r > 0.85, f"score corr {r:.3f} vs scanpy")
+        del full, a2, sm; gc.collect()              # free the ~8GB dense copy
     except Exception as e:
         check("score_genes", False, f"ERROR {e}")
 
@@ -96,6 +98,7 @@ def main():
         ov = [len(set(a4.uns["rank_genes_groups"]["names"][g][:25]) &
                   set(rg[str(g)]["names"][:25])) / 25 for g in a4.obs["g"].cat.categories]
         check("rank_genes_groups", np.mean(ov) > 0.7, f"top-25 overlap {np.mean(ov):.3f} | {tg:.1f}s")
+        del full, a4, rg; gc.collect()              # free the ~8GB dense copy
     except Exception as e:
         check("rank_genes_groups", False, f"ERROR {e}")
 
@@ -120,6 +123,9 @@ def main():
     except Exception as e:
         check("diffmap", False, f"ERROR {e}")
 
+    # free everything not needed downstream before the heavier batch/scrublet functions
+    del adl, adh, conn, a7, dm; gc.collect()
+
     # batch functions: split into 2 batches + inject PCA shift
     batch = (rng.random(N) < 0.5).astype(int)
     emb_b = emb.copy(); emb_b[batch == 1, :5] += 3.0
@@ -142,15 +148,19 @@ def main():
     except Exception as e:
         check("bbknn", False, f"ERROR {e}")
 
-    # scrublet — injected-doublet AUC at scale
+    # scrublet — injected-doublet AUC. Uses a 25k subset: scrublet simulates ~2x doublets
+    # (combined ~75k) — a solid large test kept safely within memory. scrublet's brute-force
+    # _knn_gpu becomes memory-heavy past ~combined-100k (FUTURE: route through the tiled/
+    # pynndescent neighbors() path for very large doublet-simulation sets).
     try:
-        n_inj = 2000
-        pairs = rng.integers(0, N, (n_inj, 2))
-        Caug = sp.vstack([counts, counts[pairs[:, 0]] + counts[pairs[:, 1]]]).tocsr()
-        is_d = np.r_[np.zeros(N), np.ones(n_inj)]
+        ns = min(25_000, N); ni = 500
+        Cs = counts[:ns]
+        pairs = rng.integers(0, ns, (ni, 2))
+        Caug = sp.vstack([Cs, Cs[pairs[:, 0]] + Cs[pairs[:, 1]]]).tocsr()
+        is_d = np.r_[np.zeros(ns), np.ones(ni)]
         t = time.perf_counter(); sr = pp.scrublet(Caug, random_state=0); tg = time.perf_counter() - t
         auc = roc_auc_score(is_d, sr["doublet_scores"])
-        check("scrublet", auc > 0.8, f"injected-doublet AUC {auc:.3f} | {tg:.1f}s")
+        check("scrublet", auc > 0.8, f"injected-doublet AUC {auc:.3f} @{ns//1000}k (combined ~{3*ns//1000}k) | {tg:.1f}s")
     except Exception as e:
         check("scrublet", False, f"ERROR {e}")
 
