@@ -56,7 +56,6 @@ def umap(connectivities, n_components: int = 2, n_epochs: int | None = None,
     tail = mx.array(graph.col.astype(np.int32))
     w = mx.array((graph.data / graph.data.max()).astype(np.float32))[:, None]
     n_edges = graph.row.size
-    npr = np.random.default_rng(random_state)
 
     emb = mx.array(init)
     for epoch in range(n_epochs):
@@ -68,8 +67,10 @@ def umap(connectivities, n_components: int = 2, n_epochs: int | None = None,
         grad = mx.clip(coef * diff, -4.0, 4.0) * alpha * w
         emb = emb.at[head].add(grad)
         emb = emb.at[tail].add(-grad)
-        # repulsive to random negatives (one per edge)
-        rand = mx.array(npr.integers(0, n, n_edges).astype(np.int32))
+        # repulsive to random negatives (one per edge) — sample on the GPU (host RNG +
+        # per-epoch host→device transfer was breaking the lazy-eval graph and dominating
+        # the loop: ~150M host ints + 200 transfers/syncs at 50k×200 epochs).
+        rand = mx.random.randint(0, n, (n_edges,), key=mx.random.key(random_state + epoch + 1))
         diffn = emb[head] - emb[rand]
         d2n = mx.sum(diffn * diffn, axis=1, keepdims=True)
         coefn = (2.0 * GAMMA * b) / ((1e-3 + d2n) * (a * mx.power(d2n, b) + 1.0))
