@@ -203,14 +203,19 @@ class CSR:
         import mlx.core as mx
         import scipy.sparse as sp
 
-        csr = sp.csr_matrix(mat)
-        csr.sort_indices()
-        return cls(
-            data=mx.array(csr.data.astype(np.float32)),
-            indices=mx.array(csr.indices.astype(np.int32)),
-            indptr=mx.array(csr.indptr.astype(np.uint32)),
-            shape=tuple(csr.shape),
-        )
+        # Host→device transfer dominates at scale (e.g. 10s of a 12.5s normalize at 1M×22k).
+        # Most of it was redundant `astype` copies of arrays that already had the right
+        # dtype (data float32, indices int32). Skip the cast when the dtype already matches
+        # (astype always copies otherwise), avoid re-CSR-ing an already-CSR input, and only
+        # sort when needed (on a copy, so the caller's matrix is never mutated).
+        csr = mat if sp.isspmatrix_csr(mat) else mat.tocsr()
+        if not csr.has_sorted_indices:
+            csr = csr.copy(); csr.sort_indices()
+        data = csr.data if csr.data.dtype == np.float32 else csr.data.astype(np.float32)
+        indices = csr.indices if csr.indices.dtype == np.int32 else csr.indices.astype(np.int32)
+        indptr = csr.indptr if csr.indptr.dtype == np.uint32 else csr.indptr.astype(np.uint32)
+        return cls(data=mx.array(data), indices=mx.array(indices),
+                   indptr=mx.array(indptr), shape=tuple(csr.shape))
 
     @property
     def n_rows(self) -> int:
