@@ -191,3 +191,22 @@ Files: `graph/louvain_hybrid.py`, `graph/louvain_fused_raw.py`. Full data: RESUL
   PBMC vs 0.5s. Not viable.
 - **Net:** primitives work in isolation (notable!), but composing a correct+fast+robust multilevel
   clusterer still loses to the multi-core per-color path. Verdict unchanged, now strongly evidenced.
+
+### ROUND 2 (pursued pure-Metal): re-rooted — blocker is RELAXED-ONLY ATOMICS, not deadlock
+- **Not a deadlock.** With capped passes G=8 COMPLETES (254ms) — but garbage Q=0.05/616cl. Earlier
+  "hangs" were multilevel non-convergence on contracted graphs. → occupancy control wouldn't help.
+- **MSL ATOMICS ARE `memory_order_relaxed`-ONLY** (durable fact!). acquire/release/seq_cst do NOT
+  exist — the system Metal compiler rejects them (`metal_types` declares only relaxed). So no
+  lock-free cross-threadgroup happens-before is expressible in Metal.
+- **Coherent-memory workaround:** Apple device cache is coherent for relaxed ATOMICS (plain stores
+  stay per-core → garbage). Accessing all shared arrays as relaxed atomics (`ldi/sti` helpers in
+  louvain_fused_raw) raised G=8 single-level Q=0.05→**0.62** — approx-correct. BUT (a) atomic O(d²)
+  hot loop is SLOWER than production (2.0s vs 1.5s); (b) thread-local neighbor snapshot restores
+  speed (599ms) but its degree cap drops hub vertices → Q=0.40; (c) residual relaxed staleness →
+  G>1 never EXACTLY matches G=1/current (62 vs ~15 comms), unfixable w/o acquire/release.
+- **FINAL:** the limit is Metal's relaxed-only atomic memory model (MSL language-level; a raw Metal
+  extension shares it). Occupancy control addresses deadlock, which is NOT the problem. Don't pursue
+  the fused multi-TG route further unless Metal gains ordered atomics + native float atomics.
+- **Reusable MLX/Metal facts banked:** inputs=`constant` (no atomics); outputs=`device`+zero-init
+  (use for atomic counters); `header=` for helper fns; sense-reversing grid barrier over device
+  atomic_uint works (≥24 TGs); float-add via CAS on atomic_uint+as_type<float> works.

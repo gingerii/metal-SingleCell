@@ -20,15 +20,22 @@ NB device outputs are zero-initialized by MLX (verified) — that bootstraps the
 counters and Σtot. Threadgroup count G is kept small for guaranteed co-residency
 (else the spin-barrier deadlocks until the GPU watchdog fires).
 
-⚠️ EXPERIMENT OUTCOME — NOT PRODUCTION-VIABLE (kept for the record). The synthesized
-primitives work in isolation (spin-barrier validated to ≥24 TGs; CAS float-add correct),
-and single-level local moving converges with sane modularity on small clean AND fuzzy
-graphs. But the full multilevel clusterer is not usable: (1) G>1 risks NONDETERMINISTIC
-deadlock — MLX gives no co-residency guarantee, and this heavy kernel doesn't always
-co-schedule G threadgroups, so the spin-barrier hangs the GPU; (2) G=1 is safe but
-single-core-slow and chokes on the dense, high-degree contracted graphs of higher levels
-(no host fallback) → non-convergence → >60s on PBMC vs 0.5s for the multi-core path. See
-RESULTS_clustering_workarounds.md. Use the production `louvain`/`leiden` instead.
+⚠️ EXPERIMENT OUTCOME — NOT PRODUCTION-VIABLE (kept for the record). Deep dive (round 2)
+RE-ROOTED the failure — it is NOT a deadlock and occupancy control would NOT help:
+1. The spin-barrier works; G=8 COMPLETES (~254ms). Earlier "hangs" were just the multilevel
+   non-convergence on contracted graphs, not the barrier.
+2. **Metal atomics are RELAXED-ONLY** — no acquire/release/seq_cst in MSL (the system Metal
+   compiler rejects them). So no lock-free cross-threadgroup happens-before is constructible.
+3. With relaxed-only, correct cross-TG sharing needs ALL shared arrays accessed as relaxed
+   ATOMICS (Apple's coherent cache; plain device stores stay per-core → garbage Q=0.05).
+   Making comm/color/sel/tgt atomic raised G=8 single-level to Q=0.62 — but:
+   (a) atomic accesses in the O(deg^2) hot loop are SLOWER than the production path
+       (2.0s vs 1.5s); (b) the local-neighbor-snapshot speedup (599ms) needs a degree cap
+       that drops hub vertices → fragments (Q=0.40 / 337 comms); (c) residual relaxed-ordering
+       staleness means G>1 never matches G=1/current EXACTLY (62 vs ~15 comms).
+CONCLUSION: the blocker is Metal's relaxed-only atomic memory model (an MSL language limit a
+raw Metal extension also has), NOT co-residency. Occupancy control addresses deadlock, which
+is not the problem. See RESULTS_clustering_workarounds.md. Use production `louvain`/`leiden`.
 """
 
 from __future__ import annotations
@@ -54,9 +61,21 @@ inline void aaf(device atomic_uint* a, float v) {           // atomic float add 
 inline float ldf(device atomic_uint* a) {
     return as_type<float>(atomic_load_explicit(a, memory_order_relaxed));
 }
+// Metal atomics are RELAXED-ONLY (no acquire/release/seq_cst in MSL). Cross-threadgroup
+// visibility therefore relies on Apple's COHERENT device memory: relaxed-atomic accesses
+// go through the coherent cache, whereas plain device stores can stay per-core (invisible
+// to other TGs). So all SHARED mutable arrays (comm/color/sel/tgt) are accessed via these
+// relaxed-atomic load/store helpers; combined with the mem_device fences in the barrier,
+// that is the strongest cross-TG ordering Metal allows.
+inline int  ldi(device int* a, uint i) {
+    return atomic_load_explicit((device atomic_int*)(a + i), memory_order_relaxed);
+}
+inline void sti(device int* a, uint i, int v) {
+    atomic_store_explicit((device atomic_int*)(a + i), v, memory_order_relaxed);
+}
 inline void gbar(device atomic_uint* cnt, device atomic_uint* sen,
                  uint G, uint lid, thread uint& ls) {        // grid-wide barrier
-    threadgroup_barrier(mem_flags::mem_device);
+    threadgroup_barrier(mem_flags::mem_device);              // flush this TG's writes
     if (lid == 0) {
         uint s = 1u - ls;
         uint old = atomic_fetch_add_explicit(cnt, 1u, memory_order_relaxed);
@@ -68,7 +87,7 @@ inline void gbar(device atomic_uint* cnt, device atomic_uint* sen,
         }
         ls = s;
     }
-    threadgroup_barrier(mem_flags::mem_device);
+    threadgroup_barrier(mem_flags::mem_device);              // refresh before reading
 }
 """
 
@@ -91,7 +110,7 @@ _SRC = r"""
     device atomic_uint* sigA = (device atomic_uint*)sig;
     thread uint ls = 0u;
 
-    for (uint v = gid; v < n; v += stride) { comm[v] = comm_in[v]; }
+    for (uint v = gid; v < n; v += stride) { sti(comm, v, (int)comm_in[v]); }
     gbar(cnt, sen, G, lid, ls);
 
     for (uint pass = 0; pass < max_passes; ++pass) {
@@ -99,32 +118,32 @@ _SRC = r"""
         for (uint v = gid; v < n; v += stride) {
             atomic_store_explicit((device atomic_uint*)(sig + v), as_type<uint>(0.0f),
                                   memory_order_relaxed);
-            color[v] = -1;
+            sti(color, v, -1);
         }
         gbar(cnt, sen, G, lid, ls);
-        for (uint v = gid; v < n; v += stride) { aaf(&sigA[comm[v]], k[v]); }
+        for (uint v = gid; v < n; v += stride) { aaf(&sigA[ldi(comm, v)], k[v]); }
         gbar(cnt, sen, G, lid, ls);
 
         // ---- fresh Luby coloring (fixed #rounds; uncolored stay -1 = skipped) ----
         for (uint r = 0; r < max_rounds; ++r) {
             for (uint v = gid; v < n; v += stride) {
-                if (color[v] >= 0) { continue; }
+                if (ldi(color, v) >= 0) { continue; }
                 uint hv = (v * 2654435761u) ^ (r * 40503u) ^ seed; hv ^= hv >> 15;
                 int pv = (int)(hv & 0x7fffffu);
                 uint s = indptr[v]; uint e = indptr[v + 1];
                 bool is_max = true;
                 for (uint a = s; a < e; ++a) {
                     int na = indices[a];
-                    if (na == (int)v || color[na] >= 0) { continue; }
+                    if (na == (int)v || ldi(color, (uint)na) >= 0) { continue; }
                     uint hn = ((uint)na * 2654435761u) ^ (r * 40503u) ^ seed; hn ^= hn >> 15;
                     int pn = (int)(hn & 0x7fffffu);
                     if (pn > pv || (pn == pv && na < (int)v)) { is_max = false; break; }
                 }
-                if (is_max) { sel[v] = 1; } else { sel[v] = 0; }
+                sti(sel, v, is_max ? 1 : 0);
             }
             gbar(cnt, sen, G, lid, ls);
             for (uint v = gid; v < n; v += stride) {
-                if (color[v] < 0 && sel[v] == 1) { color[v] = (int)r; }
+                if (ldi(color, v) < 0 && ldi(sel, v) == 1) { sti(color, v, (int)r); }
             }
             gbar(cnt, sen, G, lid, ls);
         }
@@ -137,44 +156,49 @@ _SRC = r"""
         // ---- colored moves: per color, two-phase (compute target | apply) ----
         for (uint c = 0; c < max_rounds; ++c) {
             for (uint v = gid; v < n; v += stride) {
-                tgt[v] = comm[v];
-                if (color[v] != (int)c) { continue; }
+                int cur0 = ldi(comm, v);
+                sti(tgt, v, cur0);
+                if (ldi(color, v) != (int)c) { continue; }
                 uint s = indptr[v]; uint e = indptr[v + 1];
-                if (e - s > capv) { continue; }
-                int curr = comm[v];
+                uint deg = e - s;
+                if (deg > 64u) { continue; }   // local-snapshot cap (degree>64 -> skipped)
+                // Snapshot neighbor communities ONCE (O(deg) atomic loads) into a
+                // thread-local array, then dedup + weight-sum on the local copy (no
+                // atomics) — turns the O(deg^2) hot loop from atomic-bound to register-fast.
+                int lc[64];
+                for (uint a = 0; a < deg; ++a) { lc[a] = ldi(comm, (uint)indices[s + a]); }
+                int curr = cur0;
                 float kv = k[v];
                 float best_g = -1e30f; int best_c = curr; float stay_g = 0.0f;
-                for (uint a = s; a < e; ++a) {
-                    int na = indices[a];
+                for (uint a = 0; a < deg; ++a) {
+                    int na = indices[s + a];
                     if (na == (int)v) { continue; }
-                    int ca = comm[na];
+                    int ca = lc[a];
                     bool first = true;
-                    for (uint b = s; b < a; ++b) {
-                        int nb = indices[b];
-                        if (nb != (int)v && comm[nb] == ca) { first = false; break; }
+                    for (uint b = 0; b < a; ++b) {
+                        if (indices[s + b] != (int)v && lc[b] == ca) { first = false; break; }
                     }
                     if (!first) { continue; }
                     float wc = 0.0f;
-                    for (uint b = s; b < e; ++b) {
-                        int nb = indices[b];
-                        if (nb != (int)v && comm[nb] == ca) { wc += weights[b]; }
+                    for (uint b = 0; b < deg; ++b) {
+                        if (indices[s + b] != (int)v && lc[b] == ca) { wc += weights[s + b]; }
                     }
                     float sg = ldf(&sigA[ca]) - (ca == curr ? kv : 0.0f);
                     float g = wc - rs * sg * kv * inv;
                     if (ca == curr) { stay_g = g; }
                     if (g > best_g || (g == best_g && ca < best_c)) { best_g = g; best_c = ca; }
                 }
-                tgt[v] = (best_g > stay_g + 1e-9f) ? best_c : curr;
+                sti(tgt, v, (best_g > stay_g + 1e-9f) ? best_c : curr);
             }
             gbar(cnt, sen, G, lid, ls);
             for (uint v = gid; v < n; v += stride) {
-                if (color[v] != (int)c) { continue; }
-                int oldc = comm[v]; int newc = tgt[v];
+                if (ldi(color, v) != (int)c) { continue; }
+                int oldc = ldi(comm, v); int newc = ldi(tgt, v);
                 if (newc != oldc) {
                     float kv = k[v];
                     aaf(&sigA[oldc], -kv);
                     aaf(&sigA[newc], kv);
-                    comm[v] = newc;
+                    sti(comm, v, newc);
                     atomic_fetch_add_explicit(mv, 1u, memory_order_relaxed);
                 }
             }
