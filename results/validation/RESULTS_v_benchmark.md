@@ -21,7 +21,7 @@ _(Updated to fold in step-2 optimizations: the `from_scipy` transfer fix and `_k
 | kmeans | 2.1 | 3.5 | 4.0 | (1.1s)² | (3.2s)² | ARI~0.8 |
 | diffmap | 2.1 | 2.9 | 2.7 | – | – | corr 0.99 |
 | regress_out | 1.6 | 1.7 | 1.6 | – | – | corr 1.000 |
-| neighbors | 1.7 | 1.6 | 1.5 | 1.05 | (392s)² | validated |
+| neighbors | 2.2⁵ | 2.2⁵ | 1.8⁵ | 1.05 | (392s)² | validated |
 | umap | **20.6** | 8.2 | 6.4 | (188s)² | (75s)² | preservation |
 | scrublet | **20.3** | 6.4 | – | – | – | AUC 0.95 |
 | t-SNE | 0.9 | 1.0 | 1.0 | – | – | =sklearn-BH >30k³ |
@@ -39,6 +39,10 @@ host→device transfer of the ~16 GB matrix is significant under memory pressure
 at this scale); time shown — all RUN at 2M, no OOM. ³ above n=30k our t-SNE delegates to sklearn
 Barnes-Hut, so ≈1×. ⁴ **After the harmonize fix** (`max_iter_clustering` 200→20): PBMC 9.5s→1.3s,
 50k 14.4s→7.0s, 100k 46.9s→22.8s; still CPU-favored on speed but mixing quality beats harmonypy.
+⁵ **After the custom top-k Metal kernel** (replaces `mx.argpartition`, the kNN bottleneck —
+~5.7× the distance compute): neighbors 1.7/1.6/1.5× → **2.2/2.2/1.8×**; the brute core
+(`_knn_gpu`) alone went 267ms→56ms (4.8×) @25k, recall preserved (0.96). This is the one place
+MLX clearly underperformed a specialized kernel (cuML's neighbors edge); it narrows that gap.
 
 ## Three regimes (the honest verdict)
 1. **WINS, scale up — parallel-arithmetic ops** (bandwidth-bound, the M3's sweet spot): HVG
