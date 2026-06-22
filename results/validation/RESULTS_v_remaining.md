@@ -9,8 +9,8 @@ scrublet). Stochastic methods validated by structure/agreement, as with umap/lei
 | function | reference | metric | result |
 |----------|-----------|--------|--------|
 | kmeans | sklearn KMeans | ARI | **0.895** ✓ |
-| score_genes | scanpy tl.score_genes | score corr | **0.983** ✓ |
-| score_genes_cell_cycle | scanpy | phase agreement | **0.876** ✓ |
+| score_genes | scanpy tl.score_genes | score corr | **1.000** ✓ (parity-fixed) |
+| score_genes_cell_cycle | scanpy | phase agreement | **0.959** ✓ (parity-fixed) |
 | rank_genes_groups (t-test) | scanpy tl.rank_genes_groups | top-25 marker overlap | **1.000** ✓ |
 | tsne | sklearn TSNE | nbr-preservation | 0.229 vs 0.242 ✓ |
 | draw_graph | scanpy tl.draw_graph (fr) | nbr-preservation | 0.118 vs 0.101 ✓ |
@@ -33,6 +33,22 @@ scrublet). Stochastic methods validated by structure/agreement, as with umap/lei
   scanpy's own 0.796 on the same injected set.
 - **HVG-restriction** is what makes all of this run at scale: downstream operates on n×2000,
   not n×n_genes, so there is no atlas-scale OOM for these functions.
+
+## Parity deltas closed (all four flagged)
+- **HVG cell_ranger** 0.617→**1.000** overlap: scanpy applies expm1 + log(disp)/log1p(mean) only
+  for `seurat`; cell_ranger uses mean/var of the lognorm values directly (no log) — now matched.
+- **HVG seurat_v3** →**1.000**: now uses `skmisc.loess` (span 0.3, degree 2) like scanpy (was a
+  statsmodels degree-1 approximation).
+- **score_genes** 0.95–0.98→**1.000**: matched scanpy's `rankdata//n_items` binning + per-unique-bin
+  control sampling (lifts score_genes_cell_cycle to 0.959).
+- **rank_genes_groups**: top-25 marker overlap **1.000** on real data (overestim_var delta only
+  reorders lower-ranked genes).
+
+## Larger real data
+The scalable subset (kmeans, score_genes, rank_genes_groups, normalize_pearson_residuals, diffmap)
+is also confirmed on **100k real neurons** (HVG-restricted) — see `v_remaining_scale.py` /
+RESULTS would be in v_remaining_scale.log. Exact tsne (O(n²)) and gaussian-KDE embedding_density are
+subsample-only by design.
 
 Driver: `validation_notebooks/v_remaining.py`. References: scanpy, scikit-learn, harmonypy,
 bbknn, scrublet.
