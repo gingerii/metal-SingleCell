@@ -49,9 +49,34 @@ multi-core per-color implementation**, which remains optimal:
   the single-threadgroup fallback is core-starved and non-convergent on dense levels.
 
 This reaffirms the standing verdict with stronger evidence: the clustering crossover on M3 is
-**hardware/runtime-bound**, not a missing optimization. A faithful cuGraph-style kernel would
-need either Metal exposing a sanctioned grid barrier + native float atomics through MLX, or a
-hand-rolled Metal extension outside MLX with explicit occupancy control.
+**hardware/runtime-bound**, not a missing optimization.
+
+## Round 2 — pursuing the pure-Metal route (re-rooted the failure)
+Tried to make the multi-threadgroup fused kernel correct + fast. Findings, in order:
+1. **It is NOT a deadlock.** With capped passes, **G=8 completes in 254 ms** — but produces
+   garbage (616 comms, **Q=0.05**). So the earlier "hangs" were the multilevel *non-convergence*
+   on contracted graphs, not the spin-barrier. → occupancy control would not have helped.
+2. **Metal atomics are `relaxed`-only.** Adding the textbook acquire/release barrier fails to
+   compile: the system Metal compiler declares **only `memory_order_relaxed`** (no
+   acquire/release/seq_cst). No lock-free cross-threadgroup happens-before is expressible.
+3. **Coherent-memory workaround partially works.** Apple's device cache is coherent for relaxed
+   *atomics* (plain stores stay per-core). Accessing all shared arrays (comm/color/sel/tgt) as
+   relaxed atomics raised G=8 single-level from Q=0.05 → **Q=0.62 / 62 comms** — correctness is
+   *approximately* recovered. But:
+   - atomic accesses in the O(deg²) hot loop are **slower than production** (2.0 s vs 1.5 s);
+   - a thread-local neighbor snapshot (O(deg) atomics) restores speed (**599 ms**) but its
+     degree cap drops hub vertices (connectivities graph has degree>64 hubs) → **Q=0.40 / 337
+     comms**;
+   - **residual relaxed-ordering staleness** means G>1 never matches G=1/current EXACTLY
+     (62 vs ~15 single-level comms) — and this is unfixable without acquire/release, which
+     Metal lacks.
+
+### Final verdict on the pure-Metal route
+The blocker is **Metal's relaxed-only atomic memory model**, an MSL *language-level* limit that a
+hand-rolled Metal extension shares. **Occupancy control does not address it** — co-residency
+(deadlock) was never the problem; correctness + the atomic hot-loop cost are. A faithful
+cuGraph-style fused kernel needs Metal to expose acquire/release (or seq_cst) atomics and native
+float atomics; until then the multi-core per-color production path is optimal on M3.
 
 Both experimental modules are kept (clearly marked non-viable); production `louvain`/`leiden`
-are unchanged. Drivers: ad-hoc benchmarks over PBMC + SBM (see commit).
+are unchanged. Drivers: ad-hoc benchmarks over PBMC + SBM (see commits).
