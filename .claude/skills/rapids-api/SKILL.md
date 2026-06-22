@@ -98,6 +98,19 @@ normalize_pearson_residuals 1.0000 (analytic); scrublet injected-doublet AUC 0.9
 harmonize batch-mixing 0.05→0.52 = harmonypy 0.50; bbknn opp-batch 0.58 = bbknn pkg 0.57. Refs
 installed in env: harmonypy, bbknn, scrublet, squidpy. See RESULTS_v_remaining.md.
 
+## LARGER-DATA validation (v_remaining_scale.py, 100k real neurons) + 2 scale bugs FIXED
+Scalable remaining functions confirmed at 100k (HVG-restricted): kmeans, score_genes (1.000),
+rank_genes_groups (top-25 1.000), normalize_pearson_residuals (1.0000), diffmap, harmonize
+(mixing 0.01→0.50), bbknn (0.56); scrublet at combined ~75k (AUC 0.931). exact-tsne & KDE
+embedding_density are O(n²) subsample-only.
+- **BUG FIXED — bbknn GPU OOM**: built full n×|batch| distance matrix (100k×50k≈20GB) → tile query
+  rows (~256M-entry cap). `neighbors.bbknn`.
+- **BUG FIXED — scrublet GPU OOM**: `.toarray()` densified combined ~3n×20k (≈24GB) → HVG-restrict
+  + sparse PCA (canonical). `preprocess.scrublet`. (Machine is **51.5GB RAM**, not 24GB as earlier
+  docs said.) Known limit: scrublet brute-force `_knn_gpu` heavy past combined~100k (future: route
+  through tiled/pynndescent neighbors). These two OOMs (+harness not freeing 8GB dense intermediates)
+  drove memory to exhaustion and plausibly caused a dev-machine hard reboot during validation.
+
 ## WHERE WE ARE (checkpoint)
 **ALL ~32 rsc pp/tl/gr functions implemented & pushed + REAL-DATA VALIDATED** (core pipeline, spatial
 gr, atlas, Xenium, AND the remaining tools/integration/pp via v_remaining.py). Modules: sparse,
