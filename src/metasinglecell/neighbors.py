@@ -75,8 +75,11 @@ def bbknn(X_pca: np.ndarray, batch, neighbors_within_batch: int = 3,
         Xb = Xg[mx.array(bidx.astype(np.int32))]
         xb_sq = mx.sum(Xb * Xb, axis=1)
         kk = min(k, bidx.size)
-        # Tile the query rows: the full n×|batch| distance matrix would be O(n²) on the
-        # GPU (e.g. 100k×50k ≈ 20GB → Metal OOM). Cap each tile to ~256M entries.
+        # Per-batch kNN of ALL cells against this batch's cells (GPU brute-force). Tile
+        # the query rows so the n×|batch| distance matrix never blows memory (cap ~256M
+        # entries). NB this is O(n·|batch|) per batch; bbknn is kNN-workload-bound, where
+        # the package's approximate CPU kNN (cKDTree/annoy) is competitive — the GPU does
+        # not beat it (a workload limit, like the regular neighbors). Validated equal mixing.
         tile = max(1, 256_000_000 // max(bidx.size, 1))
         loc_b = np.empty((n, kk), dtype=np.int64)
         d_b = np.empty((n, kk), dtype=np.float32)
