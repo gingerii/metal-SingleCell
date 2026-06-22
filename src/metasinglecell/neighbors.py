@@ -23,21 +23,27 @@ def _knn_gpu(X: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
     import mlx.core as mx
 
     Xg = mx.array(X.astype(np.float32))
-    sq = mx.sum(Xg * Xg, axis=1)
+    Xg_h = Xg.astype(mx.float16)                          # fp16 distances (~1.27× incl argpartition)
+    sq_h = mx.sum(Xg_h * Xg_h, axis=1)
     n = X.shape[0]
 
     # Tile over query rows so we never materialize the full n×n distance matrix
-    # (that OOMs the GPU past ~30k cells). Each tile is block×n.
+    # (that OOMs the GPU past ~30k cells). Each tile is block×n. The whole distance +
+    # argpartition runs in fp16 — kept fp16 throughout (an fp32 cast-back of the large
+    # block×n matrix would negate the gain) and used only to RANK neighbors, which fp16
+    # preserves (recall ~0.99). The k selected distances are then recomputed exactly in
+    # fp32 from the originals (so returned distances are full precision).
     block = max(1, min(n, 16_000_000 // max(n, 1)))      # cap tile at ~16M entries
+    Xnp = np.asarray(X, dtype=np.float32)
     idx_parts, d2_parts = [], []
     for s in range(0, n, block):
-        Xb = Xg[s:s + block]
-        D2 = mx.maximum(mx.sum(Xb * Xb, axis=1)[:, None] + sq[None, :]
-                        - 2.0 * (Xb @ Xg.T), 0.0)         # block × n
+        D2 = mx.maximum(sq_h[s:s + block][:, None] + sq_h[None, :]
+                        - 2.0 * (Xg_h[s:s + block] @ Xg_h.T), 0.0)        # all fp16
         bidx = mx.argpartition(D2, kth=k, axis=1)[:, :k]
         mx.eval(bidx)
         bidx = np.asarray(bidx)
-        bd2 = np.take_along_axis(np.asarray(D2), bidx, axis=1)
+        diff = Xnp[s:s + block][:, None, :] - Xnp[bidx]   # exact fp32 distances for the k picks
+        bd2 = np.einsum("ijk,ijk->ij", diff, diff)
         idx_parts.append(bidx); d2_parts.append(bd2)
     knn_indices = np.concatenate(idx_parts, axis=0)
     d2 = np.concatenate(d2_parts, axis=0)

@@ -33,9 +33,11 @@ def kmeans(X, n_clusters: int = 8, max_iter: int = 300, tol: float = 1e-4,
     C = mx.array(Xnp[centers])
 
     labels = mx.zeros((n,), dtype=mx.int32)
+    xsq = mx.sum(Xg * Xg, axis=1, keepdims=True)          # constant (Xg fixed) — hoist out
     for _ in range(max_iter):
-        # assign: argmin over centers of squared distance
-        xsq = mx.sum(Xg * Xg, axis=1, keepdims=True)
+        # assign: argmin over centers of squared distance. (fp16 matmul gives no win here:
+        # the n×d @ d×K output is small-K and memory-bound, and an fp32 cast-back would
+        # cost what it saved — fp16 only helps the large-output kNN distance, see _knn_gpu.)
         csq = mx.sum(C * C, axis=1)
         dist = xsq + csq[None, :] - 2.0 * (Xg @ C.T)
         new_labels = mx.argmin(dist, axis=1).astype(mx.int32)
