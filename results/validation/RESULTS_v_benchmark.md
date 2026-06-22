@@ -22,7 +22,7 @@ _(Updated to fold in step-2 optimizations: the `from_scipy` transfer fix and `_k
 | diffmap | 2.1 | 2.9 | 2.7 | – | – | corr 0.99 |
 | regress_out | 1.6 | 1.7 | 1.6 | – | – | corr 1.000 |
 | neighbors | 2.2⁵ | 2.2⁵ | 1.8⁵ | 1.05 | (392s)² | validated |
-| umap | **20.6** | 8.2 | 6.4 | (188s)² | (75s)² | preservation |
+| umap | **34.0**⁶ | 10.5⁶ | 7.8⁶ | (188s)² | (75s)² | preservation 0.13 |
 | scrublet | **20.3** | 6.4 | – | – | – | AUC 0.95 |
 | t-SNE | 0.9 | 1.0 | 1.0 | – | – | =sklearn-BH >30k³ |
 | draw_graph | 21.5 | NA | NA | – | – | preservation |
@@ -43,6 +43,10 @@ Barnes-Hut, so ≈1×. ⁴ **After the harmonize fix** (`max_iter_clustering` 20
 ~5.7× the distance compute): neighbors 1.7/1.6/1.5× → **2.2/2.2/1.8×**; the brute core
 (`_knn_gpu`) alone went 267ms→56ms (4.8×) @25k, recall preserved (0.96). This is the one place
 MLX clearly underperformed a specialized kernel (cuML's neighbors edge); it narrows that gap.
+⁶ **After moving umap's negative sampling to the GPU** (was host `np.random` + per-epoch
+host→device transfer, breaking the lazy-eval graph): layout ~1.4× faster → umap 20.6/8.2/6.4× →
+**34.0/10.5/7.8×**, quality preserved (PBMC nbr-preservation 0.128 vs umap-learn 0.157).
+`fuzzy_simplicial_set` was found NOT to be a bottleneck (0.02–0.04s warm; earlier 1.3s was numba JIT).
 
 ## Three regimes (the honest verdict)
 1. **WINS, scale up — parallel-arithmetic ops** (bandwidth-bound, the M3's sweet spot): HVG
