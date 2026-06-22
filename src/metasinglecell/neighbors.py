@@ -223,6 +223,31 @@ def _knn_ivf(X, k, nlist=None, nprobe=5, seed=0):
     return idx, np.sqrt(np.maximum(dist, 0.0))
 
 
+def _knn(X_pca: np.ndarray, n_neighbors: int, random_state: int = 0,
+         approx: bool | None = None):
+    """k-NN dispatch by scale (returns ``(indices, dists)``), shared by neighbors/scrublet:
+
+    *  n ≤ 30k   : exact GPU brute-force (fast + exact there)
+    *  30k–250k  : GPU IVF (kmeans buckets) — ~2–2.6× faster than pynndescent, recall ~0.9
+    *  > 250k    : pynndescent (scanpy's default; IVF recall/cost degrade past this)
+
+    Plain GPU brute-force is O(n²) (memory + compute) and loses to optimized CPU here, so
+    anything that does kNN at scale (e.g. scrublet on a ~3n doublet-simulation set) must go
+    through this dispatch, not ``_knn_gpu`` directly.
+    """
+    n = X_pca.shape[0]
+    if approx is None:
+        approx = n > 30_000
+    if not approx:
+        return _knn_gpu(X_pca, n_neighbors)
+    if n <= 250_000:
+        return _knn_ivf(X_pca, n_neighbors, seed=random_state)
+    from pynndescent import NNDescent
+    index = NNDescent(np.asarray(X_pca, dtype=np.float32), n_neighbors=n_neighbors,
+                      random_state=random_state)
+    return index.neighbor_graph
+
+
 def neighbors(X_pca: np.ndarray, n_neighbors: int = 15, random_state: int = 0,
               approx: bool | None = None):
     """Compute distance + connectivity graphs from a PCA embedding.
@@ -235,23 +260,7 @@ def neighbors(X_pca: np.ndarray, n_neighbors: int = 15, random_state: int = 0,
     from umap.umap_ import fuzzy_simplicial_set
 
     n = X_pca.shape[0]
-    # Three-way KNN dispatch, by what's fastest at each scale on the M3:
-    #   n ≤ 30k   : exact GPU brute-force (fast + exact there)
-    #   30k–250k  : GPU IVF (kmeans buckets) — ~2–2.6× faster than pynndescent, recall ~0.9
-    #   > 250k    : pynndescent (scanpy's default; IVF recall/cost degrade past this)
-    # (Plain GPU brute-force O(n²) and a naive GPU NN-descent both LOSE to optimized
-    # CPU here — KNN is low-dim/irregular; only IVF's bucketing gives a mid-range win.)
-    if approx is None:
-        approx = n > 30_000
-    if not approx:
-        knn_indices, knn_dists = _knn_gpu(X_pca, n_neighbors)
-    elif n <= 250_000:
-        knn_indices, knn_dists = _knn_ivf(X_pca, n_neighbors, seed=random_state)
-    else:
-        from pynndescent import NNDescent
-        index = NNDescent(np.asarray(X_pca, dtype=np.float32), n_neighbors=n_neighbors,
-                          random_state=random_state)
-        knn_indices, knn_dists = index.neighbor_graph
+    knn_indices, knn_dists = _knn(X_pca, n_neighbors, random_state, approx)
 
     # UMAP fuzzy simplicial set — same call scanpy uses for method="umap".
     conn = fuzzy_simplicial_set(

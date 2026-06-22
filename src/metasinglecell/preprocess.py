@@ -174,7 +174,7 @@ def scrublet(counts, sim_doublet_ratio: float = 2.0, n_neighbors: int | None = N
     import scipy.sparse as sp
 
     from .decomposition import pca
-    from .neighbors import _knn_gpu
+    from .neighbors import _knn
     from .sparse import CSR
 
     C = sp.csr_matrix(counts)
@@ -197,7 +197,7 @@ def scrublet(counts, sim_doublet_ratio: float = 2.0, n_neighbors: int | None = N
                       n_comps=min(n_pcs, int(hvg.sum()) - 1),
                       solver="randomized", random_state=random_state)
 
-    knn_idx, _ = _knn_gpu(X_pca.astype(np.float32), n_neighbors + 1)
+    knn_idx, _ = _knn(X_pca.astype(np.float32), n_neighbors + 1, random_state=random_state)
     knn_idx = knn_idx[:n, 1:]                           # real cells, exclude self
     is_sim = knn_idx >= n                               # neighbor is a simulated doublet
     frac_sim = is_sim.mean(axis=1)
