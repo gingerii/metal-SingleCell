@@ -171,3 +171,23 @@ cuGraph's fused CUDA wins because A100s have both grid sync (cooperative groups)
 implementation is optimal for M3; the clustering crossover (~1M Leiden, ~50k Louvain) is hardware-
 bound, not implementation-bound.** Reverted the fused code; do not re-attempt without Metal gaining
 grid barriers or float atomics.
+
+## WORKAROUNDS for the two limits — BOTH BUILT & TESTED, neither beats production (kept, non-viable)
+Files: `graph/louvain_hybrid.py`, `graph/louvain_fused_raw.py`. Full data: RESULTS_clustering_workarounds.md.
+- **MLX kernel facts discovered (reusable!):** inputs are `constant` address space (CANNOT be atomic);
+  **outputs are `device` AND zero-initialized** (verified) — so atomic counters/accumulators must be
+  OUTPUTS. `mx.fast.metal_kernel(header=...)` takes helper funcs. With that: a **sense-reversing
+  grid-wide barrier** over a `device atomic_uint` output counter WORKS (validated ≥24 threadgroups,
+  sub-ms), and **float atomic-add via CAS loop** (`atomic_compare_exchange_weak` on `atomic_uint` +
+  `as_type<float>`) WORKS. So both "missing" primitives are synthesizable in MLX.
+- **Hybrid (GPU computes all gains in 1 dispatch, CPU applies in gain order w/ exact Σtot):** 1.84×
+  faster on PBMC BUT fragments fuzzy graphs (Q0.609/**96cl** vs 0.661/10) — a per-pass snapshot can't
+  give per-color-fresh Σtot; and the Python CPU-apply is 0.06× at 100k. Not viable.
+- **Raw-fused (spin-barrier + CAS float-atomic Σtot, per-color, single dispatch):** correct on small
+  graphs (tiny 2-block Q=0.5000==current; PBMC-400 single-level converges Q0.564 vs 0.587). But (1)
+  **G>1 deadlocks NONDETERMINISTICALLY** — MLX gives no co-residency guarantee, heavy kernel fails to
+  co-schedule G TGs → spin-barrier hangs the GPU (seen G=8 & G=4 on PBMC); (2) **G=1 is core-starved**
+  and the dense high-degree CONTRACTED levels (no host fallback) don't converge in budget → >60s on
+  PBMC vs 0.5s. Not viable.
+- **Net:** primitives work in isolation (notable!), but composing a correct+fast+robust multilevel
+  clusterer still loses to the multi-core per-color path. Verdict unchanged, now strongly evidenced.
