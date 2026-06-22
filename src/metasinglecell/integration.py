@@ -25,7 +25,7 @@ def _l2_normalize(M):
 
 def harmonize(Z, batch, n_clusters: int | None = None, sigma: float = 0.1,
               theta: float = 2.0, ridge_lambda: float = 1.0,
-              max_iter_harmony: int = 10, max_iter_clustering: int = 200,
+              max_iter_harmony: int = 10, max_iter_clustering: int = 20,
               tol_harmony: float = 1e-4, tol_clustering: float = 1e-5,
               random_state: int = 0) -> np.ndarray:
     """Harmony batch correction of an embedding. Returns the corrected ``Z``.
