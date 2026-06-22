@@ -63,3 +63,10 @@ PBMC,2700,scrublet,0.1982,3.6934,18.63,,,
 1M,1000000,umap,188.4226,NA,NA,,,ref NA@scale
 1M,1000000,kmeans,1.0901,NA,NA,,,ref NA@scale
 2M,2035266,normalize+log1p,0.8515,2.4199,2.84,max|d|,9.54e-07,
+2M,2035266,highly_variable_genes,0.0653,3.2092,49.17,overlap,1.000,
+2M,2035266,pca(sparse),7.9989,NA,NA,subspace,0.989,ref NA@scale
+2M,2035266,neighbors,392.3406,NA,NA,,,ref NA@scale
+2M,2035266,louvain,53.4106,NA,NA,Q,0.759,ref NA@scale
+2M,2035266,leiden,252.0794,NA,NA,,,ref NA@scale
+2M,2035266,umap,75.3287,NA,NA,,,ref NA@scale
+2M,2035266,kmeans,3.2138,NA,NA,,,ref NA@scale
