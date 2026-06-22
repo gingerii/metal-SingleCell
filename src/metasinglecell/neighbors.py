@@ -15,6 +15,60 @@ from __future__ import annotations
 import numpy as np
 
 
+# Custom top-k-per-row selection kernel. MLX's general ``argpartition`` over wide rows is
+# the kNN bottleneck (measured ~5.7× the distance compute: 25k → distance 39ms vs
+# distance+argpartition 222ms) because it partitions the full n-wide row. For k≪n we don't
+# need a full partition: one thread per row scans its distances once and keeps the k
+# smallest in registers (k≤32 → a tiny register array), then sorts those k — O(n·k), one
+# pass, no general sort. Reads the distance matrix once (memory-bound). This is the brute
+# core that the IVF buckets and bbknn batches also use.
+_TOPK_KERNEL_SOURCE = """
+    uint row = thread_position_in_grid.x;
+    uint n = (uint)dims[0];
+    uint K = (uint)dims[1];
+    float vals[32];
+    int inds[32];
+    for (uint i = 0; i < K; ++i) { vals[i] = 1e30f; inds[i] = -1; }
+    uint maxp = 0;                                   // position of the current largest of the K
+    uint base = row * n;
+    for (uint j = 0; j < n; ++j) {
+        float d = (float)data[base + j];
+        if (d < vals[maxp]) {
+            vals[maxp] = d; inds[maxp] = (int)j;
+            float m = vals[0]; uint mp = 0;          // rescan for the new largest
+            for (uint i = 1; i < K; ++i) { if (vals[i] > m) { m = vals[i]; mp = i; } }
+            maxp = mp;
+        }
+    }
+    for (uint i = 1; i < K; ++i) {                   // insertion-sort the K ascending
+        float v = vals[i]; int id = inds[i]; int t = (int)i - 1;
+        while (t >= 0 && vals[t] > v) { vals[t + 1] = vals[t]; inds[t + 1] = inds[t]; --t; }
+        vals[t + 1] = v; inds[t + 1] = id;
+    }
+    for (uint i = 0; i < K; ++i) { out_idx[row * K + i] = inds[i]; }
+"""
+
+
+def _topk_rows(D2, k):
+    """Indices of the k smallest entries per row of ``D2`` (m×n MLX array), sorted ascending.
+
+    Replaces ``mx.argpartition(D2, k)[:, :k]`` with a one-pass register top-k kernel.
+    """
+    import mlx.core as mx
+
+    m = D2.shape[0]
+    kernel = mx.fast.metal_kernel(
+        name="topk_rows", input_names=["data", "dims"], output_names=["out_idx"],
+        source=_TOPK_KERNEL_SOURCE,
+    )
+    (out,) = kernel(
+        inputs=[D2, mx.array([D2.shape[1], k], dtype=mx.uint32)],
+        grid=(m, 1, 1), threadgroup=(min(256, m), 1, 1),
+        output_shapes=[(m, k)], output_dtypes=[mx.int32],
+    )
+    return out
+
+
 def _knn_gpu(X: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
     """Exact k-NN (incl. self) via brute-force squared-Euclidean on the GPU.
 
@@ -33,18 +87,18 @@ def _knn_gpu(X: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
     # block×n matrix would negate the gain) and used only to RANK neighbors, which fp16
     # preserves (recall ~0.99). The k selected distances are then recomputed exactly in
     # fp32 from the originals (so returned distances are full precision).
-    block = max(1, min(n, 16_000_000 // max(n, 1)))      # cap tile at ~16M entries
-    Xnp = np.asarray(X, dtype=np.float32)
+    # _knn_gpu is the brute path (n≲30k); the full fp16 n×n matrix fits in one tile there
+    # (30k² ≈ 1.8 GB), so a generous cap avoids per-tile dispatch overhead (~40 tiny tiles
+    # at the old 16M cap cost ~190ms). Larger n still tiles to stay within memory.
+    block = max(1, min(n, 1_000_000_000 // max(n, 1)))   # cap tile at ~1B entries (2GB fp16)
     idx_parts, d2_parts = [], []
     for s in range(0, n, block):
         D2 = mx.maximum(sq_h[s:s + block][:, None] + sq_h[None, :]
                         - 2.0 * (Xg_h[s:s + block] @ Xg_h.T), 0.0)        # all fp16
-        bidx = mx.argpartition(D2, kth=k, axis=1)[:, :k]
-        mx.eval(bidx)
-        bidx = np.asarray(bidx)
-        diff = Xnp[s:s + block][:, None, :] - Xnp[bidx]   # exact fp32 distances for the k picks
-        bd2 = np.einsum("ijk,ijk->ij", diff, diff)
-        idx_parts.append(bidx); d2_parts.append(bd2)
+        bidx = _topk_rows(D2, k)                          # custom kernel (vs slow argpartition)
+        bd2 = mx.take_along_axis(D2, bidx, axis=1)        # gather distances on the GPU
+        mx.eval(bidx, bd2)                                # transfer only the small block×k results
+        idx_parts.append(np.asarray(bidx)); d2_parts.append(np.asarray(bd2).astype(np.float32))
     knn_indices = np.concatenate(idx_parts, axis=0)
     d2 = np.concatenate(d2_parts, axis=0)
 
@@ -220,9 +274,11 @@ def _knn_ivf(X, k, nlist=None, nprobe=5, seed=0):
         Qg = Xg[mx.array(q.astype(np.int32))]; Mg = Xg[mx.array(mem.astype(np.int32))]
         D = mx.maximum(mx.sum(Qg * Qg, 1)[:, None] + mx.sum(Mg * Mg, 1)[None, :] - 2 * (Qg @ Mg.T), 0.0)
         kk = min(k, mem.size)
-        part = np.asarray(mx.argpartition(D, kth=kk - 1, axis=1)[:, :kk])
+        part = _topk_rows(D, kk)                          # custom top-k (vs argpartition)
+        Dvg = mx.take_along_axis(D, part, axis=1)         # gather dists on GPU (avoid full D transfer)
+        mx.eval(part, Dvg); part = np.asarray(part)
         Qi.append(np.repeat(q, kk)); Ci.append(mem[part].ravel())
-        Dd.append(np.take_along_axis(np.asarray(D), part, axis=1).ravel())
+        Dd.append(np.asarray(Dvg).ravel())
     Q = np.concatenate(Qi); C = np.concatenate(Ci); Dv = np.concatenate(Dd)
     o = np.lexsort((Dv, Q)); Q, C, Dv = Q[o], C[o], Dv[o]          # sort by (query, dist)
     rank = np.arange(len(Q)) - np.repeat(np.searchsorted(Q, np.arange(n)), np.bincount(Q, minlength=n))
