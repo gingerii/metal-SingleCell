@@ -149,3 +149,25 @@ overhead) + per-pass coloring — not the GPU math. At small/mid n the launch ov
 - The only real speed fix to lower the crossover is a FUSED single-kernel local-moving (cuGraph-style,
   per-vertex hashing, colors looped inside one kernel) — large effort. Until then: `cluster.leiden`
   defaults to backend="igraph" (fast/robust); backend="gpu" for atlas scale.
+
+## FUSED single-kernel local-moving — BUILT, BENCHMARKED, NOT VIABLE on M3 (reverted)
+Implemented a fully-fused color+move kernel: ONE dispatch per pass does a fresh in-kernel Luby
+coloring (rounds looped inside, integer-hash priorities) AND all colored moves, in a SINGLE
+threadgroup so the per-round/per-color `threadgroup_barrier(mem_device)` acts grid-wide. Result:
+- **Correct + faster ONLY on small CLEAN graphs**: unweighted SBM n≤4k → 1.5–2.1× faster, Q identical;
+  crossover ~5k (5k ≈ par, 10k 0.63×, 100k 0.47×).
+- **FATAL on real (weighted/fuzzy) graphs**: PBMC louvain fragmented (Q 0.62/52cl vs 0.66/10cl),
+  **leiden collapsed to Q=0 / 1 cluster.**
+Two compounding HARDWARE limits make it non-viable (this is the "limitation is the hardware" verdict):
+1. **No grid-wide barrier across threadgroups** → correct color-sequential ordering forces a SINGLE
+   threadgroup = ~1 of the M3's ~10 GPU cores → loses to the multi-core per-color path above ~5k.
+2. **No Metal float-atomics** → cannot recompute/maintain **per-color Σtot** inside the fused kernel
+   (the between-color scatter-add reduction needs float atomics). Forced to **per-pass Σtot**, which
+   is exactly the variant already known to over-fragment fuzzy graphs — hence the PBMC quality
+   collapse. The multi-core path recomputes Σtot fresh between every color dispatch; that per-color
+   freshness is what real fuzzy graphs need.
+cuGraph's fused CUDA wins because A100s have both grid sync (cooperative groups) and float atomics
+(shared-mem hash tables) — neither exists on M3/Metal/MLX. **Conclusion: the multi-core per-color
+implementation is optimal for M3; the clustering crossover (~1M Leiden, ~50k Louvain) is hardware-
+bound, not implementation-bound.** Reverted the fused code; do not re-attempt without Metal gaining
+grid barriers or float atomics.
