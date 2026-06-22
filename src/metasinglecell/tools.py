@@ -233,17 +233,27 @@ def _perplexity_affinities(D2, perplexity, tol=1e-5, max_iter=50):
 
 def tsne(X, n_components: int = 2, perplexity: float = 30.0, n_iter: int = 1000,
          learning_rate: float = 200.0, early_exaggeration: float = 12.0,
-         random_state: int = 0) -> np.ndarray:
-    """Exact t-SNE on the GPU (scanpy/rapids ``tl.tsne``).
+         random_state: int = 0, exact_max_n: int = 30_000) -> np.ndarray:
+    """t-SNE (scanpy/rapids ``tl.tsne``), scale-dispatched.
 
-    Perplexity-calibrated high-dim affinities (host binary search) then KL-minimizing
-    gradient descent in low-dim, with the O(n²) gradient as MLX matmuls. Exact (not
-    Barnes-Hut), so suited to moderate n; subsample very large datasets.
+    * ``n ≤ exact_max_n``: EXACT t-SNE on the GPU — perplexity-calibrated affinities
+      then KL-minimizing gradient descent with the O(n²) gradient as MLX matmuls (fast
+      and exact at this scale).
+    * larger: the exact O(n²) affinity/Q matrices don't fit, so fall back to sklearn's
+      **Barnes-Hut** t-SNE (O(n log n), the scanpy/sklearn default) — same dispatch
+      philosophy as the kNN path (GPU where it wins, optimized CPU where O(n²) can't fit).
     """
     import mlx.core as mx
 
+    n = X.shape[0]
+    if n > exact_max_n:
+        from sklearn.manifold import TSNE
+        return TSNE(n_components=n_components, perplexity=perplexity,
+                    learning_rate=learning_rate, early_exaggeration=early_exaggeration,
+                    init="pca", random_state=random_state).fit_transform(
+                        np.asarray(X, dtype=np.float32))
+
     Xn = np.asarray(X, dtype=np.float64)
-    n = Xn.shape[0]
     sq = np.sum(Xn * Xn, axis=1)
     D2 = np.maximum(sq[:, None] + sq[None, :] - 2 * Xn @ Xn.T, 0.0)
     P = _perplexity_affinities(D2, perplexity)
