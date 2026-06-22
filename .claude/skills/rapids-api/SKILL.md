@@ -40,7 +40,7 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 | kmeans | ✅ tools.py (ARI 0.835 vs sklearn) |
 | score_genes / score_genes_cell_cycle | ✅ tools.py (corr 0.74 vs scanpy; control-sampling differs) |
 | embedding_density | ✅ tools.py (gaussian KDE) |
-| rank_genes_groups | ✅ tools.py (t-test; t-stat corr 0.993; REAL-DATA top-25 marker overlap **1.000** vs scanpy on PBMC & 100k — the earlier 0.54 was a synthetic artifact) |
+| rank_genes_groups | ✅ tools.py — ALL 4 methods: **t-test** (corr 0.9998), **t-test_overestim_var** (0.9996; scanpy's ns_rest=ns_group var hack via scipy ttest_ind_from_stats), **wilcoxon** (corr 1.0000; rank-sum z, optional tie_correct), **logreg** (sklearn coef). REAL-DATA top-25 marker overlap **1.000** vs scanpy for all four on PBMC |
 | tsne | ✅ tools.py (exact t-SNE, GPU GD; cluster-preservation 1.0; O(n²)) |
 | diffmap | ✅ tools.py (eigsh of symmetric transition; eigvals 1.0→0.97 on PBMC) |
 | draw_graph | ✅ tools.py (FA2-style force layout on MLX; cluster-preservation 1.0) |

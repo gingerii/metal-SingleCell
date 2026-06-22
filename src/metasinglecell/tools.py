@@ -108,53 +108,102 @@ def score_genes_cell_cycle(X, s_genes, g2m_genes, var_names, **kwargs) -> dict:
 
 
 def rank_genes_groups(X, groups, var_names=None, method: str = "t-test",
-                      reference: str = "rest") -> dict:
-    """Rank marker genes per group (scanpy ``tl.rank_genes_groups``).
+                      reference: str = "rest", tie_correct: bool = False, **kwds) -> dict:
+    """Rank marker genes per group (scanpy ``tl.rank_genes_groups``), group vs rest.
 
-    Welch's t-test of each group vs the rest, per gene. Group-wise per-gene
-    mean/variance are computed on the GPU by scatter-add over the group label.
-    Returns, per group, gene names/indices sorted by descending score, with
-    scores (t-statistic) and two-sided p-values. ``X`` is log-normalized.
+    ``method`` ∈ {``"t-test"``, ``"t-test_overestim_var"``, ``"wilcoxon"``, ``"logreg"``}.
+    Group-wise per-gene mean/variance are computed on the GPU by scatter-add over the
+    group label; the per-method statistic matches scanpy exactly. Returns, per group,
+    gene names/indices sorted by descending score, with scores and (where defined)
+    two-sided p-values and log-fold-changes. ``X`` is log-normalized.
     """
     import mlx.core as mx
     from scipy import stats
 
-    if method != "t-test":
-        raise NotImplementedError("only method='t-test' implemented so far")
+    valid = {"t-test", "t-test_overestim_var", "wilcoxon", "logreg"}
+    if method not in valid:
+        raise ValueError(f"method must be one of {sorted(valid)}")
 
-    Xg = mx.array(np.asarray(X.todense() if hasattr(X, "todense") else X, dtype=np.float32))
-    n, n_genes = Xg.shape
+    Xd = np.asarray(X.todense() if hasattr(X, "todense") else X, dtype=np.float32)
+    n, n_genes = Xd.shape
     groups = np.asarray(groups)
     cats = np.unique(groups)
     code = np.searchsorted(cats, groups).astype(np.int32)
     G = len(cats)
-
-    gsum = mx.zeros((G, n_genes), dtype=mx.float32).at[mx.array(code)].add(Xg)
-    gsq = mx.zeros((G, n_genes), dtype=mx.float32).at[mx.array(code)].add(Xg * Xg)
-    ng = np.bincount(code, minlength=G).astype(np.float64)
-    tot_sum = np.asarray(mx.sum(Xg, axis=0)); tot_sq = np.asarray(mx.sum(Xg * Xg, axis=0))
-    gsum = np.asarray(gsum, dtype=np.float64); gsq = np.asarray(gsq, dtype=np.float64)
     var_names = np.arange(n_genes) if var_names is None else np.asarray(var_names)
-
     out = {}
+
+    # ---- logistic regression: coefficients are the per-group scores (no p-values) ----
+    if method == "logreg":
+        from sklearn.linear_model import LogisticRegression
+
+        if G < 2:
+            raise ValueError("Cannot perform logistic regression on a single cluster.")
+        clf = LogisticRegression(**kwds); clf.fit(Xd, code)
+        coef = clf.coef_; existing = np.unique(code)            # (n_classes, n_genes)
+        for gi, cat in enumerate(cats):
+            scores = coef[0] if G <= 2 else coef[np.argmax(existing == gi)]
+            order = np.argsort(-scores)
+            out[str(cat)] = {"names": var_names[order], "scores": scores[order],
+                             "pvals": None, "logfoldchanges": None}
+        return out
+
+    # GPU group sums for mean/variance (ddof=1), shared by the t-tests and lfc.
+    Xg = mx.array(Xd)
+    code_mx = mx.array(code)
+    gsum = np.asarray(mx.zeros((G, n_genes), mx.float32).at[code_mx].add(Xg), np.float64)
+    gsq = np.asarray(mx.zeros((G, n_genes), mx.float32).at[code_mx].add(Xg * Xg), np.float64)
+    ng = np.bincount(code, minlength=G).astype(np.float64)
+    tot_sum = np.asarray(mx.sum(Xg, axis=0), np.float64)
+    tot_sq = np.asarray(mx.sum(Xg * Xg, axis=0), np.float64)
+
+    # ---- Wilcoxon rank-sum: rank cells per gene, sum group ranks -> normal z ----
+    if method == "wilcoxon":
+        ranks = stats.rankdata(Xd, axis=0)                      # n × genes, average ties
+        rsum = np.zeros((G, n_genes), np.float64)
+        np.add.at(rsum, code, ranks)                            # exact fp64 rank sums
+        tc = _tiecorrect_cols(ranks) if tie_correct else np.ones(n_genes)
+        for gi, cat in enumerate(cats):
+            ng_, mg_ = ng[gi], n - ng[gi]
+            std = np.sqrt(tc * ng_ * mg_ * (n + 1) / 12.0) + 1e-12
+            z = (rsum[gi] - ng_ * (n + 1) / 2.0) / std
+            z[np.isnan(z)] = 0.0
+            pval = 2 * stats.norm.sf(np.abs(z))
+            lfc = gsum[gi] / ng[gi] - (tot_sum - gsum[gi]) / (n - ng[gi])
+            order = np.argsort(-z)
+            out[str(cat)] = {"names": var_names[order], "scores": z[order],
+                             "pvals": pval[order], "logfoldchanges": lfc[order]}
+        return out
+
+    # ---- t-test / t-test_overestim_var (Welch via scipy, exact scanpy match) ----
     for gi, cat in enumerate(cats):
-        n_g = ng[gi]; n_r = n - n_g
+        n_g = ng[gi]; n_other = n - n_g
         mean_g = gsum[gi] / n_g
         var_g = (gsq[gi] / n_g - mean_g ** 2) * n_g / max(n_g - 1, 1)
-        mean_r = (tot_sum - gsum[gi]) / n_r
-        var_r = ((tot_sq - gsq[gi]) / n_r - mean_r ** 2) * n_r / max(n_r - 1, 1)
-        se = np.sqrt(var_g / n_g + var_r / n_r) + 1e-12
-        t = (mean_g - mean_r) / se
-        # Welch–Satterthwaite df
-        df = se ** 4 / ((var_g / n_g) ** 2 / max(n_g - 1, 1) + (var_r / n_r) ** 2 / max(n_r - 1, 1) + 1e-30)
-        pval = 2 * stats.t.sf(np.abs(t), df)
+        mean_r = (tot_sum - gsum[gi]) / n_other
+        var_r = ((tot_sq - gsq[gi]) / n_other - mean_r ** 2) * n_other / max(n_other - 1, 1)
+        n_rest = n_g if method == "t-test_overestim_var" else n_other   # scanpy's var hack
+        with np.errstate(invalid="ignore"):
+            t, pval = stats.ttest_ind_from_stats(
+                mean_g, np.sqrt(var_g), int(n_g), mean_r, np.sqrt(var_r), n_rest,
+                equal_var=False)
+        t = np.nan_to_num(t, nan=0.0); pval = np.nan_to_num(pval, nan=1.0)
         order = np.argsort(-t)
-        out[str(cat)] = {
-            "names": np.asarray(var_names)[order],
-            "scores": t[order],
-            "pvals": pval[order],
-            "logfoldchanges": (mean_g - mean_r)[order],
-        }
+        out[str(cat)] = {"names": var_names[order], "scores": t[order],
+                         "pvals": pval[order], "logfoldchanges": (mean_g - mean_r)[order]}
+    return out
+
+
+def _tiecorrect_cols(ranks: np.ndarray) -> np.ndarray:
+    """Per-column tie-correction factor (scipy.stats.tiecorrect, vectorized over genes)."""
+    n = ranks.shape[0]
+    if n < 2:
+        return np.ones(ranks.shape[1])
+    out = np.ones(ranks.shape[1])
+    rs = np.sort(ranks, axis=0)
+    for j in range(ranks.shape[1]):
+        _, cnt = np.unique(rs[:, j], return_counts=True)
+        out[j] = 1.0 - (cnt ** 3 - cnt).sum() / (n ** 3 - n)
     return out
 
 
