@@ -210,3 +210,20 @@ Files: `graph/louvain_hybrid.py`, `graph/louvain_fused_raw.py`. Full data: RESUL
 - **Reusable MLX/Metal facts banked:** inputs=`constant` (no atomics); outputs=`device`+zero-init
   (use for atomic counters); `header=` for helper fns; sense-reversing grid barrier over device
   atomic_uint works (≥24 TGs); float-add via CAS on atomic_uint+as_type<float> works.
+
+### CAN WE GET ORDERED ATOMICS via Swift/C++/extension? NO — proven dead-end (probed)
+Compile-probe of Apple's GPUCompiler (the only MSL compiler) — DURABLE facts:
+- `memory_order_{acquire,release,acq_rel,seq_cst}` are ALL "undeclared identifier" — **only
+  `memory_order_relaxed` exists** in MSL. `atomic_thread_fence` is also undeclared (no ordered fence).
+- The ONLY memory-ordering primitive in Metal is `threadgroup_barrier(mem_flags::mem_device)`, which
+  is **threadgroup-scoped** — it cannot order across threadgroups. No device-scope fence exists.
+- Host language is irrelevant: Swift/C++/Obj-C only set up dispatch/buffers; the KERNEL is always
+  MSL compiled by GPUCompiler. MSL has **no inline assembly**, so you cannot hand-emit an ISA fence
+  the compiler won't generate. AIR (the LLVM IR) is undocumented/unsupported and maps to the same HW.
+- ⇒ ordered cross-threadgroup sync is IMPOSSIBLE inside one Metal dispatch. Metal's SANCTIONED
+  mechanism for cross-TG ordering is the **dispatch boundary** (driver inserts a full barrier between
+  dispatches) — which is exactly what the production multi-dispatch path uses (hence correct). The
+  fused single-dispatch design is fundamentally incompatible with Metal's memory model. Done.
+- **Reassurance for the project goal:** at the scale that matters (1M–2M cells, the heavy-bleeding
+  cohort) the production GPU path ALREADY beats igraph (1M Louvain ~2.8×). The crossover only
+  disadvantages small graphs where absolute time is already sub-second. The speedup IS delivered.
