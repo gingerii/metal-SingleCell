@@ -40,7 +40,7 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 | kmeans | ✅ tools.py (ARI 0.835 vs sklearn) |
 | score_genes / score_genes_cell_cycle | ✅ tools.py (corr 0.74 vs scanpy; control-sampling differs) |
 | embedding_density | ✅ tools.py (gaussian KDE) |
-| rank_genes_groups | ✅ tools.py (t-test; t-stat corr 0.993 vs scanpy; ⚠ marker-overlap 0.54, scanpy overestim_var/p-tiebreak not matched) |
+| rank_genes_groups | ✅ tools.py (t-test; t-stat corr 0.993; REAL-DATA top-25 marker overlap **1.000** vs scanpy on PBMC & 100k — the earlier 0.54 was a synthetic artifact) |
 | tsne | ✅ tools.py (exact t-SNE, GPU GD; cluster-preservation 1.0; O(n²)) |
 | diffmap | ✅ tools.py (eigsh of symmetric transition; eigvals 1.0→0.97 on PBMC) |
 | draw_graph | ✅ tools.py (FA2-style force layout on MLX; cluster-preservation 1.0) |
@@ -89,13 +89,28 @@ Drivers in `validation_notebooks/`: `v_realdata.py` (PBMC3k), `v_realspatial.py`
 - **Two bugs only real data exposed**: Geary's-C symmetric-identity (wrong on asymmetric W) → edge-sum;
   co_occurrence disjoint-bins → squidpy cumulative `d≤thr`. Both now exact. See `RESULTS_v_real*.md`.
 
+## REMAINING-FUNCTION real-data validation (v_remaining.py) — ALL 12 PASS
+tools/integration/pp/neighbors that were build-only spot-checks, now vs canonical refs on real
+PBMC (HVG-restricted downstream, so it scales): kmeans ARI 0.895 (sklearn); score_genes corr 0.983;
+score_genes_cell_cycle phase 0.876; rank_genes_groups top-25 overlap 1.000; tsne 0.229≈sklearn 0.242;
+draw_graph 0.118≈scanpy-fr 0.101; diffmap eigval 0.996/subspace 0.991; embedding_density 1.000;
+normalize_pearson_residuals 1.0000 (analytic); scrublet injected-doublet AUC 0.972 (>scanpy 0.796);
+harmonize batch-mixing 0.05→0.52 = harmonypy 0.50; bbknn opp-batch 0.58 = bbknn pkg 0.57. Refs
+installed in env: harmonypy, bbknn, scrublet, squidpy. See RESULTS_v_remaining.md.
+
 ## WHERE WE ARE (checkpoint)
-**ALL ~32 rsc pp/tl/gr functions implemented & pushed.** Modules: sparse, preprocess, decomposition,
-neighbors, embedding, cluster, graph/, tools, spatial, integration. Validated on real data (above).
-ONLY OPEN ITEMS (refinement/parity, not missing functions):
-- harmony: block-stochastic clustering DONE (mixing 0.42); verify vs harmonypy at validation.
-- parity deltas to revisit: score_genes control sampling, rank_genes_groups ranking (overestim_var),
-  cell_ranger HVG binning, seurat_v3 loess (skmisc), any fp32 deltas.
+**ALL ~32 rsc pp/tl/gr functions implemented & pushed + REAL-DATA VALIDATED** (core pipeline, spatial
+gr, atlas, Xenium, AND the remaining tools/integration/pp via v_remaining.py). Modules: sparse,
+preprocess, decomposition, neighbors, embedding, cluster, graph/, tools, spatial, integration.
+PARITY DELTAS — progress:
+- ✅ HVG flavors ALL EXACT vs scanpy on PBMC (overlap 1.000 each): seurat (was 1.0), **cell_ranger
+  fixed 0.617→1.000** (scanpy applies expm1 + log(disp)/log1p(mean) ONLY for seurat; cell_ranger
+  uses mean/var of the lognorm values directly via `col_moments`, no log), **seurat_v3 fixed →1.000**
+  (now uses `skmisc.loess` span=0.3 degree=2 like scanpy; statsmodels lowess was a degree-1 approx).
+- ⬜ score_genes control sampling; ⬜ rank_genes_groups overestim_var/p-tiebreak (t-stat corr 0.993,
+  but top-25 marker overlap was 1.0 on PBMC at default — revisit only if a stricter bar needed).
+- harmony: block-stochastic clustering DONE; verified vs harmonypy (mixing 0.52 vs 0.50). 
+- fp32 deltas: none material found on real data.
 - t-SNE is exact O(n^2) (subsample/Barnes-Hut for very large n).
 Next: optional AnnData wrapper layer (rsc.pp/tl/gr namespaces) + end-of-project validation suite.
 

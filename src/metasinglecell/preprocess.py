@@ -265,10 +265,14 @@ def _hvg_pearson_residuals(csr, n_top_genes: int, theta: float = 100.0):
 
 
 def _hvg_seurat_v3(csr, n_top_genes: int):
-    """seurat_v3 HVG on raw counts: rank genes by clipped normalized variance."""
+    """seurat_v3 HVG on raw counts: rank genes by clipped normalized variance.
+
+    Uses ``skmisc.loess`` (span=0.3, degree=2) for the mean–variance trend, exactly as
+    scanpy does — this is the canonical fit (statsmodels lowess is degree-1 and does not
+    match). Falls back to statsmodels only if scikit-misc is unavailable.
+    """
     import mlx.core as mx
     import pandas as pd
-    from statsmodels.nonparametric.smoothers_lowess import lowess
 
     col = csr.indices
     data = csr.data
@@ -279,10 +283,17 @@ def _hvg_seurat_v3(csr, n_top_genes: int):
     var = (sumsq - N * mean ** 2) / (N - 1)
 
     not_const = var > 0
-    # loess of log10(var) ~ log10(mean) (skmisc unavailable -> statsmodels lowess, frac 0.3)
+    estimat = np.zeros(ng, dtype=np.float64)
     x = np.log10(mean[not_const]); y = np.log10(var[not_const])
-    fit = lowess(y, x, frac=0.3, return_sorted=True)
-    estimat = np.interp(np.log10(np.where(mean > 0, mean, 1e-12)), fit[:, 0], fit[:, 1])
+    try:
+        from skmisc.loess import loess                  # scanpy's exact trend fit
+        model = loess(x, y, span=0.3, degree=2)
+        model.fit()
+        estimat[not_const] = model.outputs.fitted_values
+    except ImportError:                                 # degree-1 approximation fallback
+        from statsmodels.nonparametric.smoothers_lowess import lowess
+        fit = lowess(y, x, frac=0.3, return_sorted=True)
+        estimat[not_const] = np.interp(x, fit[:, 0], fit[:, 1])
     reg_std = np.sqrt(10 ** estimat)
 
     clip_val = reg_std * np.sqrt(N) + mean
@@ -301,19 +312,29 @@ def _hvg_seurat_v3(csr, n_top_genes: int):
 
 
 def _hvg_dispersion(csr, n_top_genes: int, n_bins: int, flavor: str):
-    """seurat / cell_ranger dispersion-based HVG on log-normalized data."""
+    """seurat / cell_ranger dispersion-based HVG on log-normalized data.
+
+    scanpy applies expm1 AND the log(dispersion)/log1p(mean) transforms only for
+    ``seurat``; ``cell_ranger`` uses the mean/var of the log-normalized values
+    directly (no expm1) and leaves dispersion/mean un-logged. We mirror that exactly:
+    seurat -> ``gene_moments`` (expm1) + log transforms; cell_ranger -> ``col_moments``
+    (raw stored values) + no log.
+    """
     import pandas as pd
 
-    # GPU: per-gene mean/var of expm1(lognorm). Host math in float64 for parity.
-    mean, var = csr.gene_moments()
-    mean = mean.astype(np.float64)
-    var = var.astype(np.float64)
-
-    mean[mean == 0] = 1e-12
-    dispersion = var / mean
-    dispersion[dispersion == 0] = np.nan
-    dispersion = np.log(dispersion)
-    mean = np.log1p(mean)  # seurat: logarithmized mean
+    if flavor == "seurat":
+        mean, var = csr.gene_moments()                       # mean/var of expm1(lognorm)
+        mean = mean.astype(np.float64); var = var.astype(np.float64)
+        mean[mean == 0] = 1e-12
+        dispersion = var / mean
+        dispersion[dispersion == 0] = np.nan
+        dispersion = np.log(dispersion)
+        mean = np.log1p(mean)                                # seurat: logarithmized mean
+    else:  # cell_ranger: mean/var of the log-normalized data itself, no log transforms
+        mmx, vmx = csr.col_moments()
+        mean = np.asarray(mmx).astype(np.float64); var = np.asarray(vmx).astype(np.float64)
+        mean[mean == 0] = 1e-12
+        dispersion = var / mean
 
     df = pd.DataFrame({"means": mean, "dispersions": dispersion})
 
