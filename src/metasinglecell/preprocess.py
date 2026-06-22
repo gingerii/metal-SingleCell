@@ -184,9 +184,17 @@ def scrublet(counts, sim_doublet_ratio: float = 2.0, n_neighbors: int | None = N
     if n_neighbors is None:
         n_neighbors = int(round(0.5 * np.sqrt(n)))
 
-    # normalize -> log1p -> scale-free PCA on the combined matrix
-    lognorm = CSR.from_scipy(combined).normalize_total(1e4).log1p().toarray()
-    X_pca, _, _ = pca(lognorm, n_comps=min(n_pcs, combined.shape[1] - 1),
+    # normalize -> log1p -> HVG-restrict -> mean-centered sparse PCA on the combined
+    # matrix. Restricting to HVGs before PCA is canonical scrublet AND bounds memory at
+    # scale: densifying / PCA-ing all ~20k genes over ~3n cells OOMs the GPU (e.g.
+    # 306k x 20k ≈ 24GB). HVG-subset PCA stays small (306k x 2000).
+    lognorm = CSR.from_scipy(combined).normalize_total(1e4).log1p()
+    n_hvg = min(2000, combined.shape[1])
+    hvg = np.asarray(highly_variable_genes(lognorm, n_top_genes=n_hvg)["highly_variable"])
+    ln_sp = sp.csr_matrix((np.asarray(lognorm.data), np.asarray(lognorm.indices),
+                           np.asarray(lognorm.indptr)), shape=lognorm.shape)[:, hvg]
+    X_pca, _, _ = pca(CSR.from_scipy(ln_sp.tocsr().astype(np.float32)),
+                      n_comps=min(n_pcs, int(hvg.sum()) - 1),
                       solver="randomized", random_state=random_state)
 
     knn_idx, _ = _knn_gpu(X_pca.astype(np.float32), n_neighbors + 1)
