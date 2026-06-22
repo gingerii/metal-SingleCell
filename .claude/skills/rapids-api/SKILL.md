@@ -39,9 +39,9 @@ AnnData wrapper layer can sit on top later). Validation deferred to project end 
 | umap | ✅ | louvain/leiden | ✅ |
 | kmeans | ✅ tools.py (ARI 0.835 vs sklearn) |
 | score_genes / score_genes_cell_cycle | ✅ tools.py (corr 0.74 vs scanpy; control-sampling differs) |
-| embedding_density | ✅ tools.py (gaussian KDE) |
+| embedding_density | ✅ tools.py (gaussian KDE; O(n²) eval — SAME as scanpy's gaussian_kde, so matches the reference; not a scale gap vs scanpy) |
 | rank_genes_groups | ✅ tools.py — ALL 4 methods: **t-test** (corr 0.9998), **t-test_overestim_var** (0.9996; scanpy's ns_rest=ns_group var hack via scipy ttest_ind_from_stats), **wilcoxon** (corr 1.0000; rank-sum z, optional tie_correct), **logreg** (sklearn coef). REAL-DATA top-25 marker overlap **1.000** vs scanpy for all four on PBMC |
-| tsne | ✅ tools.py (exact t-SNE, GPU GD; cluster-preservation 1.0; O(n²)) |
+| tsne | ✅ tools.py — SCALE-DISPATCHED: exact GPU t-SNE for n≤30k (O(n²), preservation matches sklearn); sklearn Barnes-Hut (O(n log n)) fallback above (verified 50k no OOM, 46s). `exact_max_n` arg controls the threshold |
 | diffmap | ✅ tools.py (eigsh of symmetric transition; eigvals 1.0→0.97 on PBMC) |
 | draw_graph | ✅ tools.py (FA2-style force layout on MLX; cluster-preservation 1.0) |
 
@@ -128,7 +128,7 @@ PARITY DELTAS — progress:
   p-tiebreak delta only reorders lower-ranked genes — closed for practical use).
 - harmony: block-stochastic clustering DONE; verified vs harmonypy (mixing 0.52 vs 0.50). 
 - fp32 deltas: none material found on real data.
-- t-SNE is exact O(n^2) (subsample/Barnes-Hut for very large n).
+- t-SNE: exact GPU O(n²) for n≤30k, sklearn Barnes-Hut fallback above (scale-dispatched, DONE).
 Next: optional AnnData wrapper layer (rsc.pp/tl/gr namespaces) + end-of-project validation suite.
 
 ## Conventions
