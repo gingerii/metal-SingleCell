@@ -171,7 +171,7 @@ def main():
           (lambda: randomized_svd(_centered(lognorm_hv_sp), 50, n_iter=5, random_state=0)) if n <= 1_000_000 else None,
           lambda: _acc_pca(pca, randomized_svd, validation, lognorm_hv_sp), ref_max=1_000_000)
 
-    if n <= 500_000:    # ours returns a dense n×2000 (~8GB@1M, ×2 w/ ref) -> cap
+    if n <= 500_000:  # dense n×2000 residual: ours 8GB + scanpy ref 8GB OOMs the 48GB M3 at 1M+
         bench("normalize_pearson_residuals",
               lambda: pp.normalize_pearson_residuals(counts_hv, theta=100.0),
               lambda: _sc_pr(sc, counts_hv),
@@ -210,9 +210,9 @@ def main():
     if n <= 100_000:    # above 30k ours IS sklearn-BH; running it at 1M is slow & ~1x (skip)
         bench("tsne", lambda: tools.tsne(emb),
               lambda: _sk_tsne(emb), None, ref_max=100_000, r=1)
-    if n <= 500_000:    # ARPACK eigsh on the graph; cap to keep large-n runs bounded
-        bench("diffmap", lambda: tools.diffmap(conn, n_comps=15),
-              lambda: _sc_diffmap(sc, emb), None, ref_max=500_000, r=1)
+    # ARPACK eigsh on the sparse graph scales (ours at all sizes); scanpy reference only ≤1M
+    bench("diffmap", lambda: tools.diffmap(conn, n_comps=15),
+          (lambda: _sc_diffmap(sc, emb)) if n <= 1_000_000 else None, None, ref_max=1_000_000, r=1)
     if n <= 200_000:
         # igraph 'fr' layout reference is O(n²) (hangs at scale) -> reference only at PBMC.
         bench("draw_graph", lambda: tools.draw_graph(conn),

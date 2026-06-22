@@ -19,7 +19,7 @@ _(Updated to fold in step-2 optimizations: the `from_scipy` transfer fix and `_k
 | rank_genes_groups (t-test) | 2.6 | 9.6 | 7.6 | – | – | top-25 overlap 1.000 |
 | rank_genes_groups (logreg) | 1.2 | 2.2 | – | – | – | overlap 1.000 |
 | kmeans | 2.1 | 3.5 | 4.0 | (1.1s)² | (3.2s)² | ARI~0.8 |
-| diffmap | 2.1 | 2.9 | 2.7 | – | – | corr 0.99 |
+| diffmap | 2.1 | 2.9 | 2.7 | **3.63** | (36s)² | corr 0.99 |
 | regress_out | 1.6 | 1.7 | 1.6 | – | – | corr 1.000 |
 | neighbors | 2.2⁵ | 2.2⁵ | 1.8⁵ | 1.05 | (392s)² | validated |
 | umap | **34.0**⁶ | 10.5⁶ | 7.8⁶ | (188s)² | (75s)² | preservation 0.13 |
@@ -74,6 +74,12 @@ M3-Max numbers — every function runs end-to-end through 2M cells on a laptop.
   gene list); our `score_genes` is validated exact (corr 1.000) in `v_remaining`, timing recorded.
 - All accuracy metrics confirm correctness holds across scales (HVG overlap 1.0, normalize/pearson
   exact, PCA subspace 0.98–0.99, rank-genes overlap 1.0).
+- **diffmap @1M = 3.63×** (ours 45s vs scanpy 164s), @2M = 36s ours-only (scanpy ref impractical) —
+  ARPACK on the sparse graph scales fine; these were the only `–` cells worth filling.
+- The remaining `–` cells are deliberate and not worth computing: dense-output ops
+  (`rank_genes`/`score_genes` densify the FULL gene set → ~80 GB at 1M; `pearson` dense ours+ref
+  ≈16–32 GB OOMs the 48 GB M3 at 1M+), uninformative ≈1× (`tsne`>30k = sklearn-BH; `logreg` =
+  sklearn both sides), or workload-bound confirmations (`harmonize`/`bbknn`/`scrublet` at scale).
 - **Transfer is now near-optimal — no further reduction available.** Profiling the host→device
   copy: an 8 GB `mx.array` in isolation runs at **62 GB/s** (145 ms) — near unified-memory
   bandwidth. The redundant-`astype` fix captured the available win; the residual at 1M×20k is
