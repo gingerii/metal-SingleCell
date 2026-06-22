@@ -70,26 +70,30 @@ def score_genes(X, gene_list, var_names, ctrl_size: int = 50, n_bins: int = 25,
     average expression (binned). ``X`` should be log-normalized.
     """
     import scipy.sparse as sp
+    from scipy.stats import rankdata
 
     var_names = np.asarray(var_names).astype(str)
     name_to_idx = {g: i for i, g in enumerate(var_names)}
     gene_idx = np.array([name_to_idx[g] for g in gene_list if g in name_to_idx])
 
     Xc = sp.csc_matrix(X)
-    gene_mean = np.asarray(Xc.mean(axis=0)).ravel()         # per-gene avg expression
-    # bin genes by ranked mean (scanpy: cut the ranked means into n_bins)
-    order = np.argsort(gene_mean)
-    ranks = np.empty_like(order); ranks[order] = np.arange(len(order))
-    bins = (ranks / len(order) * n_bins).astype(int).clip(0, n_bins - 1)
-
-    rng = np.random.default_rng(random_state)
+    obs_avg = np.asarray(Xc.mean(axis=0)).ravel()           # per-gene avg expression
+    # Match scanpy's binning exactly: integer bins of rank(method='min') // n_items,
+    # with n_items = round(n_genes / (n_bins - 1)). Then sample ctrl_size control genes
+    # from EACH UNIQUE bin the gene set occupies (not per gene) and union them — the
+    # leftover RNG choice is expression-matched within a bin, so the score is ~invariant.
+    n = obs_avg.size
+    n_items = max(int(np.round(n / (n_bins - 1))), 1)
+    obs_cut = rankdata(obs_avg, method="min") // n_items
+    rng = np.random.RandomState(random_state)
+    gene_set = set(gene_idx.tolist())
     control = set()
-    for gi in gene_idx:
-        b = bins[gi]
-        pool = np.flatnonzero(bins == b)
-        take = min(ctrl_size, pool.size)
-        control.update(rng.choice(pool, take, replace=False).tolist())
-    control = np.array(sorted(control - set(gene_idx.tolist())))
+    for cut in np.unique(obs_cut[gene_idx]):
+        pool = np.flatnonzero(obs_cut == cut)               # all genes in this bin
+        if ctrl_size < pool.size:
+            pool = rng.choice(pool, ctrl_size, replace=False)
+        control.update(pool.tolist())
+    control = np.array(sorted(control - gene_set))          # ctrl_as_ref: drop gene set after
 
     return _subset_row_mean(X, gene_idx) - _subset_row_mean(X, control)
 

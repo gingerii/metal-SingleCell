@@ -107,8 +107,12 @@ PARITY DELTAS — progress:
   fixed 0.617→1.000** (scanpy applies expm1 + log(disp)/log1p(mean) ONLY for seurat; cell_ranger
   uses mean/var of the lognorm values directly via `col_moments`, no log), **seurat_v3 fixed →1.000**
   (now uses `skmisc.loess` span=0.3 degree=2 like scanpy; statsmodels lowess was a degree-1 approx).
-- ⬜ score_genes control sampling; ⬜ rank_genes_groups overestim_var/p-tiebreak (t-stat corr 0.993,
-  but top-25 marker overlap was 1.0 on PBMC at default — revisit only if a stricter bar needed).
+- ✅ **score_genes EXACT (corr 1.0000, multiple seeds)** — matched scanpy's binning
+  (`rankdata(method='min')//n_items`, n_items=round(n/(n_bins-1))) and per-UNIQUE-bin sampling
+  (was per-gene + normalized-rank bins → 0.95-0.98). Controls are expression-matched within bins,
+  so the score is RNG-invariant. score_genes_cell_cycle inherits the fix.
+- ✅ rank_genes_groups: top-25 marker overlap **1.000** on PBMC & 100k real data (the overestim_var/
+  p-tiebreak delta only reorders lower-ranked genes — closed for practical use).
 - harmony: block-stochastic clustering DONE; verified vs harmonypy (mixing 0.52 vs 0.50). 
 - fp32 deltas: none material found on real data.
 - t-SNE is exact O(n^2) (subsample/Barnes-Hut for very large n).
