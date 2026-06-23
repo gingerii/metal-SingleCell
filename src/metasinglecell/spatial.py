@@ -105,15 +105,77 @@ def ligrec(X, labels, lr_pairs, var_names, n_perms: int = 100,
             "lr_pairs": [(lr_pairs[i]) for i in range(len(pairs))]}
 
 
+# Fused co-occurrence histogram: one thread per ordered pair (i,j). Each pair finds the
+# FIRST distance bin it falls under (binary search on ascending thr2 == numpy searchsorted
+# 'left') and atomic-increments hist[code_i, code_j, bin]. A cumulative sum over bins (host)
+# then yields the cumulative within-radius counts. Replaces the old 50×(n×n mask + 2 n×K
+# matmuls) loop with a single pass + a tiny atomic histogram.
+_COOCCUR_KERNEL_SOURCE = """
+    uint p = thread_position_in_grid.x;
+    uint M = (uint)rows[0];                           // query rows in this tile
+    uint N = (uint)n[0];
+    if (p >= M * N) return;
+    uint i = (uint)roff[0] + p / N;                   // global query index
+    uint j = p % N;                                   // global reference index
+    if (i == j) return;                               // exclude self-pairs
+    float d2 = D2[p];                                 // D2 tile is M×N (row-major)
+    uint L = (uint)nthr[0];
+    uint lo = 0u, hi = L;                             // first r with thr2[r] >= d2
+    while (lo < hi) {
+        uint mid = (lo + hi) >> 1;
+        if (thr2[mid] >= d2) hi = mid; else lo = mid + 1u;
+    }
+    if (lo >= L) return;                              // beyond the largest threshold
+    uint idx = ((uint)code[i] * (uint)K[0] + (uint)code[j]) * L + lo;
+    device atomic_uint* h = (device atomic_uint*)hist;
+    atomic_fetch_add_explicit(h + idx, 1u, memory_order_relaxed);
+"""
+
+
+def _cooccur_hist(X, sq, code, thr2, K, n, L, tile):
+    """Per-bin co-occurrence histogram (K, K, L), TILED over query rows.
+
+    Never materializes the full n×n distance matrix: each row-block computes its
+    (rows×n) squared-distance tile via matmul, the fused kernel bins + atomic-counts it,
+    and the tiny K×K×L histograms are summed across tiles. Avoids the int32 grid overflow
+    of a flat n² grid and the O(n²) memory wall, so it scales to large sections.
+    """
+    import mlx.core as mx
+
+    kernel = mx.fast.metal_kernel(
+        name="cooccur_hist",
+        input_names=["D2", "code", "thr2", "rows", "roff", "n", "K", "nthr"],
+        output_names=["hist"],
+        source=_COOCCUR_KERNEL_SOURCE,
+    )
+    code_a = mx.array(code.astype(np.int32))
+    thr2_a = mx.array(thr2.astype(np.float32))
+    K_a, n_a, L_a = (mx.array([v], dtype=mx.int32) for v in (K, n, L))
+    total = np.zeros(K * K * L, dtype=np.float64)
+    for r0 in range(0, n, tile):
+        m = min(tile, n - r0)
+        D2t = mx.maximum(sq[r0:r0 + m, None] + sq[None, :] - 2.0 * (X[r0:r0 + m] @ X.T), 0.0)
+        (hist,) = kernel(
+            inputs=[D2t.reshape(-1), code_a, thr2_a,
+                    mx.array([m], dtype=mx.int32), mx.array([r0], dtype=mx.int32),
+                    n_a, K_a, L_a],
+            grid=(m * n, 1, 1), threadgroup=(256, 1, 1),
+            output_shapes=[(K * K * L,)], output_dtypes=[mx.uint32], init_value=0,
+        )
+        mx.eval(hist)
+        total += np.asarray(hist)
+    return total.reshape(K, K, L)
+
+
 def co_occurrence(coords, labels, n_intervals: int = 50, interval=None,
                   max_dist=None) -> dict:
     """Cumulative cluster co-occurrence ratio (squidpy ``gr.co_occurrence``).
 
     Matches squidpy's definition exactly: for each distance threshold the pairs
     *within* that radius are counted (cumulative, ``d <= threshold``), and the
-    enrichment of type i around type c is ``P(i | c, within r) / P(i)``. Pairwise
-    distances are computed on the GPU; cumulative counts per (i, j, threshold) via
-    one-hot matmuls. O(n²) memory, so suited to moderate n (tile for large sections).
+    enrichment of type i around type c is ``P(i | c, within r) / P(i)``. Distances are
+    computed on the GPU and binned by a fused atomic-histogram kernel, TILED over query
+    rows so the full n×n distance matrix is never materialized (scales to large sections).
 
     ``interval`` may be an explicit ascending array of distance thresholds (as
     squidpy stores in ``uns[...]['interval']``); otherwise ``n_intervals`` evenly
@@ -127,30 +189,33 @@ def co_occurrence(coords, labels, n_intervals: int = 50, interval=None,
     cats = np.unique(labels)
     code = np.searchsorted(cats, labels).astype(np.int32)
     K = len(cats)
-
+    n = code.shape[0]
     sq = mx.sum(X * X, axis=1)
-    D2 = mx.maximum(sq[:, None] + sq[None, :] - 2.0 * (X @ X.T), 0.0)
-    mx.eval(D2)
-    D2np = np.asarray(D2)
+    tile = max(1, 60_000_000 // n)                                  # ~60M-elem distance tiles
 
     if interval is not None:
         thr = np.asarray(interval, dtype=np.float64)
     else:
-        d = np.sqrt(D2np[D2np > 0])
-        if max_dist is None:
-            max_dist = float(d.max())
-        thr = np.linspace(float(d.min()), max_dist, n_intervals + 1)
+        # global min-nonzero / max distance via tiled reduction (no full n×n materialization)
+        dmin, dmax = np.inf, 0.0
+        for r0 in range(0, n, tile):
+            m = min(tile, n - r0)
+            D2t = mx.maximum(sq[r0:r0 + m, None] + sq[None, :] - 2.0 * (X[r0:r0 + m] @ X.T), 0.0)
+            D2t = np.asarray(D2t)
+            pos = D2t[D2t > 0]
+            if pos.size:
+                dmin = min(dmin, float(pos.min())); dmax = max(dmax, float(D2t.max()))
+        dmin, dmax = np.sqrt(dmin), (max_dist if max_dist is not None else np.sqrt(dmax))
+        thr = np.linspace(dmin, dmax, n_intervals + 1)
     thr2 = thr[1:] ** 2                                             # squidpy: skip first
     L = len(thr2)
 
-    onehot = mx.array((code[:, None] == np.arange(K)[None, :]).astype(np.float32))  # n×K
-    np.fill_diagonal(D2np, np.inf)                                  # exclude self-pairs
-
-    # counts[a, b, r] = # ordered pairs (type a, type b) within threshold r (cumulative)
-    counts = np.zeros((K, K, L))
-    for r in range(L):
-        mask = mx.array((D2np <= thr2[r]).astype(np.float32))
-        counts[:, :, r] = np.asarray(onehot.T @ (mask @ onehot))    # K×K, symmetric
+    # Fused TILED histogram kernel: one pass over the n² pairs (vs the old 50×(n×n mask + two
+    # n×K matmuls)). Each pair finds the FIRST threshold bin it falls under (binary search on
+    # ascending thr2) and atomic-increments hist[code_i, code_j, bin]; cumulative sum over bins
+    # then gives the cumulative counts squidpy needs. Tiled over rows → scales past the n×n wall.
+    hist = _cooccur_hist(X, sq, code, thr2, K, n, L, tile)         # (K, K, L) per-bin counts
+    counts = np.cumsum(hist.astype(np.float64), axis=2)            # cumulative within radius
 
     # squidpy conditional normalization (counts symmetric in the ordered sum)
     row_sums = counts.sum(axis=0)                                   # (K, L)
