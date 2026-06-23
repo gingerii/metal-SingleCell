@@ -173,7 +173,7 @@ def _refine(graph: Graph, part: np.ndarray, resolution: float, twom: float,
 
 
 def _refine_sync(graph: Graph, part: np.ndarray, resolution: float, twom: float,
-                 seed: int = 0, max_passes: int = 200, commit_prob: float = 0.5,
+                 seed: int = 0, max_passes: int = 200, commit_prob: float = 0.9,
                  hd_every: int = 4):
     """Coloring-FREE refinement (cuGraph-style synchronous + random half-commit).
 
