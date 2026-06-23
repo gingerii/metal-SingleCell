@@ -73,3 +73,11 @@ macOS Metal 2.1+ (always on visionOS). `T` = scalar/vector int or float (NOT boo
 - **SIMD-group-per-vertex aggregation** (simd_sum / simd_shuffle_xor) is the clean O(d) replacement
   for the O(d²) move kernel + host tail — no threadgroup-atomic dependency, float reductions native.
 - For a TG float hash pre-Metal-4.1: use `atomic_uint` fixed-point (quantize weights), then convert.
+- **VALIDATED pattern — fused atomic histogram** (`spatial.co_occurrence`): one thread per item bins
+  via binary search + `atomic_fetch_add_explicit((device atomic_uint*)out + idx, 1u, relaxed)` into a
+  tiny shared histogram; **tile** the work (row-blocks) to dodge the **int32 grid-size overflow** (a
+  flat n² grid breaks at n≳46340 = √2³¹) and the n×n memory wall, summing the small per-tile
+  histograms on the host. Got 29× over a per-threshold matmul loop, ~1.6× over squidpy's numba,
+  exact (corr 1.0). NOTE: vs a *well-optimized numba/cuML reference* a GPU kernel typically wins only
+  ~1.5–2× on M3 (bandwidth), not 10× — big wins come from removing algorithmic waste (cf. clustering
+  coloring), not from re-expressing an already-good O(n²) reference.
