@@ -50,6 +50,10 @@ Four executable notebooks in [`notebooks/`](notebooks/), mirroring the rapids-si
 | [`04_squidpy.ipynb`](notebooks/04_squidpy.ipynb) | Spatial graph, Moran's I / Geary's C, co-occurrence (squidpy IMC) |
 | [`brain_1M.ipynb`](notebooks/brain_1M.ipynb) | Full 1,000,000-cell workflow on a laptop GPU |
 
+Notebooks 1–3 are self-contained (they auto-download their datasets). `brain_1M` needs the 10x
+1.3M-neuron `.h5` placed at `data/external/1M_neurons.h5`; the 2M-cell Xenium benchmark
+(`validation_notebooks/`) reads its path from the `XENIUM_H5` environment variable.
+
 ## Hardware tested
 
 All benchmarks below were measured on a single laptop:
