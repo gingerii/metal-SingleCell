@@ -211,7 +211,7 @@ def _local_moving(graph: Graph, resolution: float, twom: float, seed: int = 0,
 
 
 def _local_moving_sync(graph: Graph, resolution: float, twom: float, seed: int = 0,
-                       max_passes: int = 200, init_comm=None, commit_prob: float = 0.5,
+                       max_passes: int = 200, init_comm=None, commit_prob: float = 0.9,
                        hd_every: int = 4):
     """Coloring-FREE synchronous local-moving (cuGraph-style).
 
@@ -278,7 +278,7 @@ def _local_moving_sync(graph: Graph, resolution: float, twom: float, seed: int =
 
 def louvain(graph: Graph, resolution: float = 1.0, random_state: int = 0,
             max_levels: int = 20, tol: float = 1e-9, variant: str = "sync",
-            commit_prob: float = 0.5) -> np.ndarray:
+            commit_prob: float = 0.9) -> np.ndarray:
     """Multilevel parallel Louvain. Returns dense integer labels per vertex.
 
     ``variant="sync"`` (default) uses the coloring-free synchronous local-moving
