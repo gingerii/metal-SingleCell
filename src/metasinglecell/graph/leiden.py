@@ -83,6 +83,7 @@ def _refine_kernel():
 def _high_degree_refine(indptr, indices, weights, comm_np, part_np, k_np, sigtot_np,
                         large_ids, resolution, twom):
     """Exact within-community best-move for high-degree vertices (host, O(degree))."""
+    changed = 0
     for v in large_ids:
         pv = part_np[v]
         s, e = int(indptr[v]), int(indptr[v + 1])
@@ -102,6 +103,8 @@ def _high_degree_refine(indptr, indices, weights, comm_np, part_np, k_np, sigtot
         if gain[np.argmax(gain)] > stay_gain + 1e-9 and best != curr:
             sigtot_np[curr] -= kv; sigtot_np[best] += kv
             comm_np[v] = best
+            changed += 1
+    return changed
 
 
 # Refinement IS iterated to convergence here (unlike cuGraph's single sweep): measured, full
@@ -170,7 +173,8 @@ def _refine(graph: Graph, part: np.ndarray, resolution: float, twom: float,
 
 
 def _refine_sync(graph: Graph, part: np.ndarray, resolution: float, twom: float,
-                 seed: int = 0, max_passes: int = 200, commit_prob: float = 0.5):
+                 seed: int = 0, max_passes: int = 200, commit_prob: float = 0.5,
+                 hd_every: int = 4):
     """Coloring-FREE refinement (cuGraph-style synchronous + random half-commit).
 
     Same within-Louvain-community restriction as `_refine`, but every vertex picks
@@ -209,17 +213,20 @@ def _refine_sync(graph: Graph, part: np.ndarray, resolution: float, twom: float,
             output_shapes=[(n,)], output_dtypes=[mx.int32],
         )
         wants = target != comm
-        if not bool(mx.any(wants).item()):
-            break
-        key, sub = mx.random.split(key)
-        coin = mx.random.uniform(shape=(n,), key=sub) < commit_prob
-        comm = mx.where(wants & coin, target, comm)
-        if large_ids.size:
+        gpu_done = not bool(mx.any(wants).item())
+        if not gpu_done:
+            key, sub = mx.random.split(key)
+            coin = mx.random.uniform(shape=(n,), key=sub) < commit_prob
+            comm = mx.where(wants & coin, target, comm)
+        hd_changed = 0
+        if large_ids.size and (gpu_done or p % hd_every == 0):   # avoid the O(n) round-trip every pass
             comm_np = np.asarray(comm).copy()
             sigtot_np = np.bincount(comm_np, weights=k_np, minlength=n).astype(np.float64)
-            _high_degree_refine(hd_indptr, hd_indices, hd_weights, comm_np, part,
-                                k_np, sigtot_np, large_ids, resolution, twom)
+            hd_changed = _high_degree_refine(hd_indptr, hd_indices, hd_weights, comm_np,
+                                             part, k_np, sigtot_np, large_ids, resolution, twom)
             comm = mx.array(comm_np.astype(np.int32))
+        if gpu_done and not hd_changed:
+            break
         mx.eval(comm)
 
     _, dense = np.unique(np.asarray(comm), return_inverse=True)
