@@ -130,8 +130,8 @@ loop). So coloring, not GPU math, was the bottleneck.
   11s → **1115s**). Refinement re-colors **every pass** (stable: 200k 10.4s, 1M ~24s).
 - **O(d²) move kernel — SOLVED via degree-binning (host tail).** The per-vertex kernel is O(degree²)
   (dedup + per-community weight sum by rescan). Measured at 1M: a contracted level with a **degree-76578
-  super-vertex made one move pass take 140s** (sum(d²)=4.75e10). MLX can't do the cuGraph threadgroup-
-  hash fix (**no Metal float-atomics**, and ~32KB threadgroup memory can't hold a 76k-entry hash). So:
+  super-vertex made one move pass take 140s** (sum(d²)=4.75e10). MLX can't fit a 76k-entry hash in
+  ~32KB threadgroup memory, so:
   the GPU kernel **skips vertices with degree > `_DEGREE_CAP` (1024)** (a `cap` input), and those rare
   high-degree vertices are moved **exactly on the host in NumPy, O(degree)** (`_high_degree_moves` /
   `_high_degree_refine`, sequential with incremental Σtot; refinement version respects the P-restriction).
@@ -139,6 +139,19 @@ loop). So coloring, not GPU math, was the bottleneck.
   when no large vertices** (`large_ids` empty → host path skipped; PBMC/1M unaffected, quality identical:
   PBMC Louvain 0.661, Leiden 0.666/ARI 0.825). Applied to BOTH the Louvain move kernel and the Leiden
   refine kernel.
+
+## CORRECTION (2026-06): Metal DOES have float atomics — earlier "no float-atomics" claim was WRONG
+Validated on this M3 via `mx.fast.metal_kernel`: `device atomic_float` + `atomic_fetch_add_explicit`
+**compiles, runs, and is exactly correct** (1M contended adds → exactly 1e6, zero lost updates).
+Perf: 5M adds = **0.5ms distributed / 4.67ms all-to-one** (mild contention penalty). Caveats:
+`atomic_fetch_max/min` on float is NOT available (add/sub/and/or/xor only); threadgroup `atomic_float`
+declaration needs care (a naive `threadgroup atomic_float x;` failed to compile). For the plain scatter
+(Σtot), MLX `.at[].add` is already ~2× faster than manual atomics, so atomics don't help there.
+**What this unlocks:** (1) the cuGraph-style coloring-FREE move/refine — float-atomic edge-parallel
+aggregation + a symmetry-breaking decision rule (move only to higher comm-id) to prevent synchronous
+swaps — directly attacks the **coloring = 60% of Louvain** bottleneck; (2) GPU-side high-degree
+aggregation (cooperative atomic-add) to retire the host tail. This is the live path to closing the
+Leiden gap. NOT yet built — prototype on Louvain first (clearest signal, real GPU win already exists).
 
 ## Status
 Phases 1–3 DONE + Louvain perf-optimized. **GPU Louvain: fast+correct, ~5–13× over igraph at 1M**
