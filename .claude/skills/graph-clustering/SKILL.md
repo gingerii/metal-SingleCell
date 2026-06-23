@@ -172,10 +172,18 @@ noise). Kept because it's correctness-preserving and a real win for hub-containi
 regions in Xenium may qualify), but it is NOT the real-1M lever. **Real-1M leiden was
 convergence-bound** (the fuzzy graph needs many move+refine passes) — DONE: **`commit_prob` 0.5→0.9**
 (the random half-commit can commit 90%; 10% hold still breaks swaps) cut pass-count → **Leiden 1M
-28.9s→14.9s, CROSSED to a GPU win (1.10× vs igraph 16.4s)**; louvain 1M 9.3→6.0s (11.74×). Validated
-identical quality (PBMC bestQ 0.7182, synthetic ARI 1.000, cp-sweep flat Q). cp=0.9 is the default;
-cp=1.0 gains nothing and risks oscillation. Leiden 1M journey: 0.08→0.15(n_iter)→0.49(coloring-free)
-→**1.10×(cp=0.9)**. Below ~100k igraph still wins (tiny-graph launch overhead).
+28.9s→12.6s**; louvain 1M 9.3→6.0s. Validated identical quality (PBMC bestQ 0.7182, synthetic ARI
+1.000, cp-sweep flat Q). cp=0.9 is the default; cp=1.0 gains nothing and risks oscillation.
+
+**TIMING-FAIRNESS NOTE (matters for the headline):** clustering speedups are now **algorithm-only** —
+both our GPU `Graph` and the igraph `Graph` are pre-built OUTSIDE the timer. The benchmark previously
+built the igraph graph INSIDE the timed ref (`conn.nonzero` + `list(zip)` over ~15M edges +
+`ig.Graph`), which at 1M is seconds and inflated the reference. Corrected (fair) numbers:
+**Leiden 1M = 0.90×** (ours 12.6s vs igraph LEIDEN 11.3s — essentially TIED, NOT a win as earlier
+claimed); 100k 0.37×, 50k 0.30×. **Louvain 1M = 11.63×** (ours 6.0s vs igraph LOUVAIN 70s) — but note
+igraph's *louvain* is slow; igraph's *leiden* (11.3s) is the faster CPU option, so the honest read is
+"our Leiden ties igraph Leiden at 1M; our Louvain massively beats igraph Louvain." Leiden 1M journey:
+0.08→0.15(n_iter)→0.49(coloring-free)→**0.90×(cp=0.9, fair)**. Below ~100k igraph wins (launch overhead).
 
 ## Status
 Phases 1–3 DONE + Louvain perf-optimized. **GPU Louvain: fast+correct, ~5–13× over igraph at 1M**

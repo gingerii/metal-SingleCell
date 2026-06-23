@@ -27,8 +27,8 @@ _(Updated to fold in step-2 optimizations: the `from_scipy` transfer fix and `_k
 | t-SNE | 0.9 | 1.0 | 1.0 | – | – | =sklearn-BH >30k³ |
 | draw_graph | 21.5 | NA | NA | – | – | preservation |
 | highly_variable_genes | 3.2 | 25.9 | 32.9 | **15.8**¹ | **49.2** | overlap 1.000 |
-| louvain | 0.14 | 2.93 | 3.77 | **11.74**⁸ | (11.5s)² | Q≥igraph |
-| leiden | 0.05 | 0.41 | 0.46 | **1.10**⁸ | (24.5s)² | Q≥igraph |
+| louvain | 0.14 | 1.77 | 2.94 | **11.63**⁸ | (11.5s)² | Q≥igraph |
+| leiden | 0.05 | 0.30 | 0.37 | 0.90⁸ | (24.5s)² | Q≥igraph |
 | harmonize | 0.07⁴ | 0.59⁴ | 0.28⁴ | – | – | mixing > harmonypy |
 | bbknn | 6.8 | 0.66 | 0.41 | – | – | mixing✓ |
 
@@ -51,11 +51,20 @@ non-convergence. Validated: real PBMC sync Q (0.7197) ≥ colored (0.7182) ≥ i
 seeds; synthetic 100k–1M ARI **1.000** vs colored, identical cluster counts. Plus the
 **commit-probability raised 0.5→0.9** (the random half-commit can commit 90% — 10% hold still breaks
 swaps): converges in fewer passes, validated identical quality (real PBMC bestQ 0.7182, synthetic
-ARI 1.000, cp-sweep flat Q). Combined real-neuron speedups: Louvain 1M **2.04×→11.74×** (6.0s vs
-igraph 71s); **Leiden 1M 0.15×→1.10× — a GPU win** (14.9s vs 16.4s), 100k 0.09×→0.46×, 50k
-0.04×→0.41×; 2M louvain 53→11.5s, leiden 165→24.5s. Unlocked by confirming Metal float-atomics work
-(prior "no float-atomics" claim was wrong); the coloring-free moves don't strictly need atomics, but
-the correction reopened the design space. ⁷ **After the Leiden `n_iterations` fix** (default 2→1, gpu backend clamps to 1): our parallel
+ARI 1.000, cp-sweep flat Q). Combined real-neuron speedups (**algorithm-only**,
+see below): Louvain 1M **2.04×→11.63×** (6.0s vs igraph louvain 70s); Leiden 1M **0.15×→0.90×**
+(12.6s vs igraph leiden 11.3s — essentially tied), 100k 0.09×→0.37×, 50k 0.04×→0.30×; 2M louvain
+53→11.5s, leiden 165→24.5s. Unlocked by confirming Metal float-atomics work (prior "no float-atomics"
+claim was wrong); the coloring-free moves don't strictly need atomics, but the correction reopened
+the design space.
+
+**FAIRNESS FIX (timing methodology):** clustering now times the ALGORITHM ONLY — both our GPU `Graph`
+and the igraph `Graph` are constructed in the prep section, OUTSIDE the timed region. Previously the
+igraph reference built its graph *inside* the timed call (`conn.nonzero()` + `list(zip(...))` over
+~15M edges + `ig.Graph(...)`), which at 1M is seconds and inflated the reference — that had flattered
+our clustering speedups (leiden 1M looked like 1.10× but is 0.90× fairly). All other functions were
+already timed correctly (each function's prerequisites — PCA embedding, kNN graph — are built in prep
+and excluded; only the function call itself is in the timer). ⁷ **After the Leiden `n_iterations` fix** (default 2→1, gpu backend clamps to 1): our parallel
 Leiden's local-moving AND refinement each iterate to convergence within ONE multilevel pass, so
 that pass already reaches a fixed point — a 2nd iteration is provably redundant (ARI **1.000**,
 identical Q and cluster count for n_iter 1 vs 2 across clean/noisy/many-cluster graphs). This
@@ -75,11 +84,14 @@ host→device transfer, breaking the lazy-eval graph): layout ~1.4× faster → 
 2. **CLUSTERING — largely RECLAIMED by the coloring-free rewrite (⁸)**: replacing graph-coloring
    local-moving/refinement with cuGraph-style **synchronous moves + a random half-commit** rule
    removed the coloring pass (was ~60% of Louvain, and refinement re-colored every pass). Louvain
-   now **wins from 50k up (2.9× / 3.8× / 11.74× at 50k/100k/1M**, was 0.41/0.84/2.04×); and with the
-   commit-probability raised to 0.9 (⁸) **leiden CROSSED to a GPU win at 1M (1.10×, 14.9s vs igraph
-   16.4s)** — the full journey 0.08→0.15→0.49→**1.10×**. Quality equal/better (real PBMC sync Q ≥
-   colored ≥ igraph; synthetic ARI 1.000 to 1M). Below ~100k igraph still wins leiden (tiny-graph
-   launch overhead), but at atlas scale both Louvain and Leiden are now GPU wins.
+   now **wins from 50k up (1.8× / 2.9× / 11.6× at 50k/100k/1M** vs igraph louvain, was
+   0.41/0.84/2.04×); leiden went **0.04/0.05/0.15× → 0.30/0.37/0.90×** — the full journey at 1M
+   0.08→0.15→0.49→**0.90×** (12.6s vs igraph leiden 11.3s, essentially TIED). Quality equal/better
+   (real PBMC sync Q ≥ colored ≥ igraph; synthetic ARI 1.000 to 1M). **All timings are
+   algorithm-only — both our GPU graph and the igraph graph are pre-built outside the timer (⁸)** —
+   so leiden does NOT quite cross to a GPU win at 1M (igraph's optimized Leiden is genuinely fast,
+   11.3s), but the once-catastrophic gap (0.08×, ~13×) is essentially closed. Our Louvain crushes
+   igraph's slower Louvain (11.6×); igraph Leiden is the faster CPU option overall.
 3. **WORKLOAD-bound — iterative/graph/kNN** (step-2 outcome): harmonize improved ~2× + better
    quality (one real bug fixed) but is small-matrix iterative work the CPU wins; bbknn is
    kNN-bound (approximate-CPU is competitive); leiden refinement is hardware-bound. These are not
