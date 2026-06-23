@@ -24,3 +24,6 @@ env/
 # Metal build artifacts
 *.metallib
 *.air
+
+# Large reference PDFs kept local (distilled into .claude/skills/)
+resources/*.pdf
