@@ -191,16 +191,25 @@ def main():
           (lambda: _sc_neighbors(sc, emb)) if n <= 1_000_000 else None,
           None, ref_max=1_000_000)
     dist_g, conn = neighbors(emb, n_neighbors=15)
-    g_graph = Graph.from_scipy(conn.astype(np.float32))
+    g_graph = Graph.from_scipy(conn.astype(np.float32))     # our GPU graph — built OUTSIDE timing
 
-    # ===== clustering =====
+    # Pre-build the igraph graph too (OUTSIDE timing) so the clustering benchmark measures the
+    # ALGORITHM only on both sides — not graph construction (conn.nonzero + list(zip) over millions
+    # of edges + ig.Graph build), which at 1M is seconds and would unfairly inflate the reference.
+    g_ig = None
+    if n <= 1_000_000:
+        import igraph as ig
+        _s, _d = conn.nonzero(); _m = _s < _d
+        g_ig = ig.Graph(n=conn.shape[0], edges=list(zip(_s[_m].tolist(), _d[_m].tolist())))
+
+    # ===== clustering (algorithm-only timing: graphs pre-built above) =====
     bench("louvain",
           lambda: louvain_gpu(g_graph, 1.0),
-          (lambda: _ig_louvain(conn)) if n <= 1_000_000 else None,
+          (lambda: g_ig.community_multilevel()) if g_ig is not None else None,
           lambda: _acc_modularity(g_graph, louvain_gpu, _ig_louvain, conn, validation), ref_max=1_000_000, r=1)
     bench("leiden",
           lambda: leiden_gpu(g_graph, 1.0),
-          (lambda: _ig_leiden(conn)) if n <= 1_000_000 else None,
+          (lambda: g_ig.community_leiden(objective_function="modularity")) if g_ig is not None else None,
           None, ref_max=1_000_000, r=1)
     groups = leiden_api(conn, resolution=1.0, backend="igraph")
 
