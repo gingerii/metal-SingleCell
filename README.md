@@ -4,69 +4,156 @@
 
 A Metal/[MLX](https://github.com/ml-explore/mlx) re-implementation of
 [rapids-singlecell](https://rapids-singlecell.readthedocs.io) — drop-in replacements for the core
-[scanpy](https://scanpy.readthedocs.io) functions that run on the M-series GPU. rapids-singlecell is
-CUDA/CuPy-only; there is no Apple-silicon path because the M-series GPU has no native sparse-matrix
-support. This project builds that missing substrate and the scanpy front-end on top of it.
+[scanpy](https://scanpy.readthedocs.io) and [squidpy](https://squidpy.readthedocs.io) functions that
+run on the **M-series GPU**. rapids-singlecell is CUDA/CuPy-only; there is no Apple-silicon path
+because the M-series GPU has no native sparse-matrix support. This project builds that missing
+sparse substrate and the scanpy/squidpy front-end on top of it.
 
-> ⚠️ Early-stage / exploratory. The scaffold and the CPU reference oracle exist; the Metal kernels do not yet.
+It is a **drop-in API**: swap the import prefix and your existing pipeline runs on the GPU.
 
-## Why it's hard
+```python
+import scanpy as sc
+import metasinglecell as msc          # pp / tl / gr — mirror sc.pp, sc.tl, sq.gr
 
-Single-cell count matrices are large and ~90–95% sparse (cells × genes), and the scanpy front-end
-(QC → normalize → highly-variable genes → PCA) is built on sparse linear algebra. Two Apple-specific
-constraints shape everything:
+adata = sc.datasets.pbmc3k()
+msc.pp.normalize_total(adata, target_sum=1e4)
+msc.pp.log1p(adata)
+msc.pp.highly_variable_genes(adata, n_top_genes=2000)
+msc.pp.pca(adata)
+msc.pp.neighbors(adata)
+msc.tl.leiden(adata, backend="gpu")    # Metal parallel Leiden
+msc.tl.umap(adata)
+sc.pl.umap(adata, color="leiden")      # plot with scanpy as usual
+```
 
-- **No GPU sparse.** Apple's `Accelerate` framework has sparse support on the **CPU** only; MPS/
-  PyTorch-MPS sparse is thin. Building GPU sparse primitives (CSR SpMM, segmented reductions) is the
-  core contribution.
-- **No float64 on the GPU.** Metal is fp32 (plus fp16/bf16). So "correct" means *reproducing the fp64
-  CPU-scanpy result within a justified tolerance* — which makes a frozen reference oracle essential.
+Functions take an `AnnData`, compute on the GPU, and write results back to the **same slots scanpy
+uses** (`.X`, `.obsm`, `.obsp`, `.var`, `.uns`), with scanpy's `copy=` semantics — so plotting and
+downstream tooling are unchanged.
 
-**Bounding insight:** most of the pipeline goes *dense* after PCA (KNN, UMAP, Leiden all run on the
-~50-dim embedding), so the sparse-critical kernel set is small and finite.
-
-## Architecture
-
-**MLX-primary · custom Metal kernels for sparse · Accelerate/LAPACK as the numerical anchor.**
-
-| Layer | Used for |
-|-------|----------|
-| **MLX** | Array layer + dense post-PCA pipeline (KNN/UMAP/Leiden). |
-| **Custom Metal kernels** | The sparse front-end primitives MLX/MPS lack (CSR SpMM, row/col reductions). |
-| **Accelerate / LAPACK** | Stability-critical math — randomized SVD for PCA, two-pass/Welford variance. |
-
-## Roadmap
-
-1. **Sparse + numerical substrate** — Metal primitives the scanpy/rapids-singlecell front-end needs.
-2. **scanpy drop-ins** — `normalize_total`, `log1p`, `highly_variable_genes`, `scale`, `pca`,
-   `neighbors`, `leiden`, `rank_genes_groups`, mirroring rapids-singlecell signatures.
-3. **Validation + benchmarking** — fp64 CPU-scanpy numerical parity + speedup vs CPU.
-
-## Getting started
+## Install
 
 ```bash
-# dedicated environment (Apple Silicon)
-conda env create -f envs/metasinglecell.yml
-conda activate metasinglecell
-pip install -e .
-
-# build the fp64 CPU reference oracle (PBMC3k) — the parity ground truth
-python validation_notebooks/00_cpu_reference_oracle.py
+pip install -e .          # in a Python 3.11 env with mlx (Apple Silicon)
 ```
 
-## Repository layout
+Heavy backends (`mlx`, `scanpy`, `squidpy`) are lazy-imported, so the package imports cleanly in any
+environment. See [`envs/`](envs/) for the conda environments.
 
-```
-src/metasinglecell/      installable library (config.py resolves paths via DATA_ROOT)
-  reference.py           fp64 CPU scanpy oracle (snapshots every intermediate)
-validation_notebooks/    lightweight drivers + the user-facing example workflow
-results/<analysis>/      reportable outputs (csv/png/pdf) — gitignored
-data/{raw,processed,external}/   inputs & derived objects — gitignored
-envs/                    dedicated conda env(s)
-resources/, RESOURCES.md Apple-GPU numerical-computing references
-.claude/skills/          durable project knowledge (see SKILLS.md)
-```
+## Tutorials
 
-## License
+Four executable notebooks in [`notebooks/`](notebooks/), mirroring the rapids-singlecell tutorials:
 
-BSD-3-Clause.
+| Notebook | Workflow |
+|---|---|
+| [`01_basic_workflow.ipynb`](notebooks/01_basic_workflow.ipynb) | QC → normalize → HVG → scale → PCA → neighbors → UMAP → Leiden → markers → Harmony → diffmap (PBMC 3k) |
+| [`02_pearson_residuals.ipynb`](notebooks/02_pearson_residuals.ipynb) | Analytic Pearson-residual normalization → PCA → clustering (PBMC 3k) |
+| [`04_squidpy.ipynb`](notebooks/04_squidpy.ipynb) | Spatial graph, Moran's I / Geary's C, co-occurrence (squidpy IMC) |
+| [`brain_1M.ipynb`](notebooks/brain_1M.ipynb) | Full 1,000,000-cell workflow on a laptop GPU |
+
+## Hardware tested
+
+All benchmarks below were measured on a single laptop:
+
+| | |
+|---|---|
+| **Chip** | Apple **M3 Max** |
+| **GPU** | 40 cores, Metal 3, ~400 GB/s unified-memory bandwidth |
+| **CPU** | 16 cores (12 performance + 4 efficiency) |
+| **Memory** | 48 GB unified |
+| **OS / runtime** | macOS 14.4 · MLX 0.31.2 · Python 3.11 |
+
+## Speedups vs CPU
+
+Speedup = CPU reference time ÷ our GPU time, **both on the same M3 Max** (vs scanpy / scikit-learn /
+squidpy / igraph / harmonypy / bbknn / scrublet). Methodology: warm-up (defeats MLX first-call kernel
+compile), best-of-N, on **real data** (PBMC 3k, a 1.3 M-neuron atlas at 50k/100k/1M, a 2 M-cell Xenium
+cohort). Clustering is timed **algorithm-only** — the kNN graph is pre-built for *both* sides.
+`–` = not run at that size; values in parentheses are our runtime in seconds where a CPU reference is
+impractical at that scale.
+
+Sizes are cells: **2k–2M are the 1.3 M-neuron atlas** (sub-/over-sampled) and the **2 M-cell Xenium
+cohort** — one consistent data family across the table.
+
+### Tier 1 — large GPU wins (parallel-arithmetic, bandwidth-bound)
+
+| function | 2k | 50k | 100k | 1M | 2M |
+|----------|---:|----:|-----:|---:|---:|
+| highly_variable_genes | 5.8× | 25.9× | 32.9× | 15.8× | **49.2×** |
+| umap | **32.2×** | 10.5× | 7.8× | (188 s) | (75 s) |
+| scrublet | 15.1× | 6.4× | – | – | – |
+| draw_graph | 16.1× | – | – | – | – |
+| normalize_pearson_residuals | 7.4× | 9.8× | 9.1× | – | – |
+| rank_genes_groups (t-test) | 3.7× | 9.6× | 7.6× | – | – |
+| pca (sparse) | 2.1× | 4.3× | 4.4× | 4.5× | (8.0 s) |
+| kmeans | 1.1× | 3.5× | 4.0× | (1.1 s) | (3.2 s) |
+| diffmap | 1.7× | 2.9× | 2.7× | 3.6× | (36 s) |
+| normalize + log1p | 5.4× | 3.5× | 3.5× | 1.7× | 2.8× |
+
+### Tier 2 — GPU wins **at scale** (graph clustering)
+
+| function | 2k | 50k | 100k | 1M | 2M |
+|----------|---:|----:|-----:|---:|---:|
+| louvain | 0.14× | 1.8× | 2.9× | **11.6×** | (11.5 s) |
+| leiden | 0.05× | 0.30× | 0.37× | 0.90× | (24.5 s) |
+
+`co_occurrence` (spatial): ~1.6× vs squidpy at 25k–100k, exact match, and scales past the n² memory
+wall via a tiled device-atomic-histogram kernel.
+
+Clustering crosses over with cell count: **Louvain is a GPU win from ~50k up (11.6× at 1M)**, and
+**Leiden closes from a catastrophic 0.08× to ~tied with igraph at 1M (0.90×)** — see *What was solved*.
+
+### Accuracy
+
+Every accelerated function is validated against its CPU reference: normalize/Pearson exact (Δ≈1e-6),
+HVG gene-overlap **1.000**, PCA subspace 0.97–0.99, rank-genes top-k overlap 1.000, clustering
+modularity ≥ igraph, kNN recall ≈0.99, co-occurrence correlation **1.000** vs squidpy.
+
+## What was solved
+
+- **A GPU sparse substrate for Apple Silicon** — CSR container, SpMM, segmented reductions, and
+  custom `mx.fast.metal_kernel` kernels (QC, sparse PCA, a register-based top-k for kNN), since the
+  M-series GPU has no native sparse support.
+- **The full scanpy `pp`/`tl` + squidpy `gr` surface** — ~30 functions as a drop-in AnnData API.
+- **Coloring-free parallel clustering** — the first parallel Louvain/Leiden on Metal. Replacing
+  graph-coloring local-moving with cuGraph-style synchronous moves + a random-commit rule (plus a
+  converged-in-one-pass `n_iterations` and a tuned commit probability) took **Leiden at 1M from
+  0.08× → 0.90×** and **Louvain from 2.04× → 11.6×**, with equal-or-better modularity.
+- **A fused co-occurrence kernel** — a tiled device-atomic histogram that matches squidpy exactly,
+  runs ~1.6× faster, and scales past the n² memory wall to 100k+ cells.
+- **Validated at atlas scale** — a complete 1 M-cell workflow (and every function through 2 M cells)
+  runs end-to-end on a 48 GB laptop.
+
+## When to use the CPU version instead
+
+We benchmarked honestly; the GPU does not win everywhere on this hardware. **Use the CPU
+implementation (scanpy / squidpy / `backend="igraph"`) when:**
+
+- **k-nearest-neighbors above ~250k cells.** `neighbors` dispatches to CPU `pynndescent` past 250k
+  because a graph-based ANN genuinely beats our GPU brute/IVF there (measured: GPU IVF is ~2× *slower*
+  at 1M). `bbknn` (batch-balanced kNN) is CPU-favored at scale for the same reason.
+- **Leiden / Louvain below ~50k cells.** igraph's lazy-sequential optimizer is extremely fast on small
+  graphs; the GPU only wins once parallelism outweighs launch/coloring overhead (keep the default
+  `backend="igraph"` for small data).
+- **Harmony integration.** An iterative small-matrix algorithm the CPU wins (our mixing quality
+  matches/beats harmonypy, but it's slower on M3).
+- **t-SNE above ~30k cells.** We delegate to scikit-learn's Barnes-Hut (≈1×); exact t-SNE is GPU-only
+  below 30k.
+
+Rule of thumb: the M3 GPU wins on **parallel-arithmetic, bandwidth-bound** work (and on clustering
+once graphs are large), and loses on **iterative / latency-bound / well-optimized-ANN** work. Against
+an already-optimized CPU reference (numba / igraph / pynndescent), a GPU kernel on M3 typically wins
+~1.5–2× (the bandwidth ratio), not 10× — the large wins come from removing genuine algorithmic waste.
+
+## vs rapids-singlecell (NVIDIA)
+
+rapids-singlecell's headline speedups (e.g. 470× Leiden) are GPU-vs-CPU on a datacenter GPU
+(A100/3090) with ~2–5× the memory bandwidth and fully-fused CUDA. We do **not** match those absolute
+numbers. What this project provides is the **only Apple-silicon path** for this workflow, with honest
+laptop-scale speedups and an identical drop-in API — develop and run atlas-scale single-cell analysis
+on a Mac, no CUDA required.
+
+## Status
+
+Functionally complete and validated (pp / tl / gr + tutorials + benchmark). Version `0.0.1`.
+Durable engineering notes live in [`.claude/skills/`](.claude/skills/); the full benchmark with
+methodology is in [`results/validation/RESULTS_v_benchmark.md`](results/validation/RESULTS_v_benchmark.md).
