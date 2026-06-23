@@ -152,6 +152,30 @@ numbers. What this project provides is the **only Apple-silicon path** for this 
 laptop-scale speedups and an identical drop-in API — develop and run atlas-scale single-cell analysis
 on a Mac, no CUDA required.
 
+## Credits & acknowledgements
+
+metal-SingleCell is an **independent, unaffiliated** project. It would not exist without the work it
+builds on, and the API and workflows are modeled directly on these libraries — please cite them:
+
+- **[rapids-singlecell](https://github.com/scverse/rapids-singlecell)** (MIT, part of
+  [scverse®](https://scverse.org)) — the GPU single-cell API this project mirrors for Apple Silicon,
+  and the source of the tutorials reproduced here. See their repository for the preferred citation.
+- **[scanpy](https://scanpy.readthedocs.io)** — Wolf, F. A., Angerer, P. & Theis, F. J. *SCANPY:
+  large-scale single-cell gene expression data analysis.* Genome Biology 19, 15 (2018).
+- **[squidpy](https://squidpy.readthedocs.io)** — Palla, G. *et al. Squidpy: a scalable framework for
+  spatial omics analysis.* Nature Methods 19, 171–178 (2022).
+- **[MLX](https://github.com/ml-explore/mlx)** (Apple) — the array framework powering the Metal GPU
+  kernels.
+
+The `pp` / `tl` / `gr` function names and signatures intentionally follow scanpy / squidpy /
+rapids-singlecell so existing pipelines port with a one-line import change. This project is not
+endorsed by or affiliated with scverse, NVIDIA, or Apple.
+
+## License
+
+BSD-3-Clause (see [`pyproject.toml`](pyproject.toml)). rapids-singlecell, scanpy, and squidpy are
+released under permissive licenses (MIT / BSD-3-Clause); MLX is MIT.
+
 ## Status
 
 Functionally complete and validated (pp / tl / gr + tutorials + benchmark). Version `0.0.1`. The full benchmark with
