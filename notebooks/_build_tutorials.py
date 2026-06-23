@@ -169,7 +169,14 @@ brain = [
  "import metasinglecell as msc\n"
  "t0 = time.time()"),
 ("md", "## Load and subset to 1M cells"),
-("code", "adata = sc.read_10x_h5('data/external/1M_neurons.h5')\n"
+("code", "import os\n"
+ "def _find(rel):              # resolve path from notebook dir up to the repo root\n"
+ "    d = os.getcwd()\n"
+ "    for _ in range(6):\n"
+ "        if os.path.exists(os.path.join(d, rel)): return os.path.join(d, rel)\n"
+ "        d = os.path.dirname(d)\n"
+ "    raise FileNotFoundError(rel + ' (place the 10x 1.3M-neuron .h5 at data/external/)')\n"
+ "adata = sc.read_10x_h5(_find('data/external/1M_neurons.h5'))\n"
  "adata.var_names_make_unique()\n"
  "adata = adata[:1_000_000].copy()\n"
  "adata.shape"),
