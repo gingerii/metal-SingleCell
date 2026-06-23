@@ -1,7 +1,7 @@
-"""Real XENIUM validation (CLAUDE.md pin) on the user's integrated cohort object.
+"""Real Xenium validation on an external integrated cohort (path via XENIUM_H5).
 
 Validates BOTH the core pipeline and the squidpy-GPU ``gr`` spatial functions on
-REAL Xenium 5k data (human endometrium): 2,035,266 cells x 5,101 genes across 72
+REAL Xenium 5k data (human endometrium): ~2,035,266 cells x 5,101 genes across 72
 sections, with real cell-type labels and real tissue coordinates.
 
 Parity (vs scanpy / squidpy) is done on the largest single section (`p11_t3_s1`,
@@ -17,6 +17,7 @@ nothing is ever written back.
 """
 
 import logging
+import os
 import time
 import warnings
 
@@ -26,8 +27,8 @@ from metasinglecell import config
 
 warnings.filterwarnings("ignore")
 
-# external, READ-ONLY object from the Xenium project — never written
-XEN = "/Users/f006z2w/Desktop/Xenium_Claude_test/data/processed/xenium/integrated_data.h5ad"
+# external, READ-ONLY Xenium .h5ad — never written. Set the path via the XENIUM_H5 env var.
+XEN = os.environ.get("XENIUM_H5")
 SECTION = "p11_t3_s1"   # largest single section -> coherent spatial frame
 
 
@@ -51,6 +52,8 @@ def main():
     from metasinglecell.sparse import CSR
 
     # ---- load ONE real section (read-only backed -> to_memory on the subset) ----
+    if not XEN:
+        raise SystemExit("set XENIUM_H5 to a Xenium .h5ad to run this validation")
     t = time.perf_counter()
     big = sc.read_h5ad(XEN, backed="r")
     sub = big[big.obs["batch"] == SECTION].to_memory()

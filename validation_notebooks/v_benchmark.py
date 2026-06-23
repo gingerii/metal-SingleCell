@@ -15,6 +15,7 @@ run at a size (exact O(n²)) are skipped with a note.
 
 import csv
 import gc
+import os
 import sys
 import time
 import warnings
@@ -68,11 +69,13 @@ def main():
         counts = sp.csr_matrix(ad.X).astype(np.float32)
         var_names = ad.var_names.to_numpy()
     elif arg == "xenium2m":
-        # real 2M dataset = the user's Xenium cohort (2,035,266 x 5,101; lighter panel,
-        # fits memory where 2M neurons x 20k would not). READ-ONLY (other project).
+        # real 2M dataset = an external Xenium cohort .h5ad (~2,035,266 x 5,101; lighter panel,
+        # fits memory where 2M neurons x 20k would not). Set the path via the XENIUM_H5 env var.
         import h5py
         label = "2M"
-        XEN = "/Users/f006z2w/Desktop/Xenium_Claude_test/data/processed/xenium/integrated_data.h5ad"
+        XEN = os.environ.get("XENIUM_H5")
+        if not XEN:
+            raise SystemExit("set XENIUM_H5 to a 2M-cell Xenium .h5ad to run the 2M benchmark")
         with h5py.File(XEN, "r") as f:
             L = f["layers"]["counts"]
             counts = sp.csr_matrix((L["data"][:], L["indices"][:], L["indptr"][:]),
