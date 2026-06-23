@@ -18,28 +18,40 @@ def _conn(adata):
 
 
 def leiden(adata, resolution: float = 1.0, key_added: str = "leiden", random_state: int = 0,
-           n_iterations: int = 2, backend: str = "igraph", copy: bool = False):
-    """Leiden clustering (``sc.tl.leiden``); writes ``adata.obs[key_added]`` (categorical)."""
+           n_iterations: int = 2, backend: str = "igraph", variant: str = "sync",
+           commit_prob: float = 0.9, copy: bool = False):
+    """Leiden clustering (``sc.tl.leiden``); writes ``adata.obs[key_added]`` (categorical).
+
+    ``backend="gpu"`` runs the Metal parallel Leiden; ``variant`` ("sync"|"colored") and
+    ``commit_prob`` tune its convergence (GPU path only; ignored for the igraph backend).
+    """
     import pandas as pd
 
     from .cluster import leiden as _leiden
     adata = adata.copy() if copy else adata
     lab = _leiden(_conn(adata), resolution=resolution, random_state=random_state,
-                  n_iterations=n_iterations, backend=backend)
+                  n_iterations=n_iterations, backend=backend,
+                  variant=variant, commit_prob=commit_prob)
     adata.obs[key_added] = pd.Categorical([str(x) for x in lab])
     adata.uns[key_added] = {"params": {"resolution": resolution, "n_iterations": n_iterations}}
     return adata if copy else None
 
 
 def louvain(adata, resolution: float = 1.0, key_added: str = "louvain", random_state: int = 0,
-            backend: str = "igraph", copy: bool = False):
-    """Louvain clustering (``sc.tl.louvain``); writes ``adata.obs[key_added]`` (categorical)."""
+            backend: str = "igraph", variant: str = "sync", commit_prob: float = 0.9,
+            copy: bool = False):
+    """Louvain clustering (``sc.tl.louvain``); writes ``adata.obs[key_added]`` (categorical).
+
+    ``backend="gpu"`` runs the Metal parallel Louvain; ``variant`` ("sync"|"colored") and
+    ``commit_prob`` tune its convergence (GPU path only).
+    """
     import pandas as pd
     adata = adata.copy() if copy else adata
     if backend == "gpu":
         from .graph import Graph
         from .graph.louvain import louvain as _gpu
-        lab = _gpu(Graph.from_scipy(_conn(adata)), resolution=resolution, random_state=random_state)
+        lab = _gpu(Graph.from_scipy(_conn(adata)), resolution=resolution, random_state=random_state,
+                   variant=variant, commit_prob=commit_prob)
     else:
         import igraph as ig
         coo = _conn(adata).tocoo(); up = coo.row < coo.col
