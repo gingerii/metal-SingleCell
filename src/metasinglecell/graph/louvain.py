@@ -90,6 +90,7 @@ def _high_degree_moves(indptr, indices, weights, comm_np, k_np, sigtot_np,
     time with Sigma_tot updated after each move (so adjacent large vertices don't
     interfere). Mutates ``comm_np`` and ``sigtot_np`` in place.
     """
+    changed = 0
     for v in large_ids:
         s, e = int(indptr[v]), int(indptr[v + 1])
         nbr = indices[s:e]
@@ -110,6 +111,8 @@ def _high_degree_moves(indptr, indices, weights, comm_np, k_np, sigtot_np,
             sigtot_np[curr] -= kv
             sigtot_np[best] += kv
             comm_np[v] = best
+            changed += 1
+    return changed
 
 
 def color_graph(graph: Graph, seed: int = 0, max_colors: int = 2000):
@@ -208,7 +211,8 @@ def _local_moving(graph: Graph, resolution: float, twom: float, seed: int = 0,
 
 
 def _local_moving_sync(graph: Graph, resolution: float, twom: float, seed: int = 0,
-                       max_passes: int = 200, init_comm=None, commit_prob: float = 0.5):
+                       max_passes: int = 200, init_comm=None, commit_prob: float = 0.5,
+                       hd_every: int = 4):
     """Coloring-FREE synchronous local-moving (cuGraph-style).
 
     All vertices pick their best community from ONE snapshot per pass (the existing
@@ -249,17 +253,24 @@ def _local_moving_sync(graph: Graph, resolution: float, twom: float, seed: int =
             output_shapes=[(n,)], output_dtypes=[mx.int32],
         )
         wants = target != comm
-        if not bool(mx.any(wants).item()):           # no beneficial move anywhere -> converged
-            break
-        key, sub = mx.random.split(key)
-        coin = mx.random.uniform(shape=(n,), key=sub) < commit_prob
-        comm = mx.where(wants & coin, target, comm)
-        if large_ids.size:
+        gpu_done = not bool(mx.any(wants).item())     # GPU vertices: no beneficial move
+        if not gpu_done:
+            key, sub = mx.random.split(key)
+            coin = mx.random.uniform(shape=(n,), key=sub) < commit_prob
+            comm = mx.where(wants & coin, target, comm)
+        # High-degree super-vertices are settled on the host, but the O(n) round-trip
+        # (copy comm + bincount Σtot) is far costlier than the few moves themselves, so
+        # only do it every `hd_every` passes — and once more at GPU-convergence so they
+        # reach a fixed point. Converged only when the GPU is done AND host made no move.
+        hd_changed = 0
+        if large_ids.size and (gpu_done or p % hd_every == 0):
             comm_np = np.asarray(comm).copy()
             sigtot_np = np.bincount(comm_np, weights=k_np, minlength=n).astype(np.float64)
-            _high_degree_moves(hd_indptr, hd_indices, hd_weights, comm_np, k_np,
-                               sigtot_np, large_ids, resolution, twom)
+            hd_changed = _high_degree_moves(hd_indptr, hd_indices, hd_weights, comm_np,
+                                            k_np, sigtot_np, large_ids, resolution, twom)
             comm = mx.array(comm_np.astype(np.int32))
+        if gpu_done and not hd_changed:
+            break
         mx.eval(comm)
 
     return comm

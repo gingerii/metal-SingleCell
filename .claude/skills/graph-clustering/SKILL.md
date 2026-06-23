@@ -157,8 +157,22 @@ the float-atomics correction just reopened the design space. Validated: real PBM
 colored (0.7182) ≥ igraph (0.7189) over 5 seeds; synthetic 100k–1M **ARI 1.000** vs colored, identical
 clusters. Real-data speedups: **Louvain 1M 2.04×→8.56×** (9.3s vs igraph 79s), 50k/100k now win
 (2.7×/2.2×); **Leiden 1M 0.15×→0.49×** (28.9s vs 14.2s), 100k 0.09→0.32×, 50k 0.04→0.30×. Leiden
-still ~2× behind igraph at 1M (was 6.7×). NEXT (optional): float-atomic per-vertex hash to retire
-the O(d²) kernel + host tail (would help the high-degree contracted levels further).
+still ~2× behind igraph at 1M (was 6.7×).
+
+## Host-tail round-trip (`hd_every=4`) — helps hub graphs, INERT on the neuron atlas
+The sync movers settle high-degree super-vertices (degree > `_DEGREE_CAP`=1024) on the host, but the
+per-pass O(n) round-trip (`np.asarray(comm).copy()` + `bincount` Σtot + `mx.array` rebuild) costs FAR
+more than the few moves. Profiled on a synthetic 500k SBM + 40 hubs(deg 3000): host tail = **47% of
+leiden** (2.89s of 6.10s). Fix: do the host tail only every `hd_every`=4 passes (and once at GPU
+convergence, with a `changed` flag so we don't stop while a high-degree vertex still wants to move).
+Hub graph **6.10→2.98s (2×)**, quality identical (Q 0.9719). **BUT: the real 1M neuron connectivity
+graph (kNN-15 symmetric) does NOT produce degree>1024 super-vertices after contraction — so the host
+tail never triggers and this is inert on the atlas benchmark** (leiden 1M unchanged ~29s within run
+noise). Kept because it's correctness-preserving and a real win for hub-containing data (dense/doublet
+regions in Xenium may qualify), but it is NOT the real-1M lever. **Real-1M leiden (~29s) is
+convergence-bound** (the fuzzy graph needs many move+refine passes) — the remaining lever is faster
+convergence (e.g. commit_prob schedule / better stop criterion), not the host tail or a float-atomic
+hash (verified: clean 1M graph move=1.76s/refine=2.30s, no high-degree vertices at all).
 
 ## Status
 Phases 1–3 DONE + Louvain perf-optimized. **GPU Louvain: fast+correct, ~5–13× over igraph at 1M**
