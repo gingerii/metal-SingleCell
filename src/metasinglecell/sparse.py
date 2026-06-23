@@ -229,15 +229,18 @@ class CSR:
         """Return a copy sharing indices/indptr/shape but with new values."""
         return CSR(data=new_data, indices=self.indices, indptr=self.indptr, shape=self.shape)
 
-    def toarray(self) -> np.ndarray:
-        """Densify to a numpy array (host-side; for validation/inspection only)."""
+    def to_scipy(self):
+        """Return a host scipy CSR matrix (no densify) — for writing results back to AnnData."""
         import scipy.sparse as sp
 
-        csr = sp.csr_matrix(
+        return sp.csr_matrix(
             (np.asarray(self.data), np.asarray(self.indices), np.asarray(self.indptr)),
             shape=self.shape,
         )
-        return csr.toarray()
+
+    def toarray(self) -> np.ndarray:
+        """Densify to a numpy array (host-side; for validation/inspection only)."""
+        return self.to_scipy().toarray()
 
     def normalize_total(self, target_sum: float = 1e4) -> "CSR":
         """Scale each cell's counts to sum to ``target_sum`` (scanpy normalize_total).
