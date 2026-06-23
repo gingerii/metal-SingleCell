@@ -234,11 +234,14 @@ def _refine_sync(graph: Graph, part: np.ndarray, resolution: float, twom: float,
 
 
 def leiden(graph: Graph, resolution: float = 1.0, random_state: int = 0,
-           n_iterations: int = 1, max_levels: int = 20, variant: str = "sync") -> np.ndarray:
+           n_iterations: int = 1, max_levels: int = 20, variant: str = "sync",
+           commit_prob: float = 0.9) -> np.ndarray:
     """Parallel Leiden. Returns dense integer labels per vertex.
 
     ``variant="sync"`` (default) uses coloring-free synchronous local-moving + refinement
     (2–11× faster than legacy ``"colored"`` at scale, equal/better Q, refinement converges).
+    ``commit_prob`` (sync only) tunes the random-commit convergence: higher converges in fewer
+    passes (0.9 default); lower is more conservative against oscillation.
 
     ``n_iterations`` repeats the whole multilevel procedure (as in leidenalg/scanpy).
     Default 1: unlike leidenalg, our local-moving AND refinement each iterate to
@@ -253,22 +256,27 @@ def leiden(graph: Graph, resolution: float = 1.0, random_state: int = 0,
     labels = None
     for it in range(max(1, n_iterations)):
         labels = _leiden_pass(graph, resolution, twom, random_state + 17 * it,
-                              init=labels, variant=variant)
+                              init=labels, variant=variant, commit_prob=commit_prob)
     return labels
 
 
 def _leiden_pass(g0: Graph, resolution: float, twom: float, seed: int,
                  init: np.ndarray | None, max_levels: int = 20,
-                 variant: str = "colored") -> np.ndarray:
+                 variant: str = "colored", commit_prob: float = 0.9) -> np.ndarray:
     """One full multilevel Leiden run (move -> refine -> aggregate, repeat).
 
     ``variant="sync"`` uses the coloring-free synchronous local-moving + refinement
-    (`_local_moving_sync` / `_refine_sync`); ``"colored"`` (default) uses graph coloring.
+    (`_local_moving_sync` / `_refine_sync`, ``commit_prob`` tuning); ``"colored"`` uses coloring.
     """
+    import functools
+
     import mlx.core as mx
 
-    move = _local_moving_sync if variant == "sync" else _local_moving
-    refine = _refine_sync if variant == "sync" else _refine
+    if variant == "sync":
+        move = functools.partial(_local_moving_sync, commit_prob=commit_prob)
+        refine = functools.partial(_refine_sync, commit_prob=commit_prob)
+    else:
+        move, refine = _local_moving, _refine
     g = g0
     orig2node = np.arange(g0.n, dtype=np.int64)
     # P: community label per node of the current (aggregate) graph.

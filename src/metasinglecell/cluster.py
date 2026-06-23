@@ -13,11 +13,12 @@ import numpy as np
 
 
 def leiden(connectivities, resolution: float = 1.0, random_state: int = 0,
-           n_iterations: int = 2, backend: str = "igraph") -> np.ndarray:
+           n_iterations: int = 2, backend: str = "igraph",
+           variant: str = "sync", commit_prob: float = 0.9) -> np.ndarray:
     """Leiden clustering on a symmetric connectivity graph; returns integer labels.
 
     ``backend="gpu"`` uses the Metal parallel Leiden; ``"igraph"`` (default) uses
-    igraph on CPU.
+    igraph on CPU. ``variant`` ("sync"|"colored") and ``commit_prob`` tune the GPU path.
     """
     if backend == "gpu":
         from .graph import Graph
@@ -29,7 +30,7 @@ def leiden(connectivities, resolution: float = 1.0, random_state: int = 0,
         # n_iterations IS meaningful, so it's honored on that backend below.
         g = Graph.from_scipy(connectivities)
         return gpu_leiden(g, resolution=resolution, random_state=random_state,
-                          n_iterations=1)
+                          n_iterations=1, variant=variant, commit_prob=commit_prob)
 
     if backend != "igraph":
         raise ValueError(f"unknown backend {backend!r} (gpu|igraph)")
