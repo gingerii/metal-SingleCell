@@ -28,5 +28,8 @@ env/
 # Large reference PDFs kept local
 resources/*.pdf
 
-# Claude skill notes kept local (internal durable notes, not part of the public package)
+# Claude/internal working docs kept local (not part of the public package)
 .claude/skills/
+CLAUDE.md
+SKILLS.md
+RESOURCES.md
