@@ -154,6 +154,5 @@ on a Mac, no CUDA required.
 
 ## Status
 
-Functionally complete and validated (pp / tl / gr + tutorials + benchmark). Version `0.0.1`.
-Durable engineering notes live in [`.claude/skills/`](.claude/skills/); the full benchmark with
+Functionally complete and validated (pp / tl / gr + tutorials + benchmark). Version `0.0.1`. The full benchmark with
 methodology is in [`results/validation/RESULTS_v_benchmark.md`](results/validation/RESULTS_v_benchmark.md).
