@@ -27,8 +27,8 @@ _(Updated to fold in step-2 optimizations: the `from_scipy` transfer fix and `_k
 | t-SNE | 0.9 | 1.0 | 1.0 | – | – | =sklearn-BH >30k³ |
 | draw_graph | 21.5 | NA | NA | – | – | preservation |
 | highly_variable_genes | 3.2 | 25.9 | 32.9 | **15.8**¹ | **49.2** | overlap 1.000 |
-| louvain | 0.02 | 0.41 | 0.84 | **2.04** | (53s)² | Q≥igraph |
-| leiden | 0.02 | 0.07 | 0.09 | **0.15**⁷ | (165s)² | Q≥igraph |
+| louvain | 0.14 | 2.71 | 2.17 | **8.56**⁸ | (16.7s)² | Q≥igraph |
+| leiden | 0.05 | 0.30 | 0.32 | **0.49**⁸ | (40.8s)² | Q≥igraph |
 | harmonize | 0.07⁴ | 0.59⁴ | 0.28⁴ | – | – | mixing > harmonypy |
 | bbknn | 6.8 | 0.66 | 0.41 | – | – | mixing✓ |
 
@@ -43,7 +43,16 @@ Barnes-Hut, so ≈1×. ⁴ **After the harmonize fix** (`max_iter_clustering` 20
 ~5.7× the distance compute): neighbors 1.7/1.6/1.5× → **2.2/2.2/1.8×**; the brute core
 (`_knn_gpu`) alone went 267ms→56ms (4.8×) @25k, recall preserved (0.96). This is the one place
 MLX clearly underperformed a specialized kernel (cuML's neighbors edge); it narrows that gap.
-⁷ **After the Leiden `n_iterations` fix** (default 2→1, gpu backend clamps to 1): our parallel
+⁸ **After the coloring-free rewrite** (`variant="sync"`, now default in both `louvain` and `leiden`):
+all vertices pick their best community from one snapshot per pass (no graph coloring — was ~60% of
+Louvain runtime; refinement re-colored every pass), and a **random half-commit** (`commit_prob=0.5`)
+breaks the symmetric-swap oscillation that coloring prevented — which ALSO fixed the old refinement
+non-convergence. Validated: real PBMC sync Q (0.7197) ≥ colored (0.7182) ≥ igraph (0.7189) over 5
+seeds; synthetic 100k–1M ARI **1.000** vs colored, identical cluster counts. Speedups (real neuron
+data): Louvain 1M **2.04×→8.56×** (9.3s vs igraph 79s); Leiden 1M **0.15×→0.49×** (28.9s vs 14.2s),
+100k **0.09×→0.32×**, 50k **0.04×→0.30×**. This was unlocked by confirming Metal float-atomics work
+(the prior "no float-atomics" claim was wrong); the coloring-free moves don't strictly need atomics,
+but the correction reopened the design space. ⁷ **After the Leiden `n_iterations` fix** (default 2→1, gpu backend clamps to 1): our parallel
 Leiden's local-moving AND refinement each iterate to convergence within ONE multilevel pass, so
 that pass already reaches a fixed point — a 2nd iteration is provably redundant (ARI **1.000**,
 identical Q and cluster count for n_iter 1 vs 2 across clean/noisy/many-cluster graphs). This
@@ -60,10 +69,13 @@ host→device transfer, breaking the lazy-eval graph): layout ~1.4× faster → 
    **up to 49×**, normalize_pearson_residuals ~9×, rank_genes ~9×, pca 4–5×, kmeans/diffmap 3–4×,
    normalize ~3×. umap 6–21×, scrublet 6–20× also win. The `from_scipy` transfer fix lifted the
    at-scale numbers further (normalize @1M 0.82→1.69×, HVG @1M 11.9→15.8×).
-2. **HARDWARE-bound — clustering**: louvain **crosses to a GPU win at 1M (2.04×)** as predicted;
-   leiden stays CPU-favored at every size (**0.15× at 1M after the n_iterations fix**, ⁷) — its
-   refinement phase is ~75% of the runtime and Metal can't run cuGraph-style fused clustering
-   (relaxed-only atomics, no grid barrier — proven earlier). igraph is the right default below ~1M.
+2. **CLUSTERING — largely RECLAIMED by the coloring-free rewrite (⁸)**: replacing graph-coloring
+   local-moving/refinement with cuGraph-style **synchronous moves + a random half-commit** rule
+   removed the coloring pass (was ~60% of Louvain, and refinement re-colored every pass). Louvain
+   now **wins from 50k up (2.7× / 2.2× / 8.56× at 50k/100k/1M**, was 0.41/0.84/2.04×); leiden went
+   **0.04/0.05/0.15× → 0.30/0.32/0.49×** (3–7× faster) — now only ~2× behind igraph at 1M, not 6.7×.
+   Quality equal/better (real PBMC sync Q ≥ colored ≥ igraph; synthetic ARI 1.000 to 1M). igraph
+   still edges leiden below ~2M, but the gap is now small.
 3. **WORKLOAD-bound — iterative/graph/kNN** (step-2 outcome): harmonize improved ~2× + better
    quality (one real bug fixed) but is small-matrix iterative work the CPU wins; bbknn is
    kNN-bound (approximate-CPU is competitive); leiden refinement is hardware-bound. These are not

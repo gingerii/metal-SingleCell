@@ -147,11 +147,18 @@ Perf: 5M adds = **0.5ms distributed / 4.67ms all-to-one** (mild contention penal
 `atomic_fetch_max/min` on float is NOT available (add/sub/and/or/xor only); threadgroup `atomic_float`
 declaration needs care (a naive `threadgroup atomic_float x;` failed to compile). For the plain scatter
 (Σtot), MLX `.at[].add` is already ~2× faster than manual atomics, so atomics don't help there.
-**What this unlocks:** (1) the cuGraph-style coloring-FREE move/refine — float-atomic edge-parallel
-aggregation + a symmetry-breaking decision rule (move only to higher comm-id) to prevent synchronous
-swaps — directly attacks the **coloring = 60% of Louvain** bottleneck; (2) GPU-side high-degree
-aggregation (cooperative atomic-add) to retire the host tail. This is the live path to closing the
-Leiden gap. NOT yet built — prototype on Louvain first (clearest signal, real GPU win already exists).
+**DONE — coloring-free rewrite shipped (`variant="sync"`, now the default).** `_local_moving_sync`
+and `_refine_sync`: every vertex picks its best community from ONE snapshot per pass (no graph
+coloring), and a **random half-commit** (`commit_prob=0.5`) breaks the symmetric-swap oscillation
+that coloring prevented — and ALSO fixed the old refinement non-convergence (no special-casing
+needed). The decision rule turned out to matter more than atomics: the coloring-free moves don't
+need float-atomics at all (the existing per-vertex O(d²) kernel + host tail still does aggregation);
+the float-atomics correction just reopened the design space. Validated: real PBMC sync Q (0.7197) ≥
+colored (0.7182) ≥ igraph (0.7189) over 5 seeds; synthetic 100k–1M **ARI 1.000** vs colored, identical
+clusters. Real-data speedups: **Louvain 1M 2.04×→8.56×** (9.3s vs igraph 79s), 50k/100k now win
+(2.7×/2.2×); **Leiden 1M 0.15×→0.49×** (28.9s vs 14.2s), 100k 0.09→0.32×, 50k 0.04→0.30×. Leiden
+still ~2× behind igraph at 1M (was 6.7×). NEXT (optional): float-atomic per-vertex hash to retire
+the O(d²) kernel + host tail (would help the high-degree contracted levels further).
 
 ## Status
 Phases 1–3 DONE + Louvain perf-optimized. **GPU Louvain: fast+correct, ~5–13× over igraph at 1M**

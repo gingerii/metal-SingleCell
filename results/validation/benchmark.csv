@@ -4,7 +4,6 @@ size,n,function,ours_s,ref_s,speedup,acc_metric,acc_value,note
 50k,50000,pca(sparse),0.1751,0.7438,4.25,subspace,0.976,
 50k,50000,normalize_pearson_residuals,0.0594,0.5826,9.80,corr,1.0000,
 50k,50000,regress_out,0.1649,0.2779,1.68,corr,1.0000,
-50k,50000,louvain,1.8124,0.7492,0.41,Q,0.815,
 50k,50000,tsne,53.1028,51.9877,0.98,,,
 50k,50000,diffmap,1.3307,3.8895,2.92,,,
 50k,50000,draw_graph,2.3595,NA,NA,,,ref NA@scale
@@ -19,7 +18,6 @@ size,n,function,ours_s,ref_s,speedup,acc_metric,acc_value,note
 100k,100000,pca(sparse),0.3498,1.5286,4.37,subspace,0.988,
 100k,100000,normalize_pearson_residuals,0.1581,1.4385,9.10,corr,1.0000,
 100k,100000,regress_out,0.3428,0.5448,1.59,corr,1.0000,
-100k,100000,louvain,3.4093,2.8561,0.84,Q,0.821,
 100k,100000,tsne,114.1270,115.2105,1.01,,,
 100k,100000,diffmap,2.8654,7.8159,2.73,,,
 100k,100000,draw_graph,4.4104,NA,NA,,,ref NA@scale
@@ -28,14 +26,12 @@ size,n,function,ours_s,ref_s,speedup,acc_metric,acc_value,note
 100k,100000,kmeans,0.0900,0.3580,3.98,,,
 100k,100000,bbknn,6.6156,2.7244,0.41,,,
 1M,1000000,neighbors,106.5300,112.0938,1.05,,,
-1M,1000000,louvain,37.2307,75.8749,2.04,Q,0.840,
 1M,1000000,umap,188.4226,NA,NA,,,ref NA@scale
 1M,1000000,kmeans,1.0901,NA,NA,,,ref NA@scale
 2M,2035266,normalize+log1p,0.8515,2.4199,2.84,max|d|,9.54e-07,
 2M,2035266,highly_variable_genes,0.0653,3.2092,49.17,overlap,1.000,
 2M,2035266,pca(sparse),7.9989,NA,NA,subspace,0.989,ref NA@scale
 2M,2035266,neighbors,392.3406,NA,NA,,,ref NA@scale
-2M,2035266,louvain,53.4106,NA,NA,Q,0.759,ref NA@scale
 2M,2035266,umap,75.3287,NA,NA,,,ref NA@scale
 2M,2035266,kmeans,3.2138,NA,NA,,,ref NA@scale
 PBMC,2700,normalize+log1p,0.0029,0.0088,3.00,max|d|,9.54e-07,
@@ -43,7 +39,6 @@ PBMC,2700,highly_variable_genes,0.0044,0.0139,3.18,overlap,1.000,
 PBMC,2700,pca(sparse),0.0281,0.0682,2.43,subspace,0.983,
 PBMC,2700,normalize_pearson_residuals,0.0046,0.0284,6.15,corr,1.0000,
 PBMC,2700,regress_out,0.0079,0.0126,1.58,corr,1.0000,
-PBMC,2700,louvain,0.6779,0.0141,0.02,Q,0.722,
 PBMC,2700,tsne,3.1398,2.7377,0.87,,,
 PBMC,2700,diffmap,0.0177,0.0371,2.10,,,
 PBMC,2700,draw_graph,0.2408,5.1720,21.48,,,
@@ -73,8 +68,6 @@ PBMC,2700,umap,0.1389,4.7186,33.98,,,
 2k,2700,normalize_pearson_residuals,0.0037,0.0276,7.37,corr,1.0000,
 2k,2700,regress_out,0.0102,0.0152,1.50,corr,1.0000,
 2k,2700,neighbors,0.0081,0.0175,2.16,,,
-2k,2700,louvain,0.2527,0.0150,0.06,Q,0.770,
-2k,2700,leiden,0.5513,0.0103,0.02,,,
 2k,2700,umap,0.1556,5.0060,32.18,,,
 2k,2700,tsne,3.1222,2.8439,0.91,,,
 2k,2700,diffmap,0.0296,0.0500,1.69,,,
@@ -86,7 +79,13 @@ PBMC,2700,umap,0.1389,4.7186,33.98,,,
 2k,2700,harmonize,1.4267,0.1413,0.10,,,
 2k,2700,bbknn,0.0122,0.0576,4.71,,,
 2k,2700,scrublet,0.2418,3.6447,15.07,,,
-50k,50000,leiden,5.7759,0.3874,0.07,,,
-100k,100000,leiden,9.7418,0.9179,0.09,,,
-1M,1000000,leiden,94.9691,13.7954,0.15,,,
-2M,2035266,leiden,164.8471,NA,NA,,,ref NA@scale
+2k,2700,louvain,0.1295,0.0177,0.14,Q,0.779,
+2k,2700,leiden,0.2033,0.0107,0.05,,,
+50k,50000,louvain,0.5400,1.4608,2.71,Q,0.816,
+50k,50000,leiden,1.0096,0.3033,0.30,,,
+100k,100000,louvain,1.2178,2.6445,2.17,Q,0.817,
+100k,100000,leiden,2.5692,0.8205,0.32,,,
+1M,1000000,louvain,9.2603,79.2361,8.56,Q,0.836,
+1M,1000000,leiden,28.9378,14.1931,0.49,,,
+2M,2035266,louvain,16.7174,NA,NA,Q,0.761,ref NA@scale
+2M,2035266,leiden,40.7767,NA,NA,,,ref NA@scale
