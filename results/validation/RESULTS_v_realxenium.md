@@ -1,9 +1,8 @@
-# Real XENIUM validation — the user's integrated endometrium cohort (2M cells)
+# Real Xenium validation — an external integrated endometrium cohort (2M cells)
 
-CLAUDE.md pin: validate on the user's own real Xenium data. Object (READ-ONLY, belongs to
-the Xenium project): `Xenium_Claude_test/data/processed/xenium/integrated_data.h5ad` —
-**2,035,266 cells × 5,101 genes** (Xenium 5k panel), 72 sections, real cell-type labels,
-real tissue coordinates. Pipeline + spatial `gr` parity on the largest single section
+Validation on a real, external Xenium dataset (READ-ONLY; path supplied via the `XENIUM_H5`
+env var): **2,035,266 cells × 5,101 genes** (Xenium 5k panel), 72 sections, real cell-type
+labels, real tissue coordinates. Pipeline + spatial `gr` parity on the largest single section
 (`p11_t3_s1`, 103,629 cells, 19 cell types — coherent spatial frame); full-cohort 2M scale test.
 
 ## Core pipeline (real section, vs scanpy/sklearn)
