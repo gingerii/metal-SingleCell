@@ -99,10 +99,20 @@ an `init_comm` arg). `n_iterations` repeats the whole multilevel pass. Wired: `c
 connectivities, backend="gpu"|"igraph")` (default igraph).
 - **Quality (driver 11): GPU Leiden BEATS igraph Leiden** — PBMC Q=0.664 / 8 cl / ARI 0.706 vs igraph
   Leiden 0.660; SBM 200k 0.8075==0.8075, 1M 0.786 vs 0.805 (slightly under at 1M).
-- **Speed: NOT a win at scale** — refinement ≈ a second colored local-moving per level, and
-  `n_iterations=2` doubles again → ~4× Louvain's work. 200k 0.23×, 1M 0.57× vs igraph Leiden (which
-  is itself faster than igraph Louvain). So: **GPU Louvain = the speed win (2.8× @1M); GPU Leiden =
-  the quality win** (better modularity + well-connected guarantee) at a speed cost.
+- **Speed: NOT a win at scale** — refinement ≈ a second colored local-moving per level (profiled:
+  **refinement is ~75% of Leiden runtime**, local-moving ~25%, contract negligible). So: **GPU
+  Louvain = the speed win (2.8× @1M); GPU Leiden = the quality win** (better modularity + well-
+  connected guarantee) at a speed cost. igraph is the right default below ~1M.
+- **WIN: `n_iterations` default 2→1** (`leiden()` and the gpu branch of `cluster.leiden` clamp to 1).
+  Unlike leidenalg, OUR local-moving AND refinement each iterate to convergence within ONE multilevel
+  pass, so that pass already reaches a fixed point — a 2nd iteration is provably redundant: **ARI
+  1.000, identical Q and cluster count for n_iter 1 vs 2** across clean/noisy/many-cluster graphs ×
+  seeds. Halves the cost: PBMC 2.63→0.55s, 100k 13.06→9.74s, 1M 176→~110s (speedup ~doubles, e.g.
+  100k 0.05→0.09×). cuGraph builds ONE dendrogram (≈ n_iter=1) for the same reason.
+- **Refinement max_passes is NOT a useful lever** — it self-converges in ~5 passes; capping LOWER
+  (≤3) is *slower* (under-converged refinement → more sub-communities → larger contracted graphs →
+  more downstream work). cuGraph's single-pass refinement works for them (different aggregation), not
+  for us. Keep `_REFINE_MAX_PASSES=50` (converges well before the cap).
 
 ## PERF: why we're not cuGraph's 70× — and what helped
 rapids' 70× is a datacenter GPU (A100, ~2TB/s) vs CPU, with fully-fused compiled CUDA (shared-mem

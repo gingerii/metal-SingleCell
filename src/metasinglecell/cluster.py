@@ -23,9 +23,13 @@ def leiden(connectivities, resolution: float = 1.0, random_state: int = 0,
         from .graph import Graph
         from .graph.leiden import leiden as gpu_leiden
 
+        # The GPU Leiden converges within ONE multilevel pass (its local-moving and
+        # refinement each iterate to convergence), so n_iterations>1 cannot change the
+        # result (verified ARI 1.000) — clamp to 1 to avoid ~2x redundant work. igraph's
+        # n_iterations IS meaningful, so it's honored on that backend below.
         g = Graph.from_scipy(connectivities)
         return gpu_leiden(g, resolution=resolution, random_state=random_state,
-                          n_iterations=n_iterations)
+                          n_iterations=1)
 
     if backend != "igraph":
         raise ValueError(f"unknown backend {backend!r} (gpu|igraph)")

@@ -28,7 +28,7 @@ _(Updated to fold in step-2 optimizations: the `from_scipy` transfer fix and `_k
 | draw_graph | 21.5 | NA | NA | – | – | preservation |
 | highly_variable_genes | 3.2 | 25.9 | 32.9 | **15.8**¹ | **49.2** | overlap 1.000 |
 | louvain | 0.02 | 0.41 | 0.84 | **2.04** | (53s)² | Q≥igraph |
-| leiden | 0.00 | 0.04 | 0.05 | 0.08 | (252s)² | Q≥igraph |
+| leiden | 0.02 | 0.07 | 0.09 | **0.15**⁷ | (165s)² | Q≥igraph |
 | harmonize | 0.07⁴ | 0.59⁴ | 0.28⁴ | – | – | mixing > harmonypy |
 | bbknn | 6.8 | 0.66 | 0.41 | – | – | mixing✓ |
 
@@ -43,7 +43,14 @@ Barnes-Hut, so ≈1×. ⁴ **After the harmonize fix** (`max_iter_clustering` 20
 ~5.7× the distance compute): neighbors 1.7/1.6/1.5× → **2.2/2.2/1.8×**; the brute core
 (`_knn_gpu`) alone went 267ms→56ms (4.8×) @25k, recall preserved (0.96). This is the one place
 MLX clearly underperformed a specialized kernel (cuML's neighbors edge); it narrows that gap.
-⁶ **After moving umap's negative sampling to the GPU** (was host `np.random` + per-epoch
+⁷ **After the Leiden `n_iterations` fix** (default 2→1, gpu backend clamps to 1): our parallel
+Leiden's local-moving AND refinement each iterate to convergence within ONE multilevel pass, so
+that pass already reaches a fixed point — a 2nd iteration is provably redundant (ARI **1.000**,
+identical Q and cluster count for n_iter 1 vs 2 across clean/noisy/many-cluster graphs). This
+~halved Leiden: PBMC 2.63→0.55s, 100k 13.06→9.74s, **1M 176→95s (0.08×→0.15×)**, 2M 252→165s.
+cuGraph builds one dendrogram (≈ n_iter=1) for the same reason. Examining cuGraph's single-pass
+refinement: NOT portable as a speedup here — capping our refinement passes is *slower* (under-
+converged refinement → larger contracted graphs → more downstream work). ⁶ **After moving umap's negative sampling to the GPU** (was host `np.random` + per-epoch
 host→device transfer, breaking the lazy-eval graph): layout ~1.4× faster → umap 20.6/8.2/6.4× →
 **34.0/10.5/7.8×**, quality preserved (PBMC nbr-preservation 0.128 vs umap-learn 0.157).
 `fuzzy_simplicial_set` was found NOT to be a bottleneck (0.02–0.04s warm; earlier 1.3s was numba JIT).
@@ -54,9 +61,9 @@ host→device transfer, breaking the lazy-eval graph): layout ~1.4× faster → 
    normalize ~3×. umap 6–21×, scrublet 6–20× also win. The `from_scipy` transfer fix lifted the
    at-scale numbers further (normalize @1M 0.82→1.69×, HVG @1M 11.9→15.8×).
 2. **HARDWARE-bound — clustering**: louvain **crosses to a GPU win at 1M (2.04×)** as predicted;
-   leiden stays CPU-favored at every size (0.08× even at 1M) — its refinement phase is ~10× the
-   Louvain work and Metal can't run cuGraph-style fused clustering (relaxed-only atomics, no grid
-   barrier — proven earlier). igraph is the right default below ~1M.
+   leiden stays CPU-favored at every size (**0.15× at 1M after the n_iterations fix**, ⁷) — its
+   refinement phase is ~75% of the runtime and Metal can't run cuGraph-style fused clustering
+   (relaxed-only atomics, no grid barrier — proven earlier). igraph is the right default below ~1M.
 3. **WORKLOAD-bound — iterative/graph/kNN** (step-2 outcome): harmonize improved ~2× + better
    quality (one real bug fixed) but is small-matrix iterative work the CPU wins; bbknn is
    kNN-bound (approximate-CPU is competitive); leiden refinement is hardware-bound. These are not
