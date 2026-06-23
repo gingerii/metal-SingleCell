@@ -169,10 +169,13 @@ Hub graph **6.10→2.98s (2×)**, quality identical (Q 0.9719). **BUT: the real 
 graph (kNN-15 symmetric) does NOT produce degree>1024 super-vertices after contraction — so the host
 tail never triggers and this is inert on the atlas benchmark** (leiden 1M unchanged ~29s within run
 noise). Kept because it's correctness-preserving and a real win for hub-containing data (dense/doublet
-regions in Xenium may qualify), but it is NOT the real-1M lever. **Real-1M leiden (~29s) is
-convergence-bound** (the fuzzy graph needs many move+refine passes) — the remaining lever is faster
-convergence (e.g. commit_prob schedule / better stop criterion), not the host tail or a float-atomic
-hash (verified: clean 1M graph move=1.76s/refine=2.30s, no high-degree vertices at all).
+regions in Xenium may qualify), but it is NOT the real-1M lever. **Real-1M leiden was
+convergence-bound** (the fuzzy graph needs many move+refine passes) — DONE: **`commit_prob` 0.5→0.9**
+(the random half-commit can commit 90%; 10% hold still breaks swaps) cut pass-count → **Leiden 1M
+28.9s→14.9s, CROSSED to a GPU win (1.10× vs igraph 16.4s)**; louvain 1M 9.3→6.0s (11.74×). Validated
+identical quality (PBMC bestQ 0.7182, synthetic ARI 1.000, cp-sweep flat Q). cp=0.9 is the default;
+cp=1.0 gains nothing and risks oscillation. Leiden 1M journey: 0.08→0.15(n_iter)→0.49(coloring-free)
+→**1.10×(cp=0.9)**. Below ~100k igraph still wins (tiny-graph launch overhead).
 
 ## Status
 Phases 1–3 DONE + Louvain perf-optimized. **GPU Louvain: fast+correct, ~5–13× over igraph at 1M**
