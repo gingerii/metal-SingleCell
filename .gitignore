@@ -25,5 +25,8 @@ env/
 *.metallib
 *.air
 
-# Large reference PDFs kept local (distilled into .claude/skills/)
+# Large reference PDFs kept local
 resources/*.pdf
+
+# Claude skill notes kept local (internal durable notes, not part of the public package)
+.claude/skills/
