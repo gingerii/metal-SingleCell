@@ -16,9 +16,17 @@ from .sparse import CSR
 
 
 def _csr(adata, layer=None):
+    """Our GPU CSR — for funcs that take a CSR (normalize/log1p/hvg/scale)."""
     import scipy.sparse as sp
     X = adata.layers[layer] if layer is not None else adata.X
     return CSR.from_scipy(sp.csr_matrix(X))
+
+
+def _sci(adata, layer=None):
+    """A scipy CSR — for funcs that take raw scipy (filter/qc/regress)."""
+    import scipy.sparse as sp
+    X = adata.layers[layer] if layer is not None else adata.X
+    return sp.csr_matrix(X)
 
 
 def normalize_total(adata, target_sum: float | None = None, layer=None, copy: bool = False):
@@ -63,7 +71,7 @@ def filter_cells(adata, min_counts=None, max_counts=None, min_genes=None,
                  max_genes=None, copy: bool = False):
     """Filter cells (``sc.pp.filter_cells``); subsets ``adata`` in place."""
     adata = adata.copy() if copy else adata
-    keep = _pp.filter_cells(_csr(adata), min_counts=min_counts, max_counts=max_counts,
+    keep = _pp.filter_cells(_sci(adata), min_counts=min_counts, max_counts=max_counts,
                             min_genes=min_genes, max_genes=max_genes)
     adata._inplace_subset_obs(keep)
     return adata if copy else None
@@ -73,7 +81,7 @@ def filter_genes(adata, min_counts=None, max_counts=None, min_cells=None,
                  max_cells=None, copy: bool = False):
     """Filter genes (``sc.pp.filter_genes``); subsets ``adata`` in place."""
     adata = adata.copy() if copy else adata
-    keep = _pp.filter_genes(_csr(adata), min_counts=min_counts, max_counts=max_counts,
+    keep = _pp.filter_genes(_sci(adata), min_counts=min_counts, max_counts=max_counts,
                             min_cells=min_cells, max_cells=max_cells)
     adata._inplace_subset_var(keep)
     return adata if copy else None
@@ -127,7 +135,7 @@ def scrublet(adata, sim_doublet_ratio: float = 2.0, expected_doublet_rate: float
 def calculate_qc_metrics(adata, copy: bool = False):
     """Per-cell/per-gene QC metrics (``sc.pp.calculate_qc_metrics``)."""
     adata = adata.copy() if copy else adata
-    m = _pp.calculate_qc_metrics(_csr(adata))
+    m = _pp.calculate_qc_metrics(_sci(adata))
     for k, v in m.items():
         (adata.obs if len(v) == adata.n_obs else adata.var)[k] = np.asarray(v)
     return adata if copy else None

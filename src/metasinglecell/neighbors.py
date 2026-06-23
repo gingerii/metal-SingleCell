@@ -74,12 +74,21 @@ def _knn_gpu(X: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
 
     Returns ``(knn_indices, knn_dists)`` of shape (n, k), self first.
     """
+    import math
+
     import mlx.core as mx
 
     Xg = mx.array(X.astype(np.float32))
-    Xg_h = Xg.astype(mx.float16)                          # fp16 distances (~1.27× incl argpartition)
-    sq_h = mx.sum(Xg_h * Xg_h, axis=1)
     n = X.shape[0]
+    # fp16 distances are used only to RANK neighbors (selected distances are recomputed in
+    # fp32 below), but a large-magnitude embedding (e.g. Pearson-residual PCA) overflows fp16
+    # (max ~6.5e4) → inf → garbage top-k. Rescale by f so the worst-case squared distance
+    # (~4·max‖x‖²) stays well inside fp16; ranking is scale-invariant, so this is exact.
+    sq32 = mx.sum(Xg * Xg, axis=1)
+    maxnorm2 = float(mx.max(sq32).item()) if n else 0.0
+    f = min(1.0, math.sqrt(8000.0 / (4.0 * maxnorm2 + 1e-9))) if maxnorm2 > 0 else 1.0
+    Xg_h = (Xg * f).astype(mx.float16)                    # scaled fp16 for ranking
+    sq_h = mx.sum(Xg_h * Xg_h, axis=1)
 
     # Tile over query rows so we never materialize the full n×n distance matrix
     # (that OOMs the GPU past ~30k cells). Each tile is block×n. The whole distance +
@@ -96,7 +105,10 @@ def _knn_gpu(X: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
         D2 = mx.maximum(sq_h[s:s + block][:, None] + sq_h[None, :]
                         - 2.0 * (Xg_h[s:s + block] @ Xg_h.T), 0.0)        # all fp16
         bidx = _topk_rows(D2, k)                          # custom kernel (vs slow argpartition)
-        bd2 = mx.take_along_axis(D2, bidx, axis=1)        # gather distances on the GPU
+        # recompute the selected distances EXACTLY in fp32 from the originals (not the scaled
+        # fp16 D2) — exact returned distances, immune to the fp16 rescale above.
+        diff = Xg[s:s + block][:, None, :] - Xg[bidx]     # block×k×D, fp32
+        bd2 = mx.sum(diff * diff, axis=2)
         mx.eval(bidx, bd2)                                # transfer only the small block×k results
         idx_parts.append(np.asarray(bidx)); d2_parts.append(np.asarray(bd2).astype(np.float32))
     knn_indices = np.concatenate(idx_parts, axis=0)
