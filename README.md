@@ -37,7 +37,18 @@ pip install -e .          # in a Python 3.11 env with mlx (Apple Silicon)
 ```
 
 Heavy backends (`mlx`, `scanpy`, `squidpy`) are lazy-imported, so the package imports cleanly in any
-environment. See [`envs/`](envs/) for the conda environments.
+environment. See [`envs/`](envs/) for the conda environment (`envs/metasinglecell.yml`), which is the
+recommended setup.
+
+**uv users:** run `uv python install 3.11` *before* creating your venv. The system python.org 3.11 on
+macOS arm64 can hang indefinitely on first `import scanpy` (a numba/LLVM AOT-compile deadlock on
+framework Python builds); uv's own managed 3.11 build (3.11.13) avoids it. Then:
+
+```bash
+uv python install 3.11
+uv venv --python 3.11.13 .venv
+uv pip install -e ".[oracle,metal,dev]"
+```
 
 ## Tutorials
 
