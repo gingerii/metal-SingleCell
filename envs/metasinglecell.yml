@@ -14,6 +14,7 @@ dependencies:
   - numpy
   - scipy
   - pandas
+  - squidpy
   - anndata
   - h5py
   - scikit-learn

@@ -20,7 +20,7 @@ dependencies = [
 # backend) are managed in envs/metasinglecell.yml, not pinned here, so the
 # package stays importable in any environment. Library code lazy-imports them.
 [project.optional-dependencies]
-oracle = ["scanpy", "leidenalg", "igraph", "umap-learn", "scikit-learn"]
+oracle = ["scanpy", "squidpy", "leidenalg", "igraph", "umap-learn", "scikit-learn"]
 metal = ["mlx"]
 dev = ["pytest", "jupyter", "matplotlib"]
 
