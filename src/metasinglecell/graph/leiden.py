@@ -103,6 +103,7 @@ _REFINE_KERNEL_SIMD_SOURCE = """
     uint lane = gid & 31u;
     if (v >= (uint)nn[0]) { return; }
     if (color[v] != active[0]) { if (lane == 0u) target[v] = comm[v]; return; }
+    if (amask[v] == 0) { if (lane == 0u) target[v] = comm[v]; return; }  // pruned
     uint start = indptr[v];
     uint end = indptr[v + 1];
     uint deg = end - start;
@@ -149,7 +150,7 @@ def _refine_kernel_simd():
     return mx.fast.metal_kernel(
         name="leiden_refine_move_simd",
         input_names=["indptr", "indices", "weights", "comm", "part", "k", "sigtot",
-                     "color", "active", "res", "twom", "cap", "nn"],
+                     "color", "active", "res", "twom", "cap", "nn", "amask"],
         output_names=["target"],
         source=_REFINE_KERNEL_SIMD_SOURCE,
     )
@@ -249,7 +250,8 @@ def _refine(graph: Graph, part: np.ndarray, resolution: float, twom: float,
 
 def _refine_sync(graph: Graph, part: np.ndarray, resolution: float, twom: float,
                  seed: int = 0, max_passes: int = 200, commit_prob: float = 0.9,
-                 hd_every: int = 4, kernel: str = "simd", sync_every: int = 4):
+                 hd_every: int = 4, kernel: str = "simd", sync_every: int = 4,
+                 prune: bool = True):
     """Coloring-FREE refinement (cuGraph-style synchronous + random half-commit).
 
     Same within-Louvain-community restriction as `_refine`, but every vertex picks
@@ -259,7 +261,8 @@ def _refine_sync(graph: Graph, part: np.ndarray, resolution: float, twom: float,
 
     ``kernel="simd"`` (default) uses the O(degree) SIMD-group refine kernel; ``"quad"``
     the legacy O(degree²) single-thread kernel (identical output). ``sync_every`` tests
-    convergence every K passes instead of every pass (see `_local_moving_sync`).
+    convergence every K passes instead of every pass; ``prune`` re-evaluates only the
+    changed frontier each pass (both as in `_local_moving_sync`).
     """
     import mlx.core as mx
 
@@ -278,17 +281,17 @@ def _refine_sync(graph: Graph, part: np.ndarray, resolution: float, twom: float,
         kobj = _refine_kernel_simd()
         nn_a = mx.array([n], dtype=mx.int32)
 
-        def do_refine(comm, sigtot):
+        def do_refine(comm, sigtot, amask):
             (t,) = kobj(
                 inputs=[graph.indptr, graph.indices, graph.weights, comm, part_mx, k,
-                        sigtot, color0, active0, res_a, twom_a, cap_a, nn_a],
+                        sigtot, color0, active0, res_a, twom_a, cap_a, nn_a, amask],
                 grid=(n * 32, 1, 1), threadgroup=(min(256, n * 32), 1, 1),
                 output_shapes=[(n,)], output_dtypes=[mx.int32])
             return t
     else:
         kobj = _refine_kernel()
 
-        def do_refine(comm, sigtot):
+        def do_refine(comm, sigtot, amask):           # quad has no pruning path; amask ignored
             (t,) = kobj(
                 inputs=[graph.indptr, graph.indices, graph.weights, comm, part_mx, k,
                         sigtot, color0, active0, res_a, twom_a, cap_a],
@@ -304,14 +307,26 @@ def _refine_sync(graph: Graph, part: np.ndarray, resolution: float, twom: float,
         hd_weights = np.asarray(graph.weights).astype(np.float64)
         k_np = np.asarray(k).astype(np.float64)
 
+    prune_on = prune and kernel == "simd" and not large_ids.size
+    active_mask = mx.ones((n,), dtype=mx.int32)
+
     syncs = 0
     for p in range(max_passes):
         sigtot = mx.zeros((n,), dtype=mx.float32).at[comm].add(k)
-        target = do_refine(comm, sigtot)
+        target = do_refine(comm, sigtot, active_mask)
         wants = target != comm
         key, sub = mx.random.split(key)
         coin = mx.random.uniform(shape=(n,), key=sub) < commit_prob
-        comm = mx.where(wants & coin, target, comm)   # no-op when no vertex wants to move
+        commit = wants & coin
+        comm = mx.where(commit, target, comm)         # no-op when no vertex wants to move
+        # Frontier for the next pass: moved ∪ neighbours-of-moved ∪ wanted-but-held.
+        # Propagating through all edges (not just same-Louvain-community ones) is a
+        # conservative superset — it can only over-activate, never wrongly prune — so
+        # the refined labels stay identical to no-pruning.
+        if prune_on:
+            ci = commit.astype(mx.int32)
+            nbr = mx.zeros((n,), dtype=mx.int32).at[graph.edge_src].maximum(ci[graph.indices])
+            active_mask = mx.maximum(mx.maximum(ci, nbr), (wants & ~coin).astype(mx.int32))
         hd_due = bool(large_ids.size) and (p % hd_every == hd_every - 1)
         if (p % sync_every == sync_every - 1) or (p == max_passes - 1) or hd_due:
             gpu_done = not bool(mx.any(wants).item())
@@ -337,7 +352,7 @@ def _refine_sync(graph: Graph, part: np.ndarray, resolution: float, twom: float,
 def leiden(graph: Graph, resolution: float = 1.0, random_state: int = 0,
            n_iterations: int = 1, max_levels: int = 20, variant: str = "sync",
            commit_prob: float = 0.9, kernel: str = "simd",
-           sync_every: int = 4) -> np.ndarray:
+           sync_every: int = 4, prune: bool = True) -> np.ndarray:
     """Parallel Leiden. Returns dense integer labels per vertex.
 
     ``variant="sync"`` (default) uses coloring-free synchronous local-moving + refinement
@@ -359,14 +374,15 @@ def leiden(graph: Graph, resolution: float = 1.0, random_state: int = 0,
     for it in range(max(1, n_iterations)):
         labels = _leiden_pass(graph, resolution, twom, random_state + 17 * it,
                               init=labels, variant=variant, commit_prob=commit_prob,
-                              kernel=kernel, sync_every=sync_every)
+                              kernel=kernel, sync_every=sync_every, prune=prune)
     return labels
 
 
 def _leiden_pass(g0: Graph, resolution: float, twom: float, seed: int,
                  init: np.ndarray | None, max_levels: int = 20,
                  variant: str = "colored", commit_prob: float = 0.9,
-                 kernel: str = "simd", sync_every: int = 4) -> np.ndarray:
+                 kernel: str = "simd", sync_every: int = 4,
+                 prune: bool = True) -> np.ndarray:
     """One full multilevel Leiden run (move -> refine -> aggregate, repeat).
 
     ``variant="sync"`` uses the coloring-free synchronous local-moving + refinement
@@ -379,9 +395,9 @@ def _leiden_pass(g0: Graph, resolution: float, twom: float, seed: int,
 
     if variant == "sync":
         move = functools.partial(_local_moving_sync, commit_prob=commit_prob,
-                                 kernel=kernel, sync_every=sync_every)
+                                 kernel=kernel, sync_every=sync_every, prune=prune)
         refine = functools.partial(_refine_sync, commit_prob=commit_prob,
-                                   kernel=kernel, sync_every=sync_every)
+                                   kernel=kernel, sync_every=sync_every, prune=prune)
     else:
         move, refine = _local_moving, _refine
     g = g0

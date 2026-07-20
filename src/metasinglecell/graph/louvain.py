@@ -91,6 +91,7 @@ _MOVE_KERNEL_SIMD_SOURCE = """
     uint lane = gid & 31u;
     if (v >= (uint)nn[0]) { return; }
     if (color[v] != active[0]) { if (lane == 0u) target[v] = comm[v]; return; }
+    if (amask[v] == 0) { if (lane == 0u) target[v] = comm[v]; return; }  // pruned: unchanged nbrhood
     uint start = indptr[v];
     uint end = indptr[v + 1];
     uint deg = end - start;
@@ -136,7 +137,7 @@ def _move_kernel_simd():
     return mx.fast.metal_kernel(
         name="louvain_best_move_simd",
         input_names=["indptr", "indices", "weights", "comm", "k", "sigtot",
-                     "color", "active", "res", "twom", "cap", "nn"],
+                     "color", "active", "res", "twom", "cap", "nn", "amask"],
         output_names=["target"],
         source=_MOVE_KERNEL_SIMD_SOURCE,
     )
@@ -277,7 +278,8 @@ def _local_moving(graph: Graph, resolution: float, twom: float, seed: int = 0,
 
 def _local_moving_sync(graph: Graph, resolution: float, twom: float, seed: int = 0,
                        max_passes: int = 200, init_comm=None, commit_prob: float = 0.9,
-                       hd_every: int = 4, kernel: str = "simd", sync_every: int = 4):
+                       hd_every: int = 4, kernel: str = "simd", sync_every: int = 4,
+                       prune: bool = True):
     """Coloring-FREE synchronous local-moving (cuGraph-style).
 
     All vertices pick their best community from ONE snapshot per pass (a per-vertex
@@ -316,17 +318,17 @@ def _local_moving_sync(graph: Graph, resolution: float, twom: float, seed: int =
         kobj = _move_kernel_simd()
         nn_a = mx.array([n], dtype=mx.int32)
 
-        def do_move(comm, sigtot):
+        def do_move(comm, sigtot, amask):
             (t,) = kobj(
                 inputs=[graph.indptr, graph.indices, graph.weights, comm, k, sigtot,
-                        color0, active0, res_a, twom_a, cap_a, nn_a],
+                        color0, active0, res_a, twom_a, cap_a, nn_a, amask],
                 grid=(n * 32, 1, 1), threadgroup=(min(256, n * 32), 1, 1),
                 output_shapes=[(n,)], output_dtypes=[mx.int32])
             return t
     else:
         kobj = _move_kernel()
 
-        def do_move(comm, sigtot):
+        def do_move(comm, sigtot, amask):             # quad has no pruning path; amask ignored
             (t,) = kobj(
                 inputs=[graph.indptr, graph.indices, graph.weights, comm, k, sigtot,
                         color0, active0, res_a, twom_a, cap_a],
@@ -342,14 +344,29 @@ def _local_moving_sync(graph: Graph, resolution: float, twom: float, seed: int =
         hd_weights = np.asarray(graph.weights).astype(np.float64)
         k_np = np.asarray(k).astype(np.float64)
 
+    # Vertex pruning: only the SIMD kernel reads the active mask, and high-degree host
+    # moves don't propagate through it — so pruning is gated to the pure SIMD path.
+    prune_on = prune and kernel == "simd" and not large_ids.size
+    active_mask = mx.ones((n,), dtype=mx.int32)       # first pass: everyone active
+
     syncs = 0
     for p in range(max_passes):
         sigtot = mx.zeros((n,), dtype=mx.float32).at[comm].add(k)
-        target = do_move(comm, sigtot)
+        target = do_move(comm, sigtot, active_mask)
         wants = target != comm
         key, sub = mx.random.split(key)
         coin = mx.random.uniform(shape=(n,), key=sub) < commit_prob
-        comm = mx.where(wants & coin, target, comm)   # no-op when no vertex wants to move
+        commit = wants & coin
+        comm = mx.where(commit, target, comm)         # no-op when no vertex wants to move
+        # Frontier for the NEXT pass: a vertex is re-evaluated only if it moved, a
+        # neighbor moved (its best target may change), or it wanted to move but the coin
+        # held it (a pending move to retry). A vertex with an unchanged neighbourhood
+        # would just re-confirm "stay", so skipping it changes nothing — pruning is
+        # exact here (committed moves, and final labels, identical to no-pruning).
+        if prune_on:
+            ci = commit.astype(mx.int32)
+            nbr = mx.zeros((n,), dtype=mx.int32).at[graph.edge_src].maximum(ci[graph.indices])
+            active_mask = mx.maximum(mx.maximum(ci, nbr), (wants & ~coin).astype(mx.int32))
         # Only round-trip to the host to test convergence every `sync_every` passes (and
         # run the host tail on its own cadence). Between checks MLX queues passes without
         # a CPU↔GPU sync, keeping the pipeline full.
@@ -377,7 +394,7 @@ def _local_moving_sync(graph: Graph, resolution: float, twom: float, seed: int =
 def louvain(graph: Graph, resolution: float = 1.0, random_state: int = 0,
             max_levels: int = 20, tol: float = 1e-9, variant: str = "sync",
             commit_prob: float = 0.9, kernel: str = "simd",
-            sync_every: int = 4) -> np.ndarray:
+            sync_every: int = 4, prune: bool = True) -> np.ndarray:
     """Multilevel parallel Louvain. Returns dense integer labels per vertex.
 
     ``variant="sync"`` (default) uses the coloring-free synchronous local-moving
@@ -391,7 +408,7 @@ def louvain(graph: Graph, resolution: float = 1.0, random_state: int = 0,
     if variant == "sync":
         def move(g, res, tw, seed):
             return _local_moving_sync(g, res, tw, seed=seed, commit_prob=commit_prob,
-                                      kernel=kernel, sync_every=sync_every)
+                                      kernel=kernel, sync_every=sync_every, prune=prune)
     else:
         move = _local_moving
     twom = graph.total_weight()
