@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import _prof
 from .csr_graph import Graph
 from .primitives import _segments, modularity, segment_head, segment_sum
 
@@ -244,6 +245,7 @@ def _local_moving_sync(graph: Graph, resolution: float, twom: float, seed: int =
         hd_weights = np.asarray(graph.weights).astype(np.float64)
         k_np = np.asarray(k).astype(np.float64)
 
+    syncs = 0
     for p in range(max_passes):
         sigtot = mx.zeros((n,), dtype=mx.float32).at[comm].add(k)
         (target,) = kernel(
@@ -254,6 +256,7 @@ def _local_moving_sync(graph: Graph, resolution: float, twom: float, seed: int =
         )
         wants = target != comm
         gpu_done = not bool(mx.any(wants).item())     # GPU vertices: no beneficial move
+        syncs += 1                                    # ^ one device->host round-trip per pass
         if not gpu_done:
             key, sub = mx.random.split(key)
             coin = mx.random.uniform(shape=(n,), key=sub) < commit_prob
@@ -273,6 +276,9 @@ def _local_moving_sync(graph: Graph, resolution: float, twom: float, seed: int =
             break
         mx.eval(comm)
 
+    if _prof.ENABLED:
+        _prof.last_move_passes = p + 1
+        _prof.last_move_syncs = syncs
     return comm
 
 

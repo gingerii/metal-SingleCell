@@ -19,10 +19,23 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import _prof
 from .csr_graph import Graph
 from .louvain import (_DEGREE_CAP, _contract_dense, _local_moving,
                       _local_moving_sync, color_graph)
 from .primitives import modularity
+
+
+def _prof_record(level, n, t0, t_move, t_ref, t_con, n_comms, n_refined):
+    """Append one per-level profiling record (no-op unless _prof.ENABLED)."""
+    if not _prof.ENABLED:
+        return
+    _prof.records.append(dict(
+        level=level, n=n,
+        move_s=t_move - t0, refine_s=t_ref - t_move, contract_s=t_con - t_ref,
+        move_passes=_prof.last_move_passes, refine_passes=_prof.last_refine_passes,
+        move_syncs=_prof.last_move_syncs, refine_syncs=_prof.last_refine_syncs,
+        n_comms=n_comms, n_refined=n_refined))
 
 
 # Refinement move kernel: like the Louvain move kernel but a vertex only considers
@@ -204,6 +217,7 @@ def _refine_sync(graph: Graph, part: np.ndarray, resolution: float, twom: float,
         hd_weights = np.asarray(graph.weights).astype(np.float64)
         k_np = np.asarray(k).astype(np.float64)
 
+    syncs = 0
     for p in range(max_passes):
         sigtot = mx.zeros((n,), dtype=mx.float32).at[comm].add(k)
         (target,) = kernel(
@@ -214,6 +228,7 @@ def _refine_sync(graph: Graph, part: np.ndarray, resolution: float, twom: float,
         )
         wants = target != comm
         gpu_done = not bool(mx.any(wants).item())
+        syncs += 1                                    # one device->host round-trip per pass
         if not gpu_done:
             key, sub = mx.random.split(key)
             coin = mx.random.uniform(shape=(n,), key=sub) < commit_prob
@@ -229,6 +244,9 @@ def _refine_sync(graph: Graph, part: np.ndarray, resolution: float, twom: float,
             break
         mx.eval(comm)
 
+    if _prof.ENABLED:
+        _prof.last_refine_passes = p + 1
+        _prof.last_refine_syncs = syncs
     _, dense = np.unique(np.asarray(comm), return_inverse=True)
     return dense.astype(np.int64)
 
@@ -269,6 +287,7 @@ def _leiden_pass(g0: Graph, resolution: float, twom: float, seed: int,
     (`_local_moving_sync` / `_refine_sync`, ``commit_prob`` tuning); ``"colored"`` uses coloring.
     """
     import functools
+    import time
 
     import mlx.core as mx
 
@@ -283,18 +302,25 @@ def _leiden_pass(g0: Graph, resolution: float, twom: float, seed: int,
     P = (init.copy() if init is not None else np.arange(g0.n, dtype=np.int64))
 
     for level in range(max_levels):
+        _t0 = time.perf_counter()
+        n_level = g.n
         # 1. Local moving, initialized from P (singletons on level 0 of a fresh run).
         Pmx = move(g, resolution, twom, seed=seed + level,
                    init_comm=mx.array(P.astype(np.int32)))
         _, P = np.unique(np.asarray(Pmx), return_inverse=True)
         P = P.astype(np.int64)
-        if P.max() + 1 == g.n:                       # each node its own community: done
+        n_comms = int(P.max()) + 1
+        _t_move = time.perf_counter()
+        if n_comms == g.n:                           # each node its own community: done
+            _prof_record(level, n_level, _t0, _t_move, _t_move, _t_move, n_comms, 0)
             break
 
         # 2. Refinement: split each Louvain community into well-connected pieces.
         R = refine(g, P, resolution, twom, seed=seed + level)
         nR = int(R.max()) + 1
+        _t_ref = time.perf_counter()
         if nR == g.n:                                # refinement can't aggregate further
+            _prof_record(level, n_level, _t0, _t_move, _t_ref, _t_ref, n_comms, nR)
             break
 
         # 3. Aggregate on the REFINED partition; lift P onto the refined super-vertices.
@@ -303,6 +329,7 @@ def _leiden_pass(g0: Graph, resolution: float, twom: float, seed: int,
         orig2node = R[orig2node]
         g = _contract_dense(g, R, nR)
         P = P_agg
+        _prof_record(level, n_level, _t0, _t_move, _t_ref, time.perf_counter(), n_comms, nR)
 
     _, final = np.unique(P[orig2node], return_inverse=True)
     return final.astype(np.int64)
