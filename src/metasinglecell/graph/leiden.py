@@ -382,7 +382,7 @@ def _leiden_pass(g0: Graph, resolution: float, twom: float, seed: int,
                  init: np.ndarray | None, max_levels: int = 20,
                  variant: str = "colored", commit_prob: float = 0.9,
                  kernel: str = "simd", sync_every: int = 4,
-                 prune: bool = True) -> np.ndarray:
+                 prune: bool = True, tol: float = 1e-9) -> np.ndarray:
     """One full multilevel Leiden run (move -> refine -> aggregate, repeat).
 
     ``variant="sync"`` uses the coloring-free synchronous local-moving + refinement
@@ -404,10 +404,13 @@ def _leiden_pass(g0: Graph, resolution: float, twom: float, seed: int,
     orig2node = np.arange(g0.n, dtype=np.int64)
     # P: community label per node of the current (aggregate) graph.
     P = (init.copy() if init is not None else np.arange(g0.n, dtype=np.int64))
+    q_prev = -1.0                                    # best modularity accepted so far
+    final_labels = P[orig2node]                      # partition if we stop before level 0
 
     for level in range(max_levels):
         _t0 = time.perf_counter()
         n_level = g.n
+        prev_labels = P[orig2node]                   # partition to keep if THIS level is rejected
         # 1. Local moving, initialized from P (singletons on level 0 of a fresh run).
         Pmx = move(g, resolution, twom, seed=seed + level,
                    init_comm=mx.array(P.astype(np.int32)))
@@ -415,6 +418,19 @@ def _leiden_pass(g0: Graph, resolution: float, twom: float, seed: int,
         P = P.astype(np.int64)
         n_comms = int(P.max()) + 1
         _t_move = time.perf_counter()
+
+        # Modularity-monotonicity guard (mirrors louvain()): if this level's local moving
+        # does not improve Q, reject it and keep the previous level's partition. Without
+        # this, a small dense contracted level can OSCILLATE at high commit_prob, hit
+        # max_passes in a degenerate 1–2-community state, and collapse the whole result —
+        # `louvain()` never collapses precisely because it has this guard.
+        q = float(modularity(g, mx.array(P.astype(np.int32)), resolution))
+        if q <= q_prev + tol:
+            _prof_record(level, n_level, _t0, _t_move, _t_move, _t_move, n_comms, 0)
+            final_labels = prev_labels
+            break
+        q_prev = q
+        final_labels = P[orig2node]                  # this level improved: it's the new best
         if n_comms == g.n:                           # each node its own community: done
             _prof_record(level, n_level, _t0, _t_move, _t_move, _t_move, n_comms, 0)
             break
@@ -435,5 +451,5 @@ def _leiden_pass(g0: Graph, resolution: float, twom: float, seed: int,
         P = P_agg
         _prof_record(level, n_level, _t0, _t_move, _t_ref, time.perf_counter(), n_comms, nR)
 
-    _, final = np.unique(P[orig2node], return_inverse=True)
+    _, final = np.unique(final_labels, return_inverse=True)
     return final.astype(np.int64)
