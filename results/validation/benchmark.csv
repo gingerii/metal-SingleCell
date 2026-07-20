@@ -81,11 +81,13 @@ PBMC,2700,umap,0.1389,4.7186,33.98,,,
 2k,2700,scrublet,0.2418,3.6447,15.07,,,
 2k,2700,louvain,0.1295,0.0177,0.14,Q,0.779,
 2k,2700,leiden,0.2033,0.0107,0.05,,,
-2M,2035266,louvain,11.5272,NA,NA,Q,0.765,ref NA@scale
-2M,2035266,leiden,24.4764,NA,NA,,,ref NA@scale
-50k,50000,louvain,0.4118,0.7291,1.77,Q,0.809,
-50k,50000,leiden,0.7056,0.2121,0.30,,,
-100k,100000,louvain,0.7182,2.1083,2.94,Q,0.823,
-100k,100000,leiden,1.6378,0.6058,0.37,,,
-1M,1000000,louvain,6.0110,69.8995,11.63,Q,0.839,
-1M,1000000,leiden,12.5814,11.3289,0.90,,,
+50k,50000,louvain,0.030,0.655,21.91,Q,0.8069,SBM; simd+sync4+prune
+50k,50000,leiden,0.085,0.386,4.55,Q,0.8069,SBM; simd+sync4+prune
+100k,100000,louvain,0.125,2.621,20.99,Q,0.8073,SBM
+100k,100000,leiden,0.339,1.218,3.60,Q,0.8073,SBM
+1M,1000000,louvain,5.057,48.789,9.65,Q,0.7414,SBM
+1M,1000000,leiden,7.534,23.900,3.17,Q,0.7560,SBM; was 0.90x pre-opt
+2M,2000000,louvain,16.133,NA,NA,Q,0.7222,SBM; igraph louvain NA@scale
+2M,2000000,leiden,16.799,58.287,3.47,Q,0.7424,SBM; 2M igraph leiden ref now measured
+real1M,986434,louvain,1.457,85.311,58.56,Q,0.8500,real neuron kNN15; algo-only
+real1M,986434,leiden,2.829,13.498,4.77,Q,0.8504,real neuron kNN15; 11.88->2.83 (4.14x vs pre-opt)
