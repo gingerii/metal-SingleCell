@@ -277,7 +277,7 @@ def _local_moving(graph: Graph, resolution: float, twom: float, seed: int = 0,
 
 def _local_moving_sync(graph: Graph, resolution: float, twom: float, seed: int = 0,
                        max_passes: int = 200, init_comm=None, commit_prob: float = 0.9,
-                       hd_every: int = 4, kernel: str = "simd"):
+                       hd_every: int = 4, kernel: str = "simd", sync_every: int = 4):
     """Coloring-FREE synchronous local-moving (cuGraph-style).
 
     All vertices pick their best community from ONE snapshot per pass (a per-vertex
@@ -290,6 +290,13 @@ def _local_moving_sync(graph: Graph, resolution: float, twom: float, seed: int =
 
     ``kernel="simd"`` (default) uses the O(degree) SIMD-group-per-vertex kernel;
     ``"quad"`` uses the legacy O(degree²) single-thread kernel (identical output).
+
+    ``sync_every`` controls convergence checking: the commit is a no-op when no
+    vertex wants to move, so we always commit and only round-trip to the host to test
+    convergence every ``sync_every`` passes. Between checks MLX queues passes without a
+    CPU↔GPU sync, so the pipeline isn't serialized per pass. Converging up to
+    ``sync_every``−1 passes late is a fixed point (stable), so the extra passes are
+    no-ops; the committed moves — and the final labels — are unchanged.
     """
     import mlx.core as mx
 
@@ -340,26 +347,26 @@ def _local_moving_sync(graph: Graph, resolution: float, twom: float, seed: int =
         sigtot = mx.zeros((n,), dtype=mx.float32).at[comm].add(k)
         target = do_move(comm, sigtot)
         wants = target != comm
-        gpu_done = not bool(mx.any(wants).item())     # GPU vertices: no beneficial move
-        syncs += 1                                    # ^ one device->host round-trip per pass
-        if not gpu_done:
-            key, sub = mx.random.split(key)
-            coin = mx.random.uniform(shape=(n,), key=sub) < commit_prob
-            comm = mx.where(wants & coin, target, comm)
-        # High-degree super-vertices are settled on the host, but the O(n) round-trip
-        # (copy comm + bincount Σtot) is far costlier than the few moves themselves, so
-        # only do it every `hd_every` passes — and once more at GPU-convergence so they
-        # reach a fixed point. Converged only when the GPU is done AND host made no move.
-        hd_changed = 0
-        if large_ids.size and (gpu_done or p % hd_every == 0):
-            comm_np = np.asarray(comm).copy()
-            sigtot_np = np.bincount(comm_np, weights=k_np, minlength=n).astype(np.float64)
-            hd_changed = _high_degree_moves(hd_indptr, hd_indices, hd_weights, comm_np,
-                                            k_np, sigtot_np, large_ids, resolution, twom)
-            comm = mx.array(comm_np.astype(np.int32))
-        if gpu_done and not hd_changed:
-            break
-        mx.eval(comm)
+        key, sub = mx.random.split(key)
+        coin = mx.random.uniform(shape=(n,), key=sub) < commit_prob
+        comm = mx.where(wants & coin, target, comm)   # no-op when no vertex wants to move
+        # Only round-trip to the host to test convergence every `sync_every` passes (and
+        # run the host tail on its own cadence). Between checks MLX queues passes without
+        # a CPU↔GPU sync, keeping the pipeline full.
+        hd_due = bool(large_ids.size) and (p % hd_every == hd_every - 1)
+        if (p % sync_every == sync_every - 1) or (p == max_passes - 1) or hd_due:
+            gpu_done = not bool(mx.any(wants).item())
+            syncs += 1
+            hd_changed = 0
+            if large_ids.size and (gpu_done or hd_due):
+                comm_np = np.asarray(comm).copy()
+                sigtot_np = np.bincount(comm_np, weights=k_np, minlength=n).astype(np.float64)
+                hd_changed = _high_degree_moves(hd_indptr, hd_indices, hd_weights, comm_np,
+                                                k_np, sigtot_np, large_ids, resolution, twom)
+                comm = mx.array(comm_np.astype(np.int32))
+            if gpu_done and not hd_changed:
+                break
+            mx.eval(comm)                             # bound the lazy graph at each check
 
     if _prof.ENABLED:
         _prof.last_move_passes = p + 1
@@ -369,7 +376,8 @@ def _local_moving_sync(graph: Graph, resolution: float, twom: float, seed: int =
 
 def louvain(graph: Graph, resolution: float = 1.0, random_state: int = 0,
             max_levels: int = 20, tol: float = 1e-9, variant: str = "sync",
-            commit_prob: float = 0.9, kernel: str = "simd") -> np.ndarray:
+            commit_prob: float = 0.9, kernel: str = "simd",
+            sync_every: int = 4) -> np.ndarray:
     """Multilevel parallel Louvain. Returns dense integer labels per vertex.
 
     ``variant="sync"`` (default) uses the coloring-free synchronous local-moving
@@ -383,7 +391,7 @@ def louvain(graph: Graph, resolution: float = 1.0, random_state: int = 0,
     if variant == "sync":
         def move(g, res, tw, seed):
             return _local_moving_sync(g, res, tw, seed=seed, commit_prob=commit_prob,
-                                      kernel=kernel)
+                                      kernel=kernel, sync_every=sync_every)
     else:
         move = _local_moving
     twom = graph.total_weight()
