@@ -93,6 +93,68 @@ def _refine_kernel():
     )
 
 
+# O(degree) SIMD-group-per-vertex refinement kernel: same 32-lanes-per-vertex
+# cooperative reduction as the Louvain move kernel, plus the P-restriction
+# (`part[nb] == part[v]`) so a vertex only joins a sub-community reachable through a
+# neighbor in its own Louvain community. Identical output to the quad refine kernel.
+_REFINE_KERNEL_SIMD_SOURCE = """
+    uint gid = thread_position_in_grid.x;
+    uint v = gid >> 5;
+    uint lane = gid & 31u;
+    if (v >= (uint)nn[0]) { return; }
+    if (color[v] != active[0]) { if (lane == 0u) target[v] = comm[v]; return; }
+    uint start = indptr[v];
+    uint end = indptr[v + 1];
+    uint deg = end - start;
+    if (deg > (uint)cap[0]) { if (lane == 0u) target[v] = comm[v]; return; }
+    int pv = part[v];
+    int curr = comm[v];
+    float kv = k[v];
+    float inv = 1.0f / twom[0];
+    float rgamma = res[0];
+    float best_gain = -1e30f;
+    int best_comm = curr;
+    float stay_gain = 0.0f;
+    for (uint base = 0u; base < deg; ++base) {
+        int nb = indices[start + base];
+        if (nb == (int)v || part[nb] != pv) { continue; }   // self / cross-community (uniform)
+        int c = comm[nb];
+        bool dup = false;
+        for (uint q = lane; q < base; q += 32u) {
+            int nq = indices[start + q];
+            if (nq != (int)v && part[nq] == pv && comm[nq] == c) { dup = true; }
+        }
+        if (simd_any(dup)) { continue; }
+        float wpart = 0.0f;
+        for (uint r = lane; r < deg; r += 32u) {
+            int nr = indices[start + r];
+            if (nr != (int)v && part[nr] == pv && comm[nr] == c) { wpart += weights[start + r]; }
+        }
+        float wc = simd_sum(wpart);
+        float sig = sigtot[c] - (c == curr ? kv : 0.0f);
+        float gain = wc - rgamma * sig * kv * inv;
+        if (c == curr) { stay_gain = gain; }
+        if (gain > best_gain || (gain == best_gain && c < best_comm)) {
+            best_gain = gain; best_comm = c;
+        }
+    }
+    if (lane == 0u)
+        target[v] = (best_gain > stay_gain + 1e-9f) ? best_comm : curr;
+"""
+
+
+def _refine_kernel_simd():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="leiden_refine_move_simd",
+        input_names=["indptr", "indices", "weights", "comm", "part", "k", "sigtot",
+                     "color", "active", "res", "twom", "cap", "nn"],
+        output_names=["target"],
+        source=_REFINE_KERNEL_SIMD_SOURCE,
+    )
+
+
 def _high_degree_refine(indptr, indices, weights, comm_np, part_np, k_np, sigtot_np,
                         large_ids, resolution, twom):
     """Exact within-community best-move for high-degree vertices (host, O(degree))."""
@@ -187,13 +249,16 @@ def _refine(graph: Graph, part: np.ndarray, resolution: float, twom: float,
 
 def _refine_sync(graph: Graph, part: np.ndarray, resolution: float, twom: float,
                  seed: int = 0, max_passes: int = 200, commit_prob: float = 0.9,
-                 hd_every: int = 4):
+                 hd_every: int = 4, kernel: str = "simd"):
     """Coloring-FREE refinement (cuGraph-style synchronous + random half-commit).
 
     Same within-Louvain-community restriction as `_refine`, but every vertex picks
     its best sub-community from ONE snapshot per pass (no per-pass graph coloring —
     the bulk of Leiden's cost), and the random half-commit breaks the symmetric-swap
     oscillation that previously made fixed-coloring refinement diverge.
+
+    ``kernel="simd"`` (default) uses the O(degree) SIMD-group refine kernel; ``"quad"``
+    the legacy O(degree²) single-thread kernel (identical output).
     """
     import mlx.core as mx
 
@@ -201,13 +266,34 @@ def _refine_sync(graph: Graph, part: np.ndarray, resolution: float, twom: float,
     k = graph.degrees()
     comm = mx.arange(n, dtype=mx.int32)             # singletons
     part_mx = mx.array(part.astype(np.int32))
-    kernel = _refine_kernel()
     res_a = mx.array([resolution], dtype=mx.float32)
     twom_a = mx.array([twom], dtype=mx.float32)
     cap_a = mx.array([_DEGREE_CAP], dtype=mx.int32)
     color0 = mx.zeros((n,), dtype=mx.int32)
     active0 = mx.array([0], dtype=mx.int32)
     key = mx.random.key(seed)
+
+    if kernel == "simd":
+        kobj = _refine_kernel_simd()
+        nn_a = mx.array([n], dtype=mx.int32)
+
+        def do_refine(comm, sigtot):
+            (t,) = kobj(
+                inputs=[graph.indptr, graph.indices, graph.weights, comm, part_mx, k,
+                        sigtot, color0, active0, res_a, twom_a, cap_a, nn_a],
+                grid=(n * 32, 1, 1), threadgroup=(min(256, n * 32), 1, 1),
+                output_shapes=[(n,)], output_dtypes=[mx.int32])
+            return t
+    else:
+        kobj = _refine_kernel()
+
+        def do_refine(comm, sigtot):
+            (t,) = kobj(
+                inputs=[graph.indptr, graph.indices, graph.weights, comm, part_mx, k,
+                        sigtot, color0, active0, res_a, twom_a, cap_a],
+                grid=(n, 1, 1), threadgroup=(min(256, n), 1, 1),
+                output_shapes=[(n,)], output_dtypes=[mx.int32])
+            return t
 
     deg = np.diff(np.asarray(graph.indptr).astype(np.int64))
     large_ids = np.flatnonzero(deg > _DEGREE_CAP)
@@ -220,12 +306,7 @@ def _refine_sync(graph: Graph, part: np.ndarray, resolution: float, twom: float,
     syncs = 0
     for p in range(max_passes):
         sigtot = mx.zeros((n,), dtype=mx.float32).at[comm].add(k)
-        (target,) = kernel(
-            inputs=[graph.indptr, graph.indices, graph.weights, comm, part_mx, k,
-                    sigtot, color0, active0, res_a, twom_a, cap_a],
-            grid=(n, 1, 1), threadgroup=(min(256, n), 1, 1),
-            output_shapes=[(n,)], output_dtypes=[mx.int32],
-        )
+        target = do_refine(comm, sigtot)
         wants = target != comm
         gpu_done = not bool(mx.any(wants).item())
         syncs += 1                                    # one device->host round-trip per pass
@@ -253,7 +334,7 @@ def _refine_sync(graph: Graph, part: np.ndarray, resolution: float, twom: float,
 
 def leiden(graph: Graph, resolution: float = 1.0, random_state: int = 0,
            n_iterations: int = 1, max_levels: int = 20, variant: str = "sync",
-           commit_prob: float = 0.9) -> np.ndarray:
+           commit_prob: float = 0.9, kernel: str = "simd") -> np.ndarray:
     """Parallel Leiden. Returns dense integer labels per vertex.
 
     ``variant="sync"`` (default) uses coloring-free synchronous local-moving + refinement
@@ -274,13 +355,15 @@ def leiden(graph: Graph, resolution: float = 1.0, random_state: int = 0,
     labels = None
     for it in range(max(1, n_iterations)):
         labels = _leiden_pass(graph, resolution, twom, random_state + 17 * it,
-                              init=labels, variant=variant, commit_prob=commit_prob)
+                              init=labels, variant=variant, commit_prob=commit_prob,
+                              kernel=kernel)
     return labels
 
 
 def _leiden_pass(g0: Graph, resolution: float, twom: float, seed: int,
                  init: np.ndarray | None, max_levels: int = 20,
-                 variant: str = "colored", commit_prob: float = 0.9) -> np.ndarray:
+                 variant: str = "colored", commit_prob: float = 0.9,
+                 kernel: str = "simd") -> np.ndarray:
     """One full multilevel Leiden run (move -> refine -> aggregate, repeat).
 
     ``variant="sync"`` uses the coloring-free synchronous local-moving + refinement
@@ -292,8 +375,8 @@ def _leiden_pass(g0: Graph, resolution: float, twom: float, seed: int,
     import mlx.core as mx
 
     if variant == "sync":
-        move = functools.partial(_local_moving_sync, commit_prob=commit_prob)
-        refine = functools.partial(_refine_sync, commit_prob=commit_prob)
+        move = functools.partial(_local_moving_sync, commit_prob=commit_prob, kernel=kernel)
+        refine = functools.partial(_refine_sync, commit_prob=commit_prob, kernel=kernel)
     else:
         move, refine = _local_moving, _refine
     g = g0
