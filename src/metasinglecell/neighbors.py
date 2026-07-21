@@ -171,11 +171,11 @@ def bbknn(X_pca: np.ndarray, batch, neighbors_within_batch: int = 3,
             e = min(s + tile, n)
             D2 = mx.maximum(xsq[s:e][:, None] + xb_sq[None, :]
                             - 2.0 * (Xg[s:e] @ Xb.T), 0.0)
-            loc = mx.argpartition(D2, kth=min(kk, bidx.size - 1), axis=1)[:, :kk]
-            mx.eval(loc, D2)
-            loc = np.asarray(loc)
-            d_b[s:e] = np.sqrt(np.maximum(np.take_along_axis(np.asarray(D2), loc, axis=1), 0.0))
-            loc_b[s:e] = loc
+            loc = _topk_rows(D2, kk)                      # fast register top-k (kk≪32) vs argpartition
+            Dvg = mx.take_along_axis(D2, loc, axis=1)     # gather selected dists on GPU
+            mx.eval(loc, Dvg)                             # transfer only the small block×kk results
+            d_b[s:e] = np.sqrt(np.maximum(np.asarray(Dvg), 0.0))
+            loc_b[s:e] = np.asarray(loc)
         idx_parts.append(bidx[loc_b])                    # map local -> global
         dist_parts.append(d_b)
 
