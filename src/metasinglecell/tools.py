@@ -119,7 +119,6 @@ def rank_genes_groups(X, groups, var_names=None, method: str = "t-test",
     gene names/indices sorted by descending score, with scores and (where defined)
     two-sided p-values and log-fold-changes. ``X`` is log-normalized.
     """
-    import mlx.core as mx
     from scipy import stats
 
     valid = {"t-test", "t-test_overestim_var", "wilcoxon", "logreg"}
@@ -150,14 +149,19 @@ def rank_genes_groups(X, groups, var_names=None, method: str = "t-test",
                              "pvals": None, "logfoldchanges": None}
         return out
 
-    # GPU group sums for mean/variance (ddof=1), shared by the t-tests and lfc.
-    Xg = mx.array(Xd)
-    code_mx = mx.array(code)
-    gsum = np.asarray(mx.zeros((G, n_genes), mx.float32).at[code_mx].add(Xg), np.float64)
-    gsq = np.asarray(mx.zeros((G, n_genes), mx.float32).at[code_mx].add(Xg * Xg), np.float64)
+    # Group sums for mean/variance (ddof=1), shared by the t-tests and lfc — accumulated in
+    # fp64 on the host (one-hot matmul). A GPU fp32 scatter-add of Σx² + naive
+    # (Σx²/n − mean²) breaches fp32's 2²⁴ exactness for large clusters and cancels, perturbing
+    # the Welch t-stats and marker ranking; fp64 matches scanpy. Same fp64 discipline as the
+    # wilcoxon rank-sum below.
+    Xd64 = Xd.astype(np.float64)
+    onehot = np.zeros((n, G), dtype=np.float64)
+    onehot[np.arange(n), code] = 1.0
+    gsum = onehot.T @ Xd64                                   # (G, n_genes)
+    gsq = onehot.T @ (Xd64 * Xd64)
     ng = np.bincount(code, minlength=G).astype(np.float64)
-    tot_sum = np.asarray(mx.sum(Xg, axis=0), np.float64)
-    tot_sq = np.asarray(mx.sum(Xg * Xg, axis=0), np.float64)
+    tot_sum = Xd64.sum(axis=0)
+    tot_sq = (Xd64 * Xd64).sum(axis=0)
 
     # ---- Wilcoxon rank-sum: rank cells per gene, sum group ranks -> normal z ----
     if method == "wilcoxon":

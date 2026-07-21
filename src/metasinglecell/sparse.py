@@ -211,6 +211,14 @@ class CSR:
         csr = mat if sp.isspmatrix_csr(mat) else mat.tocsr()
         if not csr.has_sorted_indices:
             csr = csr.copy(); csr.sort_indices()
+        # The GPU sparse kernels use a uint32 row pointer (≤2M-cell in-core target). Guard the
+        # silent wrap: >2^32 nnz belongs on the out-of-core streaming path (backed.py went int64
+        # for exactly this). Without the guard the cast below wraps and corrupts every row read.
+        if int(csr.indptr[-1]) >= 2**32:
+            raise ValueError(
+                f"nnz={int(csr.indptr[-1])} exceeds the uint32 row-pointer range (2^32); the "
+                "in-core GPU path is bounded to <4.29B nnz. Use the out-of-core streaming path "
+                "(a backed zarr .X) for matrices this large.")
         data = csr.data if csr.data.dtype == np.float32 else csr.data.astype(np.float32)
         indices = csr.indices if csr.indices.dtype == np.int32 else csr.indices.astype(np.int32)
         indptr = csr.indptr if csr.indptr.dtype == np.uint32 else csr.indptr.astype(np.uint32)
@@ -299,21 +307,21 @@ class CSR:
 
         The heavy reduction behind ``highly_variable_genes`` (seurat flavor):
         scanpy undoes the log (``expm1``) then takes per-gene mean/var including
-        implicit zeros. Computed by GPU scatter-add over the gene (column) index —
-        ~22× faster than building a CSC and running a column kernel (the CSC build
-        was a host bottleneck), with identical results. The final mean/var (a small
-        per-gene reduction) is done in fp64 on the host. Returns ``(mean, var)``.
+        implicit zeros. The per-gene ``Σx``/``Σx²`` are accumulated in **fp64 on the
+        host** (``np.bincount``): a GPU fp32 scatter-add loses precision once ``Σx²``
+        breaches fp32's 2²⁴ exact ceiling (≳10⁵–10⁶ cells) and the naive
+        ``(Σx²−n·mean²)`` then cancels — the pattern the project forbids and that
+        drives HVG selection. This mirrors the streaming reducer exactly. Returns
+        ``(mean, var)``.
         """
-        import mlx.core as mx
-
-        e = mx.exp(self.data) - 1.0                          # expm1 (MSL has no expm1)
-        col = self.indices
-        ng = self.shape[1]
-        total = np.asarray(mx.zeros((ng,), dtype=mx.float32).at[col].add(e), dtype=np.float64)
-        sumsq = np.asarray(mx.zeros((ng,), dtype=mx.float32).at[col].add(e * e), dtype=np.float64)
-        n = self.shape[0]
+        data = np.asarray(self.data, dtype=np.float64)       # host fp64
+        col = np.asarray(self.indices)
+        e = np.expm1(data)                                   # exact expm1 in fp64
+        ng, n = self.shape[1], self.shape[0]
+        total = np.bincount(col, weights=e, minlength=ng)
+        sumsq = np.bincount(col, weights=e * e, minlength=ng)
         mean = total / n
-        var = (sumsq - n * mean ** 2) / (n - 1)
+        var = (sumsq - n * mean ** 2) / (n - 1)              # implicit zeros folded via full n
         return mean, var
 
     def qc_metrics(self) -> tuple[np.ndarray, np.ndarray]:
@@ -374,14 +382,19 @@ class CSR:
     def col_moments(self):
         """Per-column mean and (ddof=1) variance of the raw stored values (incl. zeros).
 
-        For implicit mean-centering in sparse PCA. Returns ``(mean, var)`` MLX arrays.
+        For implicit mean-centering in sparse PCA. ``Σx``/``Σx²`` accumulate in **fp64 on
+        the host** (``np.bincount``) then cast to fp32 for GPU use — a fp32 scatter-add of
+        ``Σx²`` overflows fp32's 2²⁴ exactness at ≳10⁶ cells and the naive
+        ``(Σx²−n·mean²)`` cancels (feeds PCA centering + ``variance_ratio``). Returns
+        ``(mean, var)`` MLX fp32 arrays.
         """
         import mlx.core as mx
 
-        ng = self.shape[1]
-        n = self.shape[0]
-        colsum = mx.zeros((ng,), dtype=mx.float32).at[self.indices].add(self.data)
-        colsq = mx.zeros((ng,), dtype=mx.float32).at[self.indices].add(self.data * self.data)
+        data = np.asarray(self.data, dtype=np.float64)       # host fp64
+        col = np.asarray(self.indices)
+        ng, n = self.shape[1], self.shape[0]
+        colsum = np.bincount(col, weights=data, minlength=ng)
+        colsq = np.bincount(col, weights=data * data, minlength=ng)
         mean = colsum / n
         var = (colsq - n * mean * mean) / max(n - 1, 1)
-        return mean, var
+        return mx.array(mean.astype(np.float32)), mx.array(var.astype(np.float32))

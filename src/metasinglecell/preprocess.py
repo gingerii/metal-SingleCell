@@ -279,14 +279,16 @@ def _hvg_seurat_v3(csr, n_top_genes: int):
     scanpy does — this is the canonical fit (statsmodels lowess is degree-1 and does not
     match). Falls back to statsmodels only if scikit-misc is unavailable.
     """
-    import mlx.core as mx
     import pandas as pd
 
-    col = csr.indices
-    data = csr.data
+    # fp64 host accumulation (np.bincount): raw counts² overflow fp32's 2²⁴ exactness even
+    # faster than lognorm, so a GPU fp32 scatter-add + naive var drifts the seurat_v3 HVG set
+    # at scale. Mirrors the streaming reducer.
+    col = np.asarray(csr.indices)
+    data = np.asarray(csr.data, dtype=np.float64)
     N, ng = csr.shape
-    total = np.asarray(mx.zeros((ng,), dtype=mx.float32).at[col].add(data), dtype=np.float64)
-    sumsq = np.asarray(mx.zeros((ng,), dtype=mx.float32).at[col].add(data * data), dtype=np.float64)
+    total = np.bincount(col, weights=data, minlength=ng)
+    sumsq = np.bincount(col, weights=data * data, minlength=ng)
     mean = total / N
     var = (sumsq - N * mean ** 2) / (N - 1)
 
@@ -305,9 +307,9 @@ def _hvg_seurat_v3(csr, n_top_genes: int):
     reg_std = np.sqrt(10 ** estimat)
 
     clip_val = reg_std * np.sqrt(N) + mean
-    clipped = mx.minimum(data, mx.array(clip_val[col].astype(np.float32)))
-    sc = np.asarray(mx.zeros((ng,), dtype=mx.float32).at[col].add(clipped), dtype=np.float64)
-    scsq = np.asarray(mx.zeros((ng,), dtype=mx.float32).at[col].add(clipped * clipped), dtype=np.float64)
+    clipped = np.minimum(data, clip_val[col])           # host fp64 clip of stored values
+    sc = np.bincount(col, weights=clipped, minlength=ng)
+    scsq = np.bincount(col, weights=clipped * clipped, minlength=ng)
     norm_var = (scsq - 2 * mean * sc + N * mean ** 2) / ((N - 1) * np.maximum(reg_std ** 2, 1e-12))
     norm_var[~not_const] = 0.0
 
