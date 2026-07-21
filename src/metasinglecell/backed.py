@@ -254,6 +254,69 @@ def write_backed_zarr(adata, path, block_rows: int = 20_000):
     return path
 
 
+_DENSE_STAGES = {"scale"}
+
+
+def write_transformed_zarr(reader, transform, out_path, obs=None, var=None,
+                           block_rows: int | None = None):
+    """Stream raw-count blocks through a **sparse-preserving** ``transform`` and write the
+    transformed matrix to a new chunked backed zarr — one bounded-memory pass (write-back).
+
+    Only sparse-preserving stages are allowed (``normalize_total``/``log1p``/``hvg_subset``);
+    a ``scale`` stage densifies and is rejected (checkpoint the post-log1p, pre-scale matrix —
+    zero-centering would blow up disk). Uses anndata's incremental on-disk CSR writer
+    (``write_elem`` for the first block, then ``sparse_dataset(...).append`` for the rest), so
+    only one block is resident. ``obs``/``var`` (small, from the in-memory backed AnnData) make
+    the store a self-contained AnnData; when omitted, minimal string-indexed frames are written.
+    Round-trips the first block before returning. Returns ``out_path``.
+    """
+    import pandas as pd
+    import zarr
+    from anndata.io import sparse_dataset, write_elem
+
+    bad = [s[0] for s in transform.stages if s[0] in _DENSE_STAGES]
+    if bad:
+        raise ValueError(f"write_transformed_zarr needs a sparse-preserving transform; "
+                         f"got densifying stage(s) {bad}. Checkpoint post-log1p, pre-scale.")
+    out_path = str(out_path)
+    br = int(block_rows or reader.default_block_rows)
+
+    g = zarr.open_group(out_path, mode="w")
+    g.attrs["encoding-type"] = "anndata"
+    g.attrs["encoding-version"] = "0.1.0"
+
+    xds, n_out_cols = None, None
+    for _, _, csr in reader.iter_row_blocks(br):
+        blk = transform.apply(csr).to_scipy()            # scipy CSR (sparse-preserving)
+        if xds is None:
+            write_elem(g, "X", blk)
+            xds = sparse_dataset(g["X"])
+            n_out_cols = blk.shape[1]
+        else:
+            xds.append(blk)
+
+    n_obs = reader.n_obs
+    if obs is None:
+        obs = pd.DataFrame(index=[str(i) for i in range(n_obs)])
+    if var is None:
+        var = pd.DataFrame(index=[str(i) for i in range(n_out_cols)])
+    write_elem(g, "obs", obs)
+    write_elem(g, "var", var)
+
+    # Round-trip: the store's first block must equal the transform applied to raw block 0.
+    rdr = open_backed(out_path)
+    assert rdr.shape == (n_obs, n_out_cols), (rdr.shape, (n_obs, n_out_cols))
+    s = min(128, n_obs)
+    got = rdr._dset[0:s]
+    for _, _, csr in reader.iter_row_blocks(s):
+        ref = transform.apply(csr).to_scipy()
+        break
+    assert (got != ref).nnz == 0, "write_transformed_zarr round-trip mismatch"
+    log.info("wrote transformed zarr %s  shape=%s  block_rows=%d (round-trip OK)",
+             out_path, (n_obs, n_out_cols), br)
+    return out_path
+
+
 def convert_to_backed_zarr(in_path, out_path, block_rows: int = 20_000):
     """Convert an on-disk ``.h5ad`` / ``.h5`` (10x) counts matrix to a chunked backed zarr.
 
