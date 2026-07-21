@@ -49,20 +49,30 @@ _TOPK_KERNEL_SOURCE = """
 """
 
 
-def _topk_rows(D2, k):
-    """Indices of the k smallest entries per row of ``D2`` (m×n MLX array), sorted ascending.
+_TOPK_KERNEL_MAX_K = 32          # register arrays in _TOPK_KERNEL_SOURCE are float vals[32]/int inds[32]
 
-    Replaces ``mx.argpartition(D2, k)[:, :k]`` with a one-pass register top-k kernel.
+
+def _topk_rows(D2, k):
+    """Indices of the k smallest entries per row of ``D2`` (m×n MLX array).
+
+    For ``k <= 32`` uses a one-pass register top-k kernel; for larger ``k`` (a legal
+    ``n_neighbors`` — atlases routinely use 30–50) the kernel's fixed 32-slot register
+    arrays would overflow, so we fall back to ``mx.argpartition`` (correct for any ``k``).
+    Callers re-sort the selected ``k`` by exact fp32 distance, so unordered output is fine.
     """
     import mlx.core as mx
 
-    m = D2.shape[0]
+    m, ncols = D2.shape
+    if k > _TOPK_KERNEL_MAX_K:                    # kernel register arrays are capped at 32 — fall back
+        kth = min(int(k), ncols - 1)
+        return mx.argpartition(D2, kth=kth, axis=1)[:, :k]
+
     kernel = mx.fast.metal_kernel(
         name="topk_rows", input_names=["data", "dims"], output_names=["out_idx"],
         source=_TOPK_KERNEL_SOURCE,
     )
     (out,) = kernel(
-        inputs=[D2, mx.array([D2.shape[1], k], dtype=mx.uint32)],
+        inputs=[D2, mx.array([ncols, k], dtype=mx.uint32)],
         grid=(m, 1, 1), threadgroup=(min(256, m), 1, 1),
         output_shapes=[(m, k)], output_dtypes=[mx.int32],
     )
