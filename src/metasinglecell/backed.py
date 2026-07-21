@@ -13,7 +13,6 @@ minimal so a Dask-backed accessor could later wrap it. See the ``out-of-core`` s
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 import numpy as np
 
@@ -139,6 +138,37 @@ def _scale_apply_block(x_mx, mean, std, max_value, zero_center):
         x = mx.maximum(upper, mx.array(np.float32(-max_value))) if zero_center else upper
     mx.eval(x)
     return x
+
+
+# ---------------------------------------------------------------- streaming reducers
+def stream_qc(reader: ZarrRowReader, block_rows: int | None = None) -> dict:
+    """Streaming ``calculate_qc_metrics`` — matches ``preprocess.calculate_qc_metrics``.
+
+    Per-cell metrics are exact (each cell's row lies wholly in one block); per-gene
+    metrics accumulate additively across blocks (the column scatter-adds compose),
+    finalized into the identical dict. Returns per-cell totals for reuse as the median
+    ``target_sum`` of a subsequent streaming ``normalize_total``.
+    """
+    n, G = reader.n_obs, reader.n_vars
+    cell_total = np.empty(n, dtype=np.float32)
+    cell_ngenes = np.empty(n, dtype=np.int64)
+    gene_total = np.zeros(G, dtype=np.float64)          # fp64 accumulate across blocks
+    gene_ncells = np.zeros(G, dtype=np.int64)
+    for s, e, csr in reader.iter_row_blocks(block_rows):
+        rt, rn = csr.qc_metrics()
+        cell_total[s:e] = np.asarray(rt)
+        cell_ngenes[s:e] = np.asarray(rn).astype(np.int64)
+        gt, gn = csr.gene_counts()
+        gene_total += np.asarray(gt, dtype=np.float64)
+        gene_ncells += np.asarray(gn, dtype=np.int64)
+    return {
+        "total_counts": cell_total,
+        "n_genes_by_counts": cell_ngenes,
+        "gene_total_counts": gene_total.astype(np.float32),
+        "n_cells_by_counts": gene_ncells,
+        "mean_counts": gene_total / n,
+        "pct_dropout_by_counts": 100.0 * (1.0 - gene_ncells / n),
+    }
 
 
 # ------------------------------------------------------------------------- prep util

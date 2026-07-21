@@ -29,6 +29,25 @@ def _sci(adata, layer=None):
     return sp.csr_matrix(X)
 
 
+def _backed_reader(adata, layer=None):
+    """A ZarrRowReader iff ``adata.X`` is an on-disk backed CSR, else ``None``.
+
+    This is the sole branch point: when it returns a reader the wrapper takes the
+    out-of-core streaming path; when ``None`` the existing in-core path runs unchanged.
+    Streaming operates on ``.X`` only (backed layers are not supported this milestone).
+    """
+    if layer is not None:
+        return None
+    try:
+        import anndata.abc
+    except Exception:
+        return None
+    if isinstance(adata.X, anndata.abc.CSRDataset):
+        from .backed import open_backed
+        return open_backed(adata.X)
+    return None
+
+
 def normalize_total(adata, target_sum: float | None = None, layer=None, copy: bool = False):
     """Normalize counts per cell (``sc.pp.normalize_total``). ``target_sum=None`` → median."""
     adata = adata.copy() if copy else adata
@@ -135,7 +154,12 @@ def scrublet(adata, sim_doublet_ratio: float = 2.0, expected_doublet_rate: float
 def calculate_qc_metrics(adata, copy: bool = False):
     """Per-cell/per-gene QC metrics (``sc.pp.calculate_qc_metrics``)."""
     adata = adata.copy() if copy else adata
-    m = _pp.calculate_qc_metrics(_sci(adata))
+    reader = _backed_reader(adata)
+    if reader is not None:                       # out-of-core: stream row-blocks
+        from .backed import stream_qc
+        m = stream_qc(reader)
+    else:
+        m = _pp.calculate_qc_metrics(_sci(adata))
     for k, v in m.items():
         (adata.obs if len(v) == adata.n_obs else adata.var)[k] = np.asarray(v)
     return adata if copy else None
