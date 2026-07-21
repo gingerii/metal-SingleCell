@@ -289,6 +289,10 @@ def write_transformed_zarr(reader, transform, out_path, obs=None, var=None,
     for _, _, csr in reader.iter_row_blocks(br):
         blk = transform.apply(csr).to_scipy()            # scipy CSR (sparse-preserving)
         if xds is None:
+            # int64 indptr so total nnz can exceed 2^31 (the atlas has ~2.6B nnz); the small
+            # first block would otherwise fix a 32-bit indptr and the append() overflows.
+            # indices stay int32 (n_vars ≪ 2^31) → no storage blowup.
+            blk = blk.copy(); blk.indptr = blk.indptr.astype(np.int64)
             write_elem(g, "X", blk)
             xds = sparse_dataset(g["X"])
             n_out_cols = blk.shape[1]
