@@ -312,29 +312,54 @@ def _knn_ivf(X, k, nlist=None, nprobe=5, seed=0):
     return idx, np.sqrt(np.maximum(dist, 0.0))
 
 
+def _knn_nndescent(X, k, over: int = 2, random_state: int = 0):
+    """Approximate self-kNN via the vendored mlx-vis NNDescent (pure-MLX, on the GPU).
+
+    Two call-site adaptations (see results/neighbors_optimization/RESULTS_mlxvis_integration.md):
+    over-build the graph to degree ``over*k`` and keep the best ``k`` (lifts recall from ~0.86 at
+    raw k to ~0.92–0.98 across 50k–1M), and **prepend self** (NNDescent excludes it) to match the
+    self-inclusive scanpy convention. Distances are euclidean (verified), matching pynndescent.
+    Returns ``(indices, dists)`` shape ``(n, k)``, self first.
+    """
+    from ._vendor.mlx_vis.nndescent import NNDescent
+
+    Xf = np.asarray(X, dtype=np.float32)
+    n = Xf.shape[0]
+    idx, d = NNDescent(k=min(over * k, n - 1), random_state=random_state).build(Xf)
+    out_i = np.empty((n, k), np.int64); out_d = np.empty((n, k), np.float32)
+    out_i[:, 0] = np.arange(n); out_d[:, 0] = 0.0             # self first (dist 0)
+    m = min(k - 1, idx.shape[1])
+    out_i[:, 1:1 + m] = idx[:, :m]; out_d[:, 1:1 + m] = d[:, :m]
+    return out_i, out_d
+
+
 def _knn(X_pca: np.ndarray, n_neighbors: int, random_state: int = 0,
-         approx: bool | None = None):
+         approx: bool | None = None, backend: str = "nndescent"):
     """k-NN dispatch by scale (returns ``(indices, dists)``), shared by neighbors/scrublet:
 
-    *  n ≤ 30k   : exact GPU brute-force (fast + exact there)
-    *  30k–250k  : GPU IVF (kmeans buckets) — ~2–2.6× faster than pynndescent, recall ~0.9
-    *  > 250k    : pynndescent (scanpy's default; IVF recall/cost degrade past this)
+    *  n ≤ 30k                : exact GPU brute-force (fast + exact there)
+    *  n > 30k (``nndescent``): GPU NNDescent (vendored mlx-vis) — the scalable self-kNN path,
+       replacing the old IVF (30k–250k) + CPU-pynndescent (>250k) ladder. Recall matches the
+       former path at 2.2–4.7× the speed and stable wall time. See RESULTS_mlxvis_integration.md.
 
-    Plain GPU brute-force is O(n²) (memory + compute) and loses to optimized CPU here, so
-    anything that does kNN at scale (e.g. scrublet on a ~3n doublet-simulation set) must go
-    through this dispatch, not ``_knn_gpu`` directly.
+    ``backend`` selects the >30k engine: ``"nndescent"`` (default), or the retained oracles
+    ``"ivf"`` / ``"pynndescent"`` (for validation/benchmarking). Brute is O(n²) and loses at scale,
+    so anything doing kNN at scale (e.g. scrublet's ~3n doublet set) goes through this dispatch.
     """
     n = X_pca.shape[0]
     if approx is None:
         approx = n > 30_000
     if not approx:
         return _knn_gpu(X_pca, n_neighbors)
-    if n <= 250_000:
+    if backend == "nndescent":
+        return _knn_nndescent(X_pca, n_neighbors, random_state=random_state)
+    if backend == "ivf":                                     # retained oracle
         return _knn_ivf(X_pca, n_neighbors, seed=random_state)
-    from pynndescent import NNDescent
-    index = NNDescent(np.asarray(X_pca, dtype=np.float32), n_neighbors=n_neighbors,
-                      random_state=random_state)
-    return index.neighbor_graph
+    if backend == "pynndescent":                             # retained CPU oracle
+        from pynndescent import NNDescent
+        return NNDescent(np.asarray(X_pca, dtype=np.float32), n_neighbors=n_neighbors,
+                         random_state=random_state).neighbor_graph
+    raise ValueError(f"unknown kNN backend {backend!r} (nndescent|ivf|pynndescent)")
 
 
 def neighbors(X_pca: np.ndarray, n_neighbors: int = 15, random_state: int = 0,

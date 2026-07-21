@@ -41,3 +41,8 @@ dev = ["pytest", "jupyter", "matplotlib"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Ship the vendored mlx-vis license + attribution in the wheel/sdist (Apache-2.0 §4 requires
+# the license text on redistribution).
+[tool.setuptools.package-data]
+"metasinglecell._vendor.mlx_vis" = ["LICENSE", "NOTICE"]

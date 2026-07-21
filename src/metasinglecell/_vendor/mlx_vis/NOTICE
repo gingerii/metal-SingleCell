@@ -1,0 +1,18 @@
+This directory vendors a single module from the `mlx-vis` project:
+
+    nndescent.py  —  copied verbatim from mlx_vis/_nndescent/nndescent.py (mlx-vis 0.7.0)
+
+Original work Copyright Han Xiao (github.com/hanxiao/mlx-vis), licensed under the
+Apache License, Version 2.0 (see the LICENSE file in this directory).
+
+  Project : mlx-vis — GPU-Native Dimensionality Reduction on Apple Silicon
+  Author  : Han Xiao <han.xiao@elastic.co>
+  Source  : https://github.com/hanxiao/mlx-vis  (PyPI: mlx-vis)
+  Paper   : arXiv:2603.04035
+
+Vendored into metal-SingleCell (rather than taken as a runtime dependency) to keep the
+dependency footprint minimal; the file is used unmodified. metal-SingleCell adapts its
+output at call sites (over-build + self-prepend in metasinglecell.neighbors) but does not
+modify this vendored source.
+
+Changes to the vendored file: none.
