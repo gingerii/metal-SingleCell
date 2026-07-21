@@ -13,7 +13,10 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import numpy as np
+import pytest
 import scipy.sparse as sp
+
+pytestmark = [pytest.mark.metal, pytest.mark.data]   # all checks below need the GPU + PBMC3k
 
 ROWS = []          # (step, check, metric, value, pass) collected when run as a script
 
