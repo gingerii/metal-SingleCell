@@ -17,6 +17,17 @@ def _conn(adata):
     return adata.obsp["connectivities"]
 
 
+def _benjamini_hochberg(pvals):
+    """BH-adjusted p-values (scanpy's ``method='benjamini-hochberg'``), order-preserving."""
+    p = np.asarray(pvals, dtype=np.float64)
+    n = p.size
+    order = np.argsort(p)
+    adj = np.empty(n, dtype=np.float64)
+    ranked = p[order] * n / np.arange(1, n + 1)
+    adj[order] = np.minimum.accumulate(ranked[::-1])[::-1]
+    return np.clip(adj, 0.0, 1.0)
+
+
 def leiden(adata, resolution: float = 1.0, key_added: str = "leiden", random_state: int = 0,
            n_iterations: int = 2, backend: str = "igraph", variant: str = "sync",
            commit_prob: float = 0.9, copy: bool = False):
@@ -118,6 +129,10 @@ def rank_genes_groups(adata, groupby, method: str = "t-test", reference: str = "
     cats = [c for c in cats if c in rg]
     ng = len(rg[cats[0]]["names"])
 
+    for c in cats:                                   # BH-adjusted p-values (scanpy always emits these)
+        if rg[c].get("pvals") is not None:
+            rg[c]["pvals_adj"] = _benjamini_hochberg(rg[c]["pvals"])
+
     def recarray(field, dtype):
         if rg[cats[0]].get(field) is None:
             return None
@@ -129,7 +144,8 @@ def rank_genes_groups(adata, groupby, method: str = "t-test", reference: str = "
     names_dt = f"<U{max(len(str(x)) for x in adata.var_names)}"
     uns = {"params": {"groupby": groupby, "reference": reference, "method": method, "use_raw": False},
            "names": recarray("names", names_dt), "scores": recarray("scores", "f4"),
-           "pvals": recarray("pvals", "f8"), "logfoldchanges": recarray("logfoldchanges", "f4")}
+           "pvals": recarray("pvals", "f8"), "pvals_adj": recarray("pvals_adj", "f8"),
+           "logfoldchanges": recarray("logfoldchanges", "f4")}
     adata.uns[key_added] = {k: v for k, v in uns.items() if v is not None}
     return adata if copy else None
 

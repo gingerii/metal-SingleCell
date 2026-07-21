@@ -242,20 +242,27 @@ def scale(csr, max_value: float | None = 10.0, zero_center: bool = True) -> np.n
     return np.asarray(x)
 
 
-def highly_variable_genes(csr, n_top_genes: int = 2000, n_bins: int = 20,
-                          flavor: str = "seurat") -> "object":
+def highly_variable_genes(csr, n_top_genes=None, n_bins: int = 20, flavor: str = "seurat",
+                          min_mean: float = 0.0125, max_mean: float = 3.0,
+                          min_disp: float = 0.5, max_disp: float = np.inf) -> "object":
     """Highly variable genes (scanpy ``pp.highly_variable_genes``).
 
     ``flavor`` ∈ {"seurat", "cell_ranger", "seurat_v3"}. seurat/cell_ranger expect
-    **log-normalized** data; seurat_v3 expects **raw counts**. Returns a pandas
-    DataFrame with per-gene metrics and a ``highly_variable`` flag.
+    **log-normalized** data; seurat_v3 expects **raw counts**. With ``n_top_genes=None``
+    (scanpy's default) seurat/cell_ranger select by the ``min_mean``/``max_mean``/
+    ``min_disp``/``max_disp`` cutoffs; an integer ``n_top_genes`` takes the top-N by
+    normalized dispersion. Returns a pandas DataFrame with per-gene metrics + a
+    ``highly_variable`` flag.
     """
     if flavor == "seurat_v3":
+        if n_top_genes is None:
+            n_top_genes = 2000                       # seurat_v3 is inherently top-N (needs a count)
         return _hvg_seurat_v3(csr, n_top_genes)
     if flavor == "pearson_residuals":
-        return _hvg_pearson_residuals(csr, n_top_genes)
+        return _hvg_pearson_residuals(csr, n_top_genes or 2000)
     if flavor in ("seurat", "cell_ranger"):
-        return _hvg_dispersion(csr, n_top_genes, n_bins, flavor)
+        return _hvg_dispersion(csr, n_top_genes, n_bins, flavor, min_mean=min_mean,
+                               max_mean=max_mean, min_disp=min_disp, max_disp=max_disp)
     raise ValueError(f"unknown flavor {flavor!r}")
 
 
@@ -321,7 +328,9 @@ def _hvg_seurat_v3(csr, n_top_genes: int):
     return df
 
 
-def _hvg_dispersion(csr, n_top_genes: int, n_bins: int, flavor: str):
+def _hvg_dispersion(csr, n_top_genes, n_bins: int, flavor: str,
+                    min_mean: float = 0.0125, max_mean: float = 3.0,
+                    min_disp: float = 0.5, max_disp: float = np.inf):
     """seurat / cell_ranger dispersion-based HVG on log-normalized data.
 
     scanpy applies expm1 AND the log(dispersion)/log1p(mean) transforms only for
@@ -335,10 +344,14 @@ def _hvg_dispersion(csr, n_top_genes: int, n_bins: int, flavor: str):
     else:  # cell_ranger: mean/var of the log-normalized data itself
         mean, var = csr.col_moments()
     return _hvg_dispersion_from_moments(np.asarray(mean), np.asarray(var),
-                                        n_top_genes, n_bins, flavor)
+                                        n_top_genes, n_bins, flavor,
+                                        min_mean=min_mean, max_mean=max_mean,
+                                        min_disp=min_disp, max_disp=max_disp)
 
 
-def _hvg_dispersion_from_moments(mean, var, n_top_genes: int, n_bins: int, flavor: str):
+def _hvg_dispersion_from_moments(mean, var, n_top_genes, n_bins: int, flavor: str,
+                                 min_mean: float = 0.0125, max_mean: float = 3.0,
+                                 min_disp: float = 0.5, max_disp: float = np.inf):
     """seurat/cell_ranger HVG binning from precomputed per-gene ``(mean, var)`` moments.
 
     Split out of :func:`_hvg_dispersion` so the streaming front-end can feed moments
@@ -381,12 +394,20 @@ def _hvg_dispersion_from_moments(mean, var, n_top_genes: int, n_bins: int, flavo
     per_gene = stats.loc[df["mean_bin"]].set_index(df.index)
     df["dispersions_norm"] = (df["dispersions"] - per_gene["avg"]) / per_gene["dev"]
 
-    # Select the top n_top_genes by normalized dispersion (NaNs -> -inf).
     dn = df["dispersions_norm"].to_numpy()
-    finite = dn[~np.isnan(dn)]
-    n = min(n_top_genes, finite.size)
-    cutoff = np.sort(finite)[::-1][n - 1]
-    df["highly_variable"] = np.nan_to_num(dn, nan=-np.inf) >= cutoff
+    if n_top_genes is not None:
+        # top-n_top_genes by normalized dispersion (NaNs -> -inf)
+        finite = dn[~np.isnan(dn)]
+        n = min(n_top_genes, finite.size)
+        cutoff = np.sort(finite)[::-1][n - 1]
+        df["highly_variable"] = np.nan_to_num(dn, nan=-np.inf) >= cutoff
+    else:
+        # scanpy's default: dispersion + mean cutoffs (means here is the logarithmized mean
+        # for seurat, matching scanpy's comparison against min_mean/max_mean)
+        m = df["means"].to_numpy()
+        dnf = np.nan_to_num(dn, nan=0.0)
+        df["highly_variable"] = ((m > min_mean) & (m < max_mean)
+                                 & (dnf > min_disp) & (dnf < max_disp))
 
     df.drop(columns="mean_bin", inplace=True)
     return df

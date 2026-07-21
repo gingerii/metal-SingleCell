@@ -188,9 +188,14 @@ def log1p(adata, layer=None, copy: bool = False):
     return adata if copy else None
 
 
-def highly_variable_genes(adata, n_top_genes: int = 2000, n_bins: int = 20,
-                          flavor: str = "seurat", layer=None, copy: bool = False):
-    """Highly variable genes (``sc.pp.highly_variable_genes``); writes ``adata.var`` columns."""
+def highly_variable_genes(adata, n_top_genes=None, n_bins: int = 20, flavor: str = "seurat",
+                          min_mean: float = 0.0125, max_mean: float = 3.0, min_disp: float = 0.5,
+                          max_disp: float = np.inf, layer=None, copy: bool = False):
+    """Highly variable genes (``sc.pp.highly_variable_genes``); writes ``adata.var`` columns.
+
+    ``n_top_genes=None`` (scanpy's default) selects seurat/cell_ranger genes by the
+    ``min_mean``/``max_mean``/``min_disp``/``max_disp`` cutoffs; an integer takes the top-N.
+    """
     adata = adata.copy() if copy else adata
     reader = _backed_reader(adata, layer)
     if reader is not None:                       # out-of-core: stream per-gene moments
@@ -198,10 +203,13 @@ def highly_variable_genes(adata, n_top_genes: int = 2000, n_bins: int = 20,
             raise NotImplementedError(f"streaming HVG supports seurat/cell_ranger, not {flavor!r}")
         from .backed import stream_gene_moments
         mean, var = stream_gene_moments(reader, _build_transform(adata), flavor)
-        df = _pp._hvg_dispersion_from_moments(mean, var, n_top_genes, n_bins, flavor)
+        df = _pp._hvg_dispersion_from_moments(mean, var, n_top_genes, n_bins, flavor,
+                                              min_mean=min_mean, max_mean=max_mean,
+                                              min_disp=min_disp, max_disp=max_disp)
     else:
-        df = _pp.highly_variable_genes(_csr(adata, layer), n_top_genes=n_top_genes,
-                                       n_bins=n_bins, flavor=flavor)
+        df = _pp.highly_variable_genes(_csr(adata, layer), n_top_genes=n_top_genes, n_bins=n_bins,
+                                       flavor=flavor, min_mean=min_mean, max_mean=max_mean,
+                                       min_disp=min_disp, max_disp=max_disp)
     for col in df.columns:
         adata.var[col] = df[col].to_numpy()
     adata.uns["hvg"] = {"flavor": flavor}
@@ -230,9 +238,13 @@ def filter_genes(adata, min_counts=None, max_counts=None, min_cells=None,
     return adata if copy else None
 
 
-def scale(adata, max_value: float | None = 10.0, zero_center: bool = True,
+def scale(adata, max_value: float | None = None, zero_center: bool = True,
           layer=None, copy: bool = False):
-    """Z-score genes then clip (``sc.pp.scale``). Densifies (zero-centering breaks sparsity)."""
+    """Z-score genes then clip (``sc.pp.scale``). Densifies (zero-centering breaks sparsity).
+
+    ``max_value`` defaults to ``None`` (no clip), matching scanpy/rapids-singlecell — pass a
+    value (e.g. 10) to clip z-scores, as the atlas/streaming demos do explicitly.
+    """
     adata = adata.copy() if copy else adata
     reader = _backed_reader(adata, layer)
     if reader is not None:                       # out-of-core: pass-1 stats, defer the apply
@@ -284,18 +296,74 @@ def scrublet(adata, sim_doublet_ratio: float = 2.0, expected_doublet_rate: float
     return adata if copy else None
 
 
-def calculate_qc_metrics(adata, copy: bool = False):
-    """Per-cell/per-gene QC metrics (``sc.pp.calculate_qc_metrics``)."""
+_QC_VAR_RENAME = {"gene_total_counts": "total_counts"}   # per-gene total → scanpy's var slot name
+
+
+def calculate_qc_metrics(adata, qc_vars=(), percent_top=None, log1p: bool = True,
+                         layer=None, copy: bool = False):
+    """Per-cell/per-gene QC metrics (``sc.pp.calculate_qc_metrics``).
+
+    ``qc_vars`` (e.g. ``['mt']``) adds ``total_counts_<v>``/``pct_counts_<v>`` for each boolean
+    ``adata.var[v]`` gene set; ``log1p`` adds ``log1p_*`` columns; ``percent_top`` (a list of N,
+    default ``None``) adds ``pct_counts_in_top_N_genes``. The per-gene total lands in
+    ``var['total_counts']`` (scanpy's name), matching ``sc.pp.calculate_qc_metrics``.
+    """
     adata = adata.copy() if copy else adata
-    reader = _backed_reader(adata)
-    if reader is not None:                       # out-of-core: stream row-blocks
+    reader = _backed_reader(adata, layer)
+    if reader is not None:                       # out-of-core: stream row-blocks (base metrics)
+        qc_vars = [qc_vars] if isinstance(qc_vars, str) else list(qc_vars)
+        if qc_vars or percent_top:
+            raise NotImplementedError(
+                "qc_vars/percent_top are not supported on a backed .X (they need a per-cell "
+                "gene-subset densify); load into memory or request base QC metrics only.")
         from .backed import stream_qc
         m = stream_qc(reader)
     else:
-        m = _pp.calculate_qc_metrics(_sci(adata))
+        m = _pp.calculate_qc_metrics(_sci(adata, layer))
     for k, v in m.items():
-        (adata.obs if len(v) == adata.n_obs else adata.var)[k] = np.asarray(v)
+        col = _QC_VAR_RENAME.get(k, k)
+        (adata.obs if len(v) == adata.n_obs else adata.var)[col] = np.asarray(v)
+
+    qc_vars = [qc_vars] if isinstance(qc_vars, str) else list(qc_vars)
+    if qc_vars or percent_top:
+        import scipy.sparse as sp
+        X = sp.csr_matrix(adata.layers[layer] if layer is not None else adata.X)
+        total = np.asarray(adata.obs["total_counts"], dtype=np.float64)
+        for v in qc_vars:
+            mask = np.asarray(adata.var[v]).astype(bool)
+            sub = np.asarray(X[:, mask].sum(1)).ravel().astype(np.float64)
+            adata.obs[f"total_counts_{v}"] = sub
+            with np.errstate(invalid="ignore", divide="ignore"):
+                adata.obs[f"pct_counts_{v}"] = np.where(total > 0, 100.0 * sub / total, 0.0)
+        for n_top, vals in zip(sorted(percent_top or []),
+                               _percent_top(X, sorted(percent_top or []))):
+            adata.obs[f"pct_counts_in_top_{n_top}_genes"] = vals
+    if log1p:
+        for base in ("total_counts", "n_genes_by_counts"):
+            if base in adata.obs:
+                adata.obs[f"log1p_{base}"] = np.log1p(np.asarray(adata.obs[base], np.float64))
+        for base in ("total_counts", "mean_counts", "n_cells_by_counts"):
+            if base in adata.var:
+                adata.var[f"log1p_{base}"] = np.log1p(np.asarray(adata.var[base], np.float64))
     return adata if copy else None
+
+
+def _percent_top(X, ns):
+    """Per-cell cumulative fraction (%) of counts in the top-N expressed genes, for each N in ``ns``."""
+    if not ns:
+        return []
+    total = np.asarray(X.sum(1)).ravel().astype(np.float64)
+    out = [np.zeros(X.shape[0]) for _ in ns]
+    indptr, data = X.indptr, X.data
+    for i in range(X.shape[0]):
+        row = data[indptr[i]:indptr[i + 1]]
+        t = total[i]
+        if row.size == 0 or t <= 0:
+            continue
+        cs = np.cumsum(np.sort(row)[::-1])
+        for j, n in enumerate(ns):
+            out[j][i] = 100.0 * cs[min(n, row.size) - 1] / t
+    return out
 
 
 def pca(adata, n_comps: int = 50, layer=None, use_highly_variable: bool | None = None,
@@ -310,6 +378,8 @@ def pca(adata, n_comps: int = 50, layer=None, use_highly_variable: bool | None =
 
     from .decomposition import pca as _pca
     adata = adata.copy() if copy else adata
+    if svd_solver in (None, "auto"):                 # scanpy's default/'auto' → our randomized
+        svd_solver = "randomized"
     if use_highly_variable is None:
         use_highly_variable = "highly_variable" in adata.var
 
@@ -343,19 +413,29 @@ def pca(adata, n_comps: int = 50, layer=None, use_highly_variable: bool | None =
     return adata if copy else None
 
 
-def neighbors(adata, n_neighbors: int = 15, use_rep: str = "X_pca", random_state: int = 0,
-              copy: bool = False):
-    """kNN graph (``sc.pp.neighbors``); writes ``obsp['distances']``/``['connectivities']``, ``uns['neighbors']``."""
+def neighbors(adata, n_neighbors: int = 15, n_pcs: int | None = None, *, use_rep: str | None = None,
+              random_state: int = 0, copy: bool = False):
+    """kNN graph (``sc.pp.neighbors``); writes ``obsp['distances']``/``['connectivities']``, ``uns['neighbors']``.
+
+    Signature mirrors scanpy: ``n_pcs`` is positional after ``n_neighbors`` and ``use_rep`` is
+    keyword-only, so ``sc.pp.neighbors(adata, 15, 40)`` truncates the representation to 40 PCs
+    (previously that 40 bound ``use_rep`` and silently ran on raw ``.X``). ``use_rep=None``
+    resolves to ``X_pca`` when present, else ``.X``.
+    """
     from .neighbors import neighbors as _nb
     adata = adata.copy() if copy else adata
-    rep = adata.obsm[use_rep] if use_rep in adata.obsm else adata.X
-    dist, conn = _nb(np.asarray(rep, dtype=np.float32), n_neighbors=n_neighbors,
-                     random_state=random_state)
+    rep_key = use_rep if use_rep is not None else ("X_pca" if "X_pca" in adata.obsm else None)
+    rep = adata.obsm[rep_key] if (rep_key is not None and rep_key in adata.obsm) else adata.X
+    rep = np.asarray(rep, dtype=np.float32)
+    if n_pcs is not None:                            # scanpy truncates the rep to the first n_pcs
+        rep = rep[:, :n_pcs]
+    dist, conn = _nb(rep, n_neighbors=n_neighbors, random_state=random_state)
     adata.obsp["distances"] = dist
     adata.obsp["connectivities"] = conn
     adata.uns["neighbors"] = {"connectivities_key": "connectivities",
                               "distances_key": "distances",
-                              "params": {"n_neighbors": n_neighbors, "method": "umap", "use_rep": use_rep}}
+                              "params": {"n_neighbors": n_neighbors, "method": "umap",
+                                         "use_rep": rep_key, "n_pcs": n_pcs}}
     return adata if copy else None
 
 
