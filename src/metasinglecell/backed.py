@@ -252,3 +252,43 @@ def write_backed_zarr(adata, path, block_rows: int = 20_000):
     log.info("wrote backed zarr %s  shape=%s  block_rows=%d (round-trip OK)",
              path, adata.shape, block_rows)
     return path
+
+
+def convert_to_backed_zarr(in_path, out_path, block_rows: int = 20_000):
+    """Convert an on-disk ``.h5ad`` / ``.h5`` (10x) counts matrix to a chunked backed zarr.
+
+    The required one-time prep for any out-of-core run: reads the source with scanpy
+    (``read_10x_h5`` for ``.h5``, ``read_h5ad`` otherwise), makes var names unique, and
+    writes a cell-axis-chunked CSR zarr via :func:`write_backed_zarr` (which round-trip
+    checks a block). Returns the output path. Reproducible from the shell:
+
+        python -m metasinglecell.backed in.h5ad out.zarr --block-rows 100000
+    """
+    import scanpy as sc
+
+    in_path, out_path = str(in_path), str(out_path)
+    reader = sc.read_10x_h5 if in_path.endswith(".h5") else sc.read_h5ad
+    adata = reader(in_path)
+    adata.var_names_make_unique()
+    log.info("read %s  shape=%s → writing %s", in_path, adata.shape, out_path)
+    return write_backed_zarr(adata, out_path, block_rows=block_rows)
+
+
+def _main(argv=None):
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        prog="python -m metasinglecell.backed",
+        description="Convert an .h5ad/.h5 counts matrix to a chunked backed zarr for streaming.")
+    ap.add_argument("in_path", help="source .h5ad or 10x .h5")
+    ap.add_argument("out_path", help="destination .zarr (chunked along the cell axis)")
+    ap.add_argument("--block-rows", type=int, default=20_000,
+                    help="cells per chunk (default 20000; larger = fewer, bigger chunks)")
+    args = ap.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    out = convert_to_backed_zarr(args.in_path, args.out_path, block_rows=args.block_rows)
+    print(f"wrote {out}")
+
+
+if __name__ == "__main__":
+    _main()
