@@ -144,6 +144,12 @@ def scale(adata, max_value: float | None = 10.0, zero_center: bool = True,
           layer=None, copy: bool = False):
     """Z-score genes then clip (``sc.pp.scale``). Densifies (zero-centering breaks sparsity)."""
     adata = adata.copy() if copy else adata
+    reader = _backed_reader(adata, layer)
+    if reader is not None:                       # out-of-core: pass-1 stats, defer the apply
+        from .backed import stream_scale_stats
+        mean, std = stream_scale_stats(reader, _build_transform(adata))
+        _record_transform(adata, "scale", (mean, std, max_value, zero_center))
+        return adata if copy else None
     out = _pp.scale(_csr(adata, layer), max_value=max_value, zero_center=zero_center)
     if layer is not None:
         adata.layers[layer] = out

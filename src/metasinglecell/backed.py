@@ -171,6 +171,35 @@ def stream_qc(reader: ZarrRowReader, block_rows: int | None = None) -> dict:
     }
 
 
+def stream_scale_stats(reader: ZarrRowReader, transform: "BlockTransform",
+                       block_rows: int | None = None):
+    """Per-gene mean/std over the transformed (lognorm) blocks — pass 1 of streaming scale.
+
+    Accumulates per-gene Σx, Σx² (fp64) via sparse column scatter-adds (no densification),
+    then finalizes exactly like ``preprocess.scale``: ddof=1 variance including implicit
+    zeros, ``std==0 → 1``. ``transform`` is the deferred prefix (normalize→log1p …), which
+    keeps the block sparse so the moments are cheap.
+    """
+    import scipy.sparse as sp
+
+    from .sparse import CSR
+
+    G = reader.n_vars
+    n = reader.n_obs
+    colsum = np.zeros(G, dtype=np.float64)
+    colsq = np.zeros(G, dtype=np.float64)
+    for _, _, csr in reader.iter_row_blocks(block_rows):
+        out = transform.apply(csr)
+        b = out.to_scipy() if isinstance(out, CSR) else sp.csr_matrix(np.asarray(out))
+        colsum += np.asarray(b.sum(0), dtype=np.float64).ravel()
+        colsq += np.asarray(b.multiply(b).sum(0), dtype=np.float64).ravel()
+    mean = colsum / n
+    var = (colsq - n * mean**2) / (n - 1)              # ddof=1, implicit zeros folded in
+    std = np.sqrt(np.maximum(var, 0.0))
+    std[std == 0] = 1.0
+    return mean.astype(np.float32), std.astype(np.float32)
+
+
 # ------------------------------------------------------------------------- prep util
 def write_backed_zarr(adata, path, block_rows: int = 20_000):
     """Write an AnnData to a chunked-along-axis-0 zarr store (CSR ``.X``) for streaming.
