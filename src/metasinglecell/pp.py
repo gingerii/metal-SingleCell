@@ -48,9 +48,38 @@ def _backed_reader(adata, layer=None):
     return None
 
 
-def normalize_total(adata, target_sum: float | None = None, layer=None, copy: bool = False):
+# The backed store holds raw counts only (no intermediate write-back this milestone), so
+# streaming normalize_total/log1p/scale record a DEFERRED transform prefix in
+# adata.uns["_stream_transforms"] that the terminal consumers (HVG/PCA) re-apply per block.
+def _record_transform(adata, *stage):
+    t = list(adata.uns.get("_stream_transforms", []))
+    t.append(tuple(stage))
+    adata.uns["_stream_transforms"] = t
+
+
+def _build_transform(adata):
+    from .backed import BlockTransform
+    return BlockTransform(list(adata.uns.get("_stream_transforms", [])))
+
+
+def normalize_total(adata, target_sum: float | None = None, layer=None,
+                    exclude_highly_expressed: bool = False, copy: bool = False):
     """Normalize counts per cell (``sc.pp.normalize_total``). ``target_sum=None`` → median."""
+    if exclude_highly_expressed:
+        raise NotImplementedError("normalize_total(exclude_highly_expressed=True) needs a "
+                                  "second global pass; not supported (scoped out).")
     adata = adata.copy() if copy else adata
+    reader = _backed_reader(adata, layer)
+    if reader is not None:                       # out-of-core: record a deferred transform
+        if target_sum is not None:
+            ts = float(target_sum)
+        elif "total_counts" in adata.obs:        # reuse per-cell totals from a prior QC pass
+            ts = float(np.median(adata.obs["total_counts"].to_numpy()))
+        else:                                    # else one lightweight pass for row sums
+            from .backed import stream_qc
+            ts = float(np.median(stream_qc(reader)["total_counts"]))
+        _record_transform(adata, "normalize_total", ts)
+        return adata if copy else None
     import scipy.sparse as sp
     X = sp.csr_matrix(adata.layers[layer] if layer is not None else adata.X)
     ts = float(target_sum) if target_sum is not None else float(np.median(np.asarray(X.sum(1)).ravel()))
@@ -65,6 +94,11 @@ def normalize_total(adata, target_sum: float | None = None, layer=None, copy: bo
 def log1p(adata, layer=None, copy: bool = False):
     """``log(1 + x)`` (``sc.pp.log1p``); records ``adata.uns['log1p']``."""
     adata = adata.copy() if copy else adata
+    reader = _backed_reader(adata, layer)
+    if reader is not None:                       # out-of-core: record a deferred transform
+        _record_transform(adata, "log1p")
+        adata.uns["log1p"] = {"base": None}
+        return adata if copy else None
     out = _csr(adata, layer).log1p().to_scipy()
     if layer is not None:
         adata.layers[layer] = out
