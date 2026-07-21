@@ -82,6 +82,51 @@ def _build_pca_transform(adata, mask):
     return BlockTransform(stages)
 
 
+def materialize(adata, path, block_rows: int | None = None):
+    """Checkpoint the deferred normalize→log1p transform to a new backed zarr (write-back).
+
+    Streams the raw backed ``.X`` through the recorded ``normalize_total``/``log1p`` prefix,
+    writes the post-log1p (still-sparse) matrix to ``path`` once, then **rebinds** ``adata.X``
+    to that store and clears the deferred prefix. Subsequent ``scale``/``highly_variable_genes``/
+    ``pca`` therefore read the already-transformed matrix instead of re-deriving normalize→log1p
+    from raw on every pass (opt-in — the default streaming path stays fully deferred). Output
+    values are identical, so downstream results are unchanged.
+
+    Must be called at the **log1p boundary**: the recorded transform may contain only
+    ``normalize_total``/``log1p`` (no ``scale``/``hvg_subset`` — those densify or reshape and
+    belong to the deferred consumers). Raises otherwise.
+    """
+    import anndata
+    import zarr
+    from anndata.io import sparse_dataset
+
+    from .backed import open_backed, write_transformed_zarr
+
+    reader = _backed_reader(adata)
+    if reader is None:
+        raise ValueError("materialize requires a backed (on-disk CSR) adata.X")
+    stages = list(adata.uns.get("_stream_transforms", []))
+    allowed = {"normalize_total", "log1p"}
+    bad = [s[0] for s in stages if s[0] not in allowed]
+    if bad:
+        raise ValueError(f"materialize is defined at the log1p boundary; the deferred prefix may "
+                         f"only hold {sorted(allowed)}, got {[s[0] for s in stages]}. Checkpoint "
+                         f"before scale / HVG-subset.")
+    tf = _build_transform(adata)
+    write_transformed_zarr(reader, tf, path, obs=adata.obs.copy(), var=adata.var.copy(),
+                           block_rows=block_rows)
+    adata.X = sparse_dataset(zarr.open(str(path), mode="r")["X"])   # rebind to the checkpoint
+    adata.uns["_stream_transforms"] = []                            # prefix now baked in → identity
+    return adata
+
+
+def write_obsm(adata, key: str, path):
+    """Persist an ``obsm`` array (e.g. ``X_pca``) to a ``.npy`` on disk so the in-memory-fitting
+    downstream (neighbors/UMAP/clustering) can start from it with no recompute."""
+    np.save(str(path), np.asarray(adata.obsm[key]))
+    return str(path)
+
+
 def normalize_total(adata, target_sum: float | None = None, layer=None,
                     exclude_highly_expressed: bool = False, copy: bool = False):
     """Normalize counts per cell (``sc.pp.normalize_total``). ``target_sum=None`` → median."""
