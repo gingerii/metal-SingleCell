@@ -62,6 +62,26 @@ def _build_transform(adata):
     return BlockTransform(list(adata.uns.get("_stream_transforms", [])))
 
 
+def _build_pca_transform(adata, mask):
+    """Deferred prefix for streaming PCA: insert ``hvg_subset`` before ``scale`` and subset
+    the (column-independent) per-gene scale params to the mask, so only the HVG columns
+    densify. ``mask=None`` keeps the full gene set (no-HVG / full-panel PCA)."""
+    from .backed import BlockTransform
+    stages, subset_done = [], False
+    for st in adata.uns.get("_stream_transforms", []):
+        if st[0] == "scale":
+            mean, std, mx_, zc = st[1]
+            if mask is not None:
+                stages.append(("hvg_subset", mask)); mean, std = mean[mask], std[mask]
+                subset_done = True
+            stages.append(("scale", (mean, std, mx_, zc)))
+        else:
+            stages.append(st)
+    if mask is not None and not subset_done:       # no scale stage: subset before covariance
+        stages.append(("hvg_subset", mask))
+    return BlockTransform(stages)
+
+
 def normalize_total(adata, target_sum: float | None = None, layer=None,
                     exclude_highly_expressed: bool = False, copy: bool = False):
     """Normalize counts per cell (``sc.pp.normalize_total``). ``target_sum=None`` → median."""
@@ -227,6 +247,22 @@ def pca(adata, n_comps: int = 50, layer=None, use_highly_variable: bool | None =
     adata = adata.copy() if copy else adata
     if use_highly_variable is None:
         use_highly_variable = "highly_variable" in adata.var
+
+    reader = _backed_reader(adata, layer)
+    if reader is not None:                       # out-of-core: fused streaming covariance-eigh
+        from .decomposition import pca_covariance_eigh_streaming
+        hvg_mask = adata.var["highly_variable"].to_numpy() if use_highly_variable else None
+        H = int(hvg_mask.sum()) if hvg_mask is not None else adata.n_vars
+        tf = _build_pca_transform(adata, hvg_mask)
+        X_pca, comps, vr = pca_covariance_eigh_streaming(reader, tf, H, n_comps=n_comps)
+        adata.obsm["X_pca"] = np.asarray(X_pca)
+        pcs = np.zeros((adata.n_vars, n_comps), dtype=np.float32)
+        pcs[hvg_mask if hvg_mask is not None else slice(None)] = np.asarray(comps).T
+        adata.varm["PCs"] = pcs
+        adata.uns["pca"] = {"variance_ratio": np.asarray(vr),
+                            "use_highly_variable": bool(use_highly_variable)}
+        return adata if copy else None
+
     X = adata.layers[layer] if layer is not None else adata.X
     mask = adata.var["highly_variable"].to_numpy() if use_highly_variable else np.ones(adata.n_vars, bool)
     Xsub = X[:, mask]

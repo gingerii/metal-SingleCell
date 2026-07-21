@@ -123,6 +123,51 @@ def _covariance_eigh(Xc64: np.ndarray, n_samples: int, n_comps: int):
     return C, S, Vt, U
 
 
+def pca_covariance_eigh_streaming(reader, transform, n_out_genes: int, n_comps: int = 50,
+                                  block_rows: int | None = None):
+    """Fused out-of-core PCA: two streaming passes over row-blocks, no dense materialization.
+
+    Pass 1 accumulates ``Σz`` and ``M=zᵀz`` (fp64) over scaled+clipped blocks (``transform``
+    is the deferred normalize→log1p→[hvg_subset]→scale prefix); ``C=(M−n·μμᵀ)/(n−1)`` then a
+    dense fp64 eigendecomposition (rapids-singlecell's Dask PCA choice). Pass 2 projects each
+    block. ``block_rows`` auto-sizes from ``n_out_genes`` so the dense ``n_b×H`` block stays
+    bounded (large ``H`` = the no-HVG full-panel case). Returns the same
+    ``(x_pca fp32, components fp32, variance_ratio fp64)`` tuple as :func:`pca`.
+    """
+    from .backed import auto_block_rows
+
+    H, n = int(n_out_genes), reader.n_obs
+    br = int(block_rows or auto_block_rows(H, reader.default_block_rows))
+    if H > 20000:
+        import warnings
+        warnings.warn(f"covariance_eigh on {H} genes: the {H}×{H} eigh is O(H³) (minutes).")
+
+    g1 = np.zeros(H, dtype=np.float64)
+    M = np.zeros((H, H), dtype=np.float64)
+    for _, _, csr in reader.iter_row_blocks(br):
+        z = np.asarray(transform.apply(csr), dtype=np.float64)     # n_b × H dense (scaled+clipped)
+        g1 += z.sum(axis=0)
+        M += z.T @ z
+    mu = g1 / n
+    C = (M - n * np.outer(mu, mu)) / (n - 1)                       # μ≈0 after scale → safe
+    S, Vt = _eigh_components(C, n, n_comps)
+    total_var = float(np.trace(C))
+
+    x_pca = np.empty((n, n_comps), dtype=np.float32)               # pass 2: project
+    for s, e, csr in reader.iter_row_blocks(br):
+        z = np.asarray(transform.apply(csr), dtype=np.float64)
+        x_pca[s:e] = (z @ Vt.T).astype(np.float32)
+
+    # Sign fix (u_based, matching _svd_flip): x_pca = U·S with S>0, so argmax|x_pca| and its
+    # sign per column equal those of U — flipping x_pca and Vt by these signs reproduces _finalize.
+    signs = np.sign(x_pca[np.argmax(np.abs(x_pca), axis=0), range(n_comps)])
+    signs[signs == 0] = 1.0
+    x_pca *= signs
+    components = (Vt * signs[:, None]).astype(np.float32)
+    variance_ratio = (S**2 / (n - 1) / total_var).astype(np.float64)
+    return x_pca, components, variance_ratio
+
+
 def _ortho(Z):
     """Gram-matrix orthonormalization ``Z(ZᵀZ)^{-1/2}`` (GPU matmuls + tiny host eigh).
 
