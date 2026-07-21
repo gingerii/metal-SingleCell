@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,23 +9,35 @@ description = "GPU-accelerated single-cell analysis on Apple Silicon (Metal/MLX)
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "gingerii" }]
-license = { text = "BSD-3-Clause" }
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: MacOS",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
 dependencies = [
-    "numpy",
-    "scipy",
-    "anndata",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "anndata>=0.10",
+    # The Metal backend. Marker-gated to Apple Silicon so the package still installs (and stays
+    # importable via lazy imports) on Linux/Intel, where the GPU paths are unavailable anyway.
+    "mlx>=0.20; platform_system == 'Darwin' and platform_machine == 'arm64'",
 ]
 
-# Heavy / platform-specific deps (scanpy for the CPU oracle, mlx for the Metal
-# backend) are managed in envs/metasinglecell.yml, not pinned here, so the
-# package stays importable in any environment. Library code lazy-imports them.
+[project.urls]
+Homepage = "https://github.com/gingerii/metal-SingleCell"
+Repository = "https://github.com/gingerii/metal-SingleCell"
+Issues = "https://github.com/gingerii/metal-SingleCell/issues"
+
+# scanpy/squidpy (CPU oracle) stay optional. `metal` is retained as an alias extra for anyone
+# pinning the backend explicitly, though mlx is now a marker-gated core dep on Apple Silicon.
 [project.optional-dependencies]
 oracle = ["scanpy", "squidpy", "leidenalg", "igraph", "umap-learn", "scikit-learn"]
-metal = ["mlx"]
+metal = ["mlx>=0.20"]
 dev = ["pytest", "jupyter", "matplotlib"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-metasinglecell = ["**/*.metal"]

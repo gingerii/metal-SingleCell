@@ -33,3 +33,6 @@ resources/*.pdf
 CLAUDE.md
 SKILLS.md
 RESOURCES.md
+
+# stray build scratch script
+scratchpad_build_brain1m_graph.py
