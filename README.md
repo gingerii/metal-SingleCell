@@ -236,7 +236,13 @@ builds on, and the API and workflows are modeled directly on these libraries —
 
 - **[rapids-singlecell](https://github.com/scverse/rapids-singlecell)** (MIT, part of
   [scverse®](https://scverse.org)) — the GPU single-cell API this project mirrors for Apple Silicon,
-  and the source of the tutorials reproduced here. See their repository for the preferred citation.
+  and the source of the tutorials and out-of-core design reproduced here. Dicks, S. *et al.
+  GPU-accelerated single-cell analysis at scale with rapids-singlecell.* arXiv:2603.02402 (2026).
+  doi:[10.48550/arXiv.2603.02402](https://doi.org/10.48550/arXiv.2603.02402).
+- **[mlx-vis](https://github.com/hanxiao/mlx-vis)** — the pure-MLX Apple-Silicon GPU implementations of
+  NNDescent (approximate k-NN graph) and t-SNE that this project's neighbor-graph and t-SNE paths build
+  on. Xiao, H. *mlx-vis: GPU-Native Dimensionality Reduction on Apple Silicon.* arXiv:2603.04035 (2026).
+  doi:[10.48550/arXiv.2603.04035](https://doi.org/10.48550/arXiv.2603.04035).
 - **[scanpy](https://scanpy.readthedocs.io)** — Wolf, F. A., Angerer, P. & Theis, F. J. *SCANPY:
   large-scale single-cell gene expression data analysis.* Genome Biology 19, 15 (2018).
 - **[squidpy](https://squidpy.readthedocs.io)** — Palla, G. *et al. Squidpy: a scalable framework for

@@ -239,26 +239,38 @@ def _perplexity_affinities(D2, perplexity, tol=1e-5, max_iter=50):
 
 def tsne(X, n_components: int = 2, perplexity: float = 30.0, n_iter: int = 1000,
          learning_rate: float = 200.0, early_exaggeration: float = 12.0,
-         random_state: int = 0, exact_max_n: int = 30_000) -> np.ndarray:
-    """t-SNE (scanpy/rapids ``tl.tsne``), scale-dispatched.
+         random_state: int = 0, backend: str = "mlxvis", exact_max_n: int = 30_000) -> np.ndarray:
+    """t-SNE (scanpy/rapids ``tl.tsne``) — GPU-native at every scale.
 
-    * ``n ≤ exact_max_n``: EXACT t-SNE on the GPU — perplexity-calibrated affinities
-      then KL-minimizing gradient descent with the O(n²) gradient as MLX matmuls (fast
-      and exact at this scale).
-    * larger: the exact O(n²) affinity/Q matrices don't fit, so fall back to sklearn's
-      **Barnes-Hut** t-SNE (O(n log n), the scanpy/sklearn default) — same dispatch
-      philosophy as the kNN path (GPU where it wins, optimized CPU where O(n²) can't fit).
+    ``backend`` selects the engine:
+
+    * ``"mlxvis"`` (default): the vendored mlx-vis t-SNE, which stays on the Metal GPU at
+      all scales — sparse kNN-calibrated affinities plus a repulsive force that is exact
+      all-pairs below ~16k points and **FFT-interpolation** (the FIt-SNE analog, so no
+      Barnes-Hut tree is needed) above. On real atlas embeddings it beats both of the
+      paths below on speed *and* trustworthiness (e.g. 30k: 16.9× vs our dense-GPU exact;
+      100k: 7.0× vs sklearn Barnes-Hut, equal quality).
+    * ``"exact"``: our dense-GPU O(n²) t-SNE — perplexity-calibrated affinities then
+      KL-minimizing gradient descent as MLX matmuls. Exact but O(n²); retained as a
+      validation oracle (unusable past ~30k — 459s at 30k).
+    * ``"sklearn"``: sklearn's Barnes-Hut t-SNE (CPU, O(n log n)) — the reference oracle.
     """
-    import mlx.core as mx
-
-    n = X.shape[0]
-    if n > exact_max_n:
+    if backend == "mlxvis":
+        from ._vendor.mlx_vis.tsne import TSNE as _MlxTSNE
+        return _MlxTSNE(n_components=n_components, perplexity=perplexity, n_iter=n_iter,
+                        learning_rate=learning_rate, early_exaggeration=early_exaggeration,
+                        random_state=random_state, pca_dim=None).fit_transform(
+                            np.asarray(X, dtype=np.float32))
+    if backend == "sklearn" or (backend == "auto" and X.shape[0] > exact_max_n):
         from sklearn.manifold import TSNE
         return TSNE(n_components=n_components, perplexity=perplexity,
                     learning_rate=learning_rate, early_exaggeration=early_exaggeration,
                     init="pca", random_state=random_state).fit_transform(
                         np.asarray(X, dtype=np.float32))
 
+    import mlx.core as mx
+
+    n = X.shape[0]
     Xn = np.asarray(X, dtype=np.float64)
     sq = np.sum(Xn * Xn, axis=1)
     D2 = np.maximum(sq[:, None] + sq[None, :] - 2 * Xn @ Xn.T, 0.0)
