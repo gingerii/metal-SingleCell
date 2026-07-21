@@ -1,5 +1,7 @@
 # metal-SingleCell
 
+[![CI](https://github.com/gingerii/metal-SingleCell/actions/workflows/ci.yml/badge.svg)](https://github.com/gingerii/metal-SingleCell/actions/workflows/ci.yml)
+
 **GPU-accelerated single-cell analysis on Apple Silicon.**
 
 A Metal/[MLX](https://github.com/ml-explore/mlx) re-implementation of
@@ -133,8 +135,9 @@ igraph). Both are valid; pick speed or exact-parity per run.
 Every accelerated function is validated against its CPU reference: normalize/Pearson exact (Δ≈1e-6),
 HVG gene-overlap **1.000**, PCA subspace 0.97–0.99, rank-genes top-k overlap 1.000, Leiden modularity at
 igraph parity (Q 0.8586 vs 0.8588 at `n_iterations=2`; Q 0.8504 at the `n_iterations=1` speed point),
-kNN recall ≈0.99, co-occurrence correlation **1.000** vs squidpy. A `tests/` suite covers the drop-in
-defaults, the streaming/out-of-core paths, and the numerical-accuracy guards.
+kNN recall ≈0.99, co-occurrence correlation **1.000** vs squidpy. An asserting `tests/` suite is in
+progress (drop-in defaults, kNN and numerical-accuracy guards landed; streaming/out-of-core coverage is
+being added).
 
 ## What was solved
 
@@ -253,6 +256,6 @@ released under permissive licenses (MIT / BSD-3-Clause); MLX is MIT.
 ## Status
 
 Functionally complete and validated (pp / tl / gr + tutorials + benchmark), with an **out-of-core
-streaming front-end** for datasets larger than memory and a `tests/` suite. Version `0.0.1`. The full
-benchmark with methodology is in
+streaming front-end** for datasets larger than memory. An asserting `tests/` suite + CI is in progress
+(pre-PyPI). Version `0.0.1`. The full benchmark with methodology is in
 [`results/validation/RESULTS_v_benchmark.md`](results/validation/RESULTS_v_benchmark.md).

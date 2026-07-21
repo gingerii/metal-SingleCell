@@ -1,0 +1,25 @@
+name: GPU parity (self-hosted Metal)
+
+# The GPU/data lane needs a real Apple-Silicon Metal GPU — GitHub offers no Metal runners, so
+# this requires a SELF-HOSTED macOS-arm64 runner registered on the repo (labels: self-hosted,
+# macOS, ARM64). It is the single infra dependency noted in the scverse submission. Kept
+# manually-triggerable (workflow_dispatch) so the CPU lane stays green regardless of runner
+# availability. The runner must also have data/pbmc3k_raw.h5ad present (gitignored) for the
+# @data tests; without it those are skipped and only the pure-@metal tests run.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gpu:
+    name: gpu-parity
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install with Metal backend + CPU oracle
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[oracle]"     # mlx comes in via the arm64-macOS core marker
+          pip install pytest
+      - name: Run GPU + data lane
+        run: pytest tests/ -m "metal or data" -v

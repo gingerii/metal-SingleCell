@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu:
+    # CPU lane — the GitHub-hosted, no-GPU tests: the lazy-import contract, config, and the
+    # validation harness. The ubuntu job doubles as the proof that the package installs and
+    # imports WITHOUT mlx (mlx is a Darwin/arm64-only marker dep), i.e. "installs anywhere".
+    name: cpu (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install (core deps only; no mlx on Linux by design)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest
+      - name: Show that mlx is absent on Linux (install-anywhere proof)
+        if: runner.os == 'Linux'
+        run: python -c "import importlib.util,sys; assert importlib.util.find_spec('mlx') is None; print('mlx not installed on Linux — OK')"
+      - name: Run CPU lane
+        run: pytest tests/ -m "not metal and not data" -v
