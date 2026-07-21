@@ -108,9 +108,11 @@ def harmonize(Z, batch, n_clusters: int | None = None, sigma: float = 0.1,
                 break
 
         # ---- correction: per-cluster ridge regression removing batch shift ----
-        phi1 = np.concatenate([np.ones((N, 1), np.float32), Phi], axis=1)   # N × (B+1)
-        Rn = np.asarray(R)                                   # K × N
-        Zc = np.asarray(Zg)                                  # corrected embedding (host)
+        # fp64 host ridge solve (stability-critical, matching the module's fp64 anchor policy):
+        # the K small (B+1)×(B+1) solves are cheap, so run them in fp64 not fp32.
+        phi1 = np.concatenate([np.ones((N, 1)), np.asarray(Phi, np.float64)], axis=1)  # N × (B+1)
+        Rn = np.asarray(R, np.float64)                       # K × N
+        Zc = np.asarray(Zg, np.float64)                      # corrected embedding (host)
         pen = np.diag([0.0] + [ridge_lambda] * B)            # don't penalize intercept
         for k in range(K):
             phi_rk = phi1 * Rn[k][:, None]                   # N × (B+1)

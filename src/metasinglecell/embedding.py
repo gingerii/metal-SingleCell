@@ -63,6 +63,9 @@ def umap(connectivities, n_components: int = 2, n_epochs: int | None = None,
         # attractive (weighted) along every edge
         diff = emb[head] - emb[tail]
         d2 = mx.sum(diff * diff, axis=1, keepdims=True)
+        # eps guards coincident points: d2=0 with b<1 makes power(d2, b-1)=inf → inf·0=NaN,
+        # which mx.clip does not sanitize, poisoning the whole layout (matches the repulsive guard).
+        d2 = d2 + 1e-3
         coef = (-2.0 * a * b * mx.power(d2, b - 1.0)) / (a * mx.power(d2, b) + 1.0)
         grad = mx.clip(coef * diff, -4.0, 4.0) * alpha * w
         emb = emb.at[head].add(grad)

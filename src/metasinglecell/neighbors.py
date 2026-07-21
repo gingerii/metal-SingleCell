@@ -80,9 +80,11 @@ def _topk_rows(D2, k):
 
 
 def _knn_gpu(X: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
-    """Exact k-NN (incl. self) via brute-force squared-Euclidean on the GPU.
+    """Approximate k-NN (incl. self) via brute-force squared-Euclidean on the GPU.
 
-    Returns ``(knn_indices, knn_dists)`` of shape (n, k), self first.
+    Neighbors are RANKED on fp16 distances (rescaled to avoid overflow), so recall is
+    ~0.99, not exact — the k selected distances are then recomputed in fp32 for exact
+    returned values. Returns ``(knn_indices, knn_dists)`` of shape (n, k), self first.
     """
     import math
 
@@ -169,7 +171,7 @@ def bbknn(X_pca: np.ndarray, batch, neighbors_within_batch: int = 3,
             e = min(s + tile, n)
             D2 = mx.maximum(xsq[s:e][:, None] + xb_sq[None, :]
                             - 2.0 * (Xg[s:e] @ Xb.T), 0.0)
-            loc = mx.argpartition(D2, kth=kk, axis=1)[:, :kk]
+            loc = mx.argpartition(D2, kth=min(kk, bidx.size - 1), axis=1)[:, :kk]
             mx.eval(loc, D2)
             loc = np.asarray(loc)
             d_b[s:e] = np.sqrt(np.maximum(np.take_along_axis(np.asarray(D2), loc, axis=1), 0.0))

@@ -207,7 +207,10 @@ def color_graph(graph: Graph, seed: int = 0, max_colors: int = 2000):
         selected = unc & (prio > max_nb)
         color = mx.where(selected, mx.array(r, dtype=mx.int32), color)
         r += 1
-    return color, r
+    if bool(mx.any(color < 0).item()):           # max_colors hit with stragglers left: a
+        color = mx.where(color < 0, mx.array(r, dtype=mx.int32), color)   # color=-1 vertex is
+        r += 1                                   # never processed by _local_moving → sweep the
+    return color, r                              # remainder into one final color group.
 
 
 def _local_moving(graph: Graph, resolution: float, twom: float, seed: int = 0,
