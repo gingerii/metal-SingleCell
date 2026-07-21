@@ -127,14 +127,17 @@ def pca_covariance_eigh_streaming(reader, transform, n_out_genes: int, n_comps: 
                                   block_rows: int | None = None):
     """Fused out-of-core PCA: two streaming passes over row-blocks, no dense materialization.
 
-    Pass 1 accumulates ``Σz`` and ``M=zᵀz`` (fp64) over scaled+clipped blocks (``transform``
-    is the deferred normalize→log1p→[hvg_subset]→scale prefix); ``C=(M−n·μμᵀ)/(n−1)`` then a
+    Pass 1 accumulates ``Σz`` and ``M=zᵀz`` (fp64) over transformed blocks (``transform`` is the
+    deferred normalize→log1p→[hvg_subset]→scale prefix); ``μ=Σz/n``, ``C=(M−n·μμᵀ)/(n−1)`` then a
     dense fp64 eigendecomposition (rapids-singlecell's Dask PCA choice). Pass 2 projects each
-    block. ``block_rows`` auto-sizes from ``n_out_genes`` so the dense ``n_b×H`` block stays
-    bounded (large ``H`` = the no-HVG full-panel case). Returns the same
+    **mean-centered** block ``(z−μ)·Vᵀ`` — the μ is subtracted explicitly (not assumed ≈0), so the
+    solver is correct for *any* transform prefix, including ``scale(zero_center=False)`` or PCA run
+    straight after ``log1p`` with no ``scale``. ``block_rows`` auto-sizes from ``n_out_genes`` so the
+    dense ``n_b×H`` block stays bounded (large ``H`` = the no-HVG full-panel case). Returns the same
     ``(x_pca fp32, components fp32, variance_ratio fp64)`` tuple as :func:`pca`.
     """
     from .backed import auto_block_rows
+    from .sparse import CSR
 
     H, n = int(n_out_genes), reader.n_obs
     br = int(block_rows or auto_block_rows(H, reader.default_block_rows))
@@ -142,21 +145,27 @@ def pca_covariance_eigh_streaming(reader, transform, n_out_genes: int, n_comps: 
         import warnings
         warnings.warn(f"covariance_eigh on {H} genes: the {H}×{H} eigh is O(H³) (minutes).")
 
+    def _dense(csr):
+        # transform.apply returns a CSR while the prefix is still sparse (no scale stage —
+        # the no-scale PCA-after-log1p path) and a dense MLX array once scale densifies.
+        out = transform.apply(csr)
+        return np.asarray(out.toarray() if isinstance(out, CSR) else out, dtype=np.float64)
+
     g1 = np.zeros(H, dtype=np.float64)
     M = np.zeros((H, H), dtype=np.float64)
     for _, _, csr in reader.iter_row_blocks(br):
-        z = np.asarray(transform.apply(csr), dtype=np.float64)     # n_b × H dense (scaled+clipped)
+        z = _dense(csr)                                            # n_b × H dense
         g1 += z.sum(axis=0)
         M += z.T @ z
-    mu = g1 / n
-    C = (M - n * np.outer(mu, mu)) / (n - 1)                       # μ≈0 after scale → safe
+    mu = g1 / n                                                    # per-gene mean of transformed data
+    C = (M - n * np.outer(mu, mu)) / (n - 1)                       # centered covariance (safe: fp64)
     S, Vt = _eigh_components(C, n, n_comps)
     total_var = float(np.trace(C))
 
-    x_pca = np.empty((n, n_comps), dtype=np.float32)               # pass 2: project
+    x_pca = np.empty((n, n_comps), dtype=np.float32)               # pass 2: project centered blocks
     for s, e, csr in reader.iter_row_blocks(br):
-        z = np.asarray(transform.apply(csr), dtype=np.float64)
-        x_pca[s:e] = (z @ Vt.T).astype(np.float32)
+        z = _dense(csr)
+        x_pca[s:e] = ((z - mu) @ Vt.T).astype(np.float32)          # (z−μ)·Vᵀ — μ never assumed ≈0
 
     # Sign fix (u_based, matching _svd_flip): x_pca = U·S with S>0, so argmax|x_pca| and its
     # sign per column equal those of U — flipping x_pca and Vt by these signs reproduces _finalize.
