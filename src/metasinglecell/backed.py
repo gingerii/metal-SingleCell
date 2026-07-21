@@ -171,6 +171,35 @@ def stream_qc(reader: ZarrRowReader, block_rows: int | None = None) -> dict:
     }
 
 
+def stream_gene_moments(reader: ZarrRowReader, transform: "BlockTransform",
+                        flavor: str = "seurat", block_rows: int | None = None):
+    """Per-gene ``(mean, var)`` for dispersion HVG, accumulated across blocks.
+
+    ``seurat`` → moments of ``exp(x)−1`` of the log-normalized data (matches
+    ``CSR.gene_moments``; MSL has no expm1 so the in-core kernel uses ``exp(x)−1``, which
+    we replicate); ``cell_ranger`` → moments of the log-normalized values
+    (``CSR.col_moments``). Column scatter-adds compose across blocks; finalize ddof=1 with
+    implicit zeros folded via the full cell count.
+    """
+    import scipy.sparse as sp
+
+    from .sparse import CSR
+
+    G, n = reader.n_vars, reader.n_obs
+    T = np.zeros(G, dtype=np.float64)
+    Q = np.zeros(G, dtype=np.float64)
+    for _, _, csr in reader.iter_row_blocks(block_rows):
+        out = transform.apply(csr)
+        b = out.to_scipy() if isinstance(out, CSR) else sp.csr_matrix(np.asarray(out))
+        d = (np.exp(b.data) - 1.0) if flavor == "seurat" else b.data.astype(np.float64)
+        cols = b.indices
+        T += np.bincount(cols, weights=d, minlength=G)
+        Q += np.bincount(cols, weights=d * d, minlength=G)
+    mean = T / n
+    var = (Q - n * mean**2) / (n - 1)
+    return mean, var
+
+
 def stream_scale_stats(reader: ZarrRowReader, transform: "BlockTransform",
                        block_rows: int | None = None):
     """Per-gene mean/std over the transformed (lognorm) blocks — pass 1 of streaming scale.

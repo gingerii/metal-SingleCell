@@ -328,19 +328,33 @@ def _hvg_dispersion(csr, n_top_genes: int, n_bins: int, flavor: str):
     seurat -> ``gene_moments`` (expm1) + log transforms; cell_ranger -> ``col_moments``
     (raw stored values) + no log.
     """
-    import pandas as pd
-
     if flavor == "seurat":
         mean, var = csr.gene_moments()                       # mean/var of expm1(lognorm)
-        mean = mean.astype(np.float64); var = var.astype(np.float64)
+    else:  # cell_ranger: mean/var of the log-normalized data itself
+        mean, var = csr.col_moments()
+    return _hvg_dispersion_from_moments(np.asarray(mean), np.asarray(var),
+                                        n_top_genes, n_bins, flavor)
+
+
+def _hvg_dispersion_from_moments(mean, var, n_top_genes: int, n_bins: int, flavor: str):
+    """seurat/cell_ranger HVG binning from precomputed per-gene ``(mean, var)`` moments.
+
+    Split out of :func:`_hvg_dispersion` so the streaming front-end can feed moments
+    accumulated across row-blocks into the identical host binning (gene selection must
+    match the in-core result). ``mean``/``var`` are of ``expm1(lognorm)`` for seurat and
+    of the log-normalized values for cell_ranger.
+    """
+    import pandas as pd
+
+    mean = np.asarray(mean).astype(np.float64)
+    var = np.asarray(var).astype(np.float64)
+    if flavor == "seurat":
         mean[mean == 0] = 1e-12
         dispersion = var / mean
         dispersion[dispersion == 0] = np.nan
         dispersion = np.log(dispersion)
         mean = np.log1p(mean)                                # seurat: logarithmized mean
-    else:  # cell_ranger: mean/var of the log-normalized data itself, no log transforms
-        mmx, vmx = csr.col_moments()
-        mean = np.asarray(mmx).astype(np.float64); var = np.asarray(vmx).astype(np.float64)
+    else:  # cell_ranger: no log transforms
         mean[mean == 0] = 1e-12
         dispersion = var / mean
 

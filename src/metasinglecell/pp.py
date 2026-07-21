@@ -112,8 +112,16 @@ def highly_variable_genes(adata, n_top_genes: int = 2000, n_bins: int = 20,
                           flavor: str = "seurat", layer=None, copy: bool = False):
     """Highly variable genes (``sc.pp.highly_variable_genes``); writes ``adata.var`` columns."""
     adata = adata.copy() if copy else adata
-    df = _pp.highly_variable_genes(_csr(adata, layer), n_top_genes=n_top_genes,
-                                   n_bins=n_bins, flavor=flavor)
+    reader = _backed_reader(adata, layer)
+    if reader is not None:                       # out-of-core: stream per-gene moments
+        if flavor not in ("seurat", "cell_ranger"):
+            raise NotImplementedError(f"streaming HVG supports seurat/cell_ranger, not {flavor!r}")
+        from .backed import stream_gene_moments
+        mean, var = stream_gene_moments(reader, _build_transform(adata), flavor)
+        df = _pp._hvg_dispersion_from_moments(mean, var, n_top_genes, n_bins, flavor)
+    else:
+        df = _pp.highly_variable_genes(_csr(adata, layer), n_top_genes=n_top_genes,
+                                       n_bins=n_bins, flavor=flavor)
     for col in df.columns:
         adata.var[col] = df[col].to_numpy()
     adata.uns["hvg"] = {"flavor": flavor}
