@@ -106,22 +106,35 @@ cohort** — one consistent data family across the table.
 
 ### Tier 2 — GPU wins **at scale** (graph clustering)
 
-| function | 2k | 50k | 100k | 1M | 2M |
-|----------|---:|----:|-----:|---:|---:|
-| louvain | 0.14× | 1.8× | 2.9× | **11.6×** | (11.5 s) |
-| leiden | 0.05× | 0.30× | 0.37× | 0.90× | (24.5 s) |
+| function | 2k | 50k | 100k | 1M | 2M | real 1M† |
+|----------|---:|----:|-----:|---:|---:|---:|
+| louvain | 0.14× | 21.9× | 21.0× | 9.7× | (16.1 s) | **58.6×** |
+| leiden | 0.05× | 4.6× | 3.6× | 3.2× | 3.5× | **4.8×** |
+
+†*real 1M* = the actual 986k-neuron kNN-15 graph (not synthetic); 50k–2M are SBM benchmark graphs where
+igraph is unusually fast, so they understate the real-data advantage. Leiden timed at `n_iterations=1`
+(the speed operating point — see note below).
 
 `co_occurrence` (spatial): ~1.6× vs squidpy at 25k–100k, exact match, and scales past the n² memory
 wall via a tiled device-atomic-histogram kernel.
 
-Clustering crosses over with cell count: **Louvain is a GPU win from ~50k up (11.6× at 1M)**, and
-**Leiden closes from a catastrophic 0.08× to ~tied with igraph at 1M (0.90×)** — see *What was solved*.
+Clustering crosses over with cell count: **Louvain wins from ~50k up (58.6× on the real 986k-neuron
+graph)**, and **Leiden — after an O(degree) SIMD-group kernel rewrite + vertex pruning — went from a
+catastrophic 0.05× to a 4.1× end-to-end speedup, winning at every scale ≥50k (4.8× vs igraph on the real
+986k graph)** — see *What was solved*.
+
+**Leiden quality/speed operating points.** The user-facing `msc.tl.leiden` defaults to
+`n_iterations=2` (matching scanpy), which reaches igraph-parity modularity (Q 0.8586 vs igraph 0.8588 on
+the 986k graph) at ~2.6× vs igraph. The `n_iterations=1` fast path is ~4.8× at Q 0.8504 (~1% under
+igraph). Both are valid; pick speed or exact-parity per run.
 
 ### Accuracy
 
 Every accelerated function is validated against its CPU reference: normalize/Pearson exact (Δ≈1e-6),
-HVG gene-overlap **1.000**, PCA subspace 0.97–0.99, rank-genes top-k overlap 1.000, clustering
-modularity ≥ igraph, kNN recall ≈0.99, co-occurrence correlation **1.000** vs squidpy.
+HVG gene-overlap **1.000**, PCA subspace 0.97–0.99, rank-genes top-k overlap 1.000, Leiden modularity at
+igraph parity (Q 0.8586 vs 0.8588 at `n_iterations=2`; Q 0.8504 at the `n_iterations=1` speed point),
+kNN recall ≈0.99, co-occurrence correlation **1.000** vs squidpy. A `tests/` suite covers the drop-in
+defaults, the streaming/out-of-core paths, and the numerical-accuracy guards.
 
 ## What was solved
 
@@ -130,13 +143,59 @@ modularity ≥ igraph, kNN recall ≈0.99, co-occurrence correlation **1.000** v
   M-series GPU has no native sparse support.
 - **The full scanpy `pp`/`tl` + squidpy `gr` surface** — ~30 functions as a drop-in AnnData API.
 - **Coloring-free parallel clustering** — the first parallel Louvain/Leiden on Metal. Replacing
-  graph-coloring local-moving with cuGraph-style synchronous moves + a random-commit rule (plus a
-  converged-in-one-pass `n_iterations` and a tuned commit probability) took **Leiden at 1M from
-  0.08× → 0.90×** and **Louvain from 2.04× → 11.6×**, with equal-or-better modularity.
+  graph-coloring local-moving with cuGraph-style synchronous moves + a random-commit rule took
+  **Louvain to 58.6×** on the real 986k-neuron graph. **Leiden** was then rebuilt with **O(degree)
+  SIMD-group move/refine kernels** (`simd_sum`/`simd_any`, no atomics or grid barrier — retiring the old
+  O(degree²) rescans) plus **vertex pruning** and **batched host-sync**, for a **4.1× end-to-end speedup**
+  (11.9 s → 2.9 s on the 986k graph) at equal-or-better modularity — winning at every scale ≥50k.
 - **A fused co-occurrence kernel** — a tiled device-atomic histogram that matches squidpy exactly,
   runs ~1.6× faster, and scales past the n² memory wall to 100k+ cells.
+- **Out-of-core front-end (streaming from disk)** — the sparse, memory-bound front-end
+  (QC → normalize → log1p → HVG → scale → PCA) streams cell-axis row-blocks from a chunked on-disk zarr
+  store, so peak memory is bounded by one block, not the cell count. The **full 1,306,127 × 27,998 atlas
+  (2.6 B non-zeros) — which OOMs an in-core run — completes end-to-end in ~300 s at 25.6 GB peak on a
+  48 GB laptop.** PCA uses a single-pass covariance-eigh solver (rapids-singlecell's Dask-PCA choice).
+  See [*Out-of-core*](#out-of-core-atlas-scale-on-a-laptop).
 - **Validated at atlas scale** — a complete 1 M-cell workflow (and every function through 2 M cells)
-  runs end-to-end on a 48 GB laptop.
+  runs end-to-end on a 48 GB laptop; the full 28k-gene 1.3 M-neuron atlas runs out-of-core.
+
+## Out-of-core: atlas-scale on a laptop
+
+The sparse front-end can run on a dataset whose full expression matrix does **not** fit in unified
+memory, by streaming cell-axis row-blocks from a chunked on-disk **zarr** store. Peak memory is bounded
+by one block plus small accumulators — not the cell count — so datasets that OOM an in-core run go
+through on the same 48 GB laptop.
+
+```bash
+# one-time: convert an .h5ad / 10x .h5 to a chunked-zarr store
+python -m metasinglecell.backed  1M_neurons.h5  atlas.zarr  --block-rows 100000
+```
+
+```python
+import anndata as ad, metasinglecell as msc
+adata = ad.read_zarr("atlas.zarr")     # backed, not fully loaded
+msc.pp.calculate_qc_metrics(adata)     # each pp step detects the backed .X and streams
+msc.pp.normalize_total(adata); msc.pp.log1p(adata)
+msc.pp.highly_variable_genes(adata); msc.pp.scale(adata)
+msc.pp.pca(adata, svd_solver="covariance_eigh")   # single streaming covariance pass → dense eigh
+# → adata.obsm["X_pca"]; downstream (neighbors/UMAP/clustering) fits in memory and runs as usual
+```
+
+**Full 1.3M-neuron atlas** (`1,306,127 × 27,998`, 2.6 B non-zeros) — the case that OOMs in-core:
+
+| | in-core | out-of-core (streaming) |
+|---|---|---|
+| front-end (QC→normalize→log1p→HVG→scale→PCA) | **OOMs** (>48 GB) | **completes** |
+| peak memory | — | **25.6 GB** (bounded by `block_rows`) |
+| wall time (end-to-end) | — | ~300 s |
+
+Design notes: streaming is **opt-in** — it activates only when `.X` is a backed zarr store, and every
+in-core default is unchanged. Results are **bit-exact** vs in-core for the linear ops (QC / normalize /
+log1p) and match to **subspace ≥ 0.999** for PCA. Out-of-core PCA uses a **covariance-eigh** solver — one
+streaming pass accumulates the gene×gene covariance, then a dense fp64 eigendecomposition (the same choice
+rapids-singlecell made for Dask PCA); randomized/Lanczos are in-core only. An optional post-log1p
+checkpoint (`msc.pp.materialize`) trades disk for repeated compute. Downstream (neighbors/UMAP/clustering)
+runs in memory as usual — the `n × 50` embedding is small even at atlas scale.
 
 ## When to use the CPU version instead
 
@@ -193,5 +252,7 @@ released under permissive licenses (MIT / BSD-3-Clause); MLX is MIT.
 
 ## Status
 
-Functionally complete and validated (pp / tl / gr + tutorials + benchmark). Version `0.0.1`. The full benchmark with
-methodology is in [`results/validation/RESULTS_v_benchmark.md`](results/validation/RESULTS_v_benchmark.md).
+Functionally complete and validated (pp / tl / gr + tutorials + benchmark), with an **out-of-core
+streaming front-end** for datasets larger than memory and a `tests/` suite. Version `0.0.1`. The full
+benchmark with methodology is in
+[`results/validation/RESULTS_v_benchmark.md`](results/validation/RESULTS_v_benchmark.md).
