@@ -48,6 +48,21 @@ def _backed_reader(adata, layer=None):
     return None
 
 
+def _reject_backed(adata, fn_name, layer=None):
+    """Raise for a backed (on-disk) ``.X`` on a wrapper with no streaming path.
+
+    Better a clear error than the silent failure mode: ``sp.csr_matrix(adata.X)`` on a
+    backed ``CSRDataset`` fully densifies (OOM at scale), and a wrapper that reads ``.X``
+    directly would compute on raw counts, ignoring any deferred normalize→log1p prefix.
+    """
+    if _backed_reader(adata, layer) is not None:
+        raise NotImplementedError(
+            f"{fn_name} does not support a backed (on-disk) AnnData.X. Load into memory "
+            "(`adata = adata.to_memory()`), or use the streaming-capable steps "
+            "(calculate_qc_metrics / normalize_total / log1p / highly_variable_genes / "
+            "scale / pca) which take the out-of-core path automatically.")
+
+
 # The backed store holds raw counts only (no intermediate write-back this milestone), so
 # streaming normalize_total/log1p/scale record a DEFERRED transform prefix in
 # adata.uns["_stream_transforms"] that the terminal consumers (HVG/PCA) re-apply per block.
@@ -196,6 +211,7 @@ def highly_variable_genes(adata, n_top_genes: int = 2000, n_bins: int = 20,
 def filter_cells(adata, min_counts=None, max_counts=None, min_genes=None,
                  max_genes=None, copy: bool = False):
     """Filter cells (``sc.pp.filter_cells``); subsets ``adata`` in place."""
+    _reject_backed(adata, "filter_cells")
     adata = adata.copy() if copy else adata
     keep = _pp.filter_cells(_sci(adata), min_counts=min_counts, max_counts=max_counts,
                             min_genes=min_genes, max_genes=max_genes)
@@ -206,6 +222,7 @@ def filter_cells(adata, min_counts=None, max_counts=None, min_genes=None,
 def filter_genes(adata, min_counts=None, max_counts=None, min_cells=None,
                  max_cells=None, copy: bool = False):
     """Filter genes (``sc.pp.filter_genes``); subsets ``adata`` in place."""
+    _reject_backed(adata, "filter_genes")
     adata = adata.copy() if copy else adata
     keep = _pp.filter_genes(_sci(adata), min_counts=min_counts, max_counts=max_counts,
                             min_cells=min_cells, max_cells=max_cells)
@@ -233,6 +250,7 @@ def scale(adata, max_value: float | None = 10.0, zero_center: bool = True,
 
 def regress_out(adata, keys, copy: bool = False):
     """Regress out covariates in ``adata.obs[keys]`` (``sc.pp.regress_out``)."""
+    _reject_backed(adata, "regress_out")
     adata = adata.copy() if copy else adata
     keys = [keys] if isinstance(keys, str) else list(keys)
     cov = np.column_stack([np.asarray(adata.obs[k], dtype=np.float32) for k in keys])
@@ -243,6 +261,7 @@ def regress_out(adata, keys, copy: bool = False):
 def normalize_pearson_residuals(adata, theta: float = 100.0, clip: float | None = None,
                                 copy: bool = False):
     """Analytic Pearson residuals (``sc.experimental.pp.normalize_pearson_residuals``)."""
+    _reject_backed(adata, "normalize_pearson_residuals")
     adata = adata.copy() if copy else adata
     import scipy.sparse as sp
     adata.X = _pp.normalize_pearson_residuals(sp.csr_matrix(adata.X), theta=theta, clip=clip)
@@ -253,6 +272,7 @@ def scrublet(adata, sim_doublet_ratio: float = 2.0, expected_doublet_rate: float
              n_neighbors: int | None = None, n_pcs: int = 30, random_state: int = 0,
              copy: bool = False):
     """Doublet detection (``sc.pp.scrublet``); writes ``obs['doublet_score']``/``['predicted_doublet']``."""
+    _reject_backed(adata, "scrublet")
     adata = adata.copy() if copy else adata
     import scipy.sparse as sp
     res = _pp.scrublet(sp.csr_matrix(adata.X), sim_doublet_ratio=sim_doublet_ratio,

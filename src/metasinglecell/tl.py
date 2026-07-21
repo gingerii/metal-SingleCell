@@ -104,6 +104,8 @@ def rank_genes_groups(adata, groupby, method: str = "t-test", reference: str = "
                       key_added: str = "rank_genes_groups", layer=None, copy: bool = False):
     """Marker genes per group (``sc.tl.rank_genes_groups``); writes scanpy-format ``adata.uns[key_added]``."""
     import scipy.sparse as sp
+    from .pp import _reject_backed
+    _reject_backed(adata, "rank_genes_groups", layer)   # densifies .X — no streaming path
     adata = adata.copy() if copy else adata
     X = adata.layers[layer] if layer is not None else adata.X
     X = np.asarray(X.todense() if sp.issparse(X) else X, dtype=np.float32)
@@ -136,6 +138,8 @@ def score_genes(adata, gene_list, score_name: str = "score", ctrl_size: int = 50
                 n_bins: int = 25, random_state: int = 0, copy: bool = False):
     """Gene-set score (``sc.tl.score_genes``); writes ``adata.obs[score_name]``."""
     import scipy.sparse as sp
+    from .pp import _reject_backed
+    _reject_backed(adata, "score_genes")
     adata = adata.copy() if copy else adata
     X = np.asarray(adata.X.todense() if sp.issparse(adata.X) else adata.X, dtype=np.float32)
     adata.obs[score_name] = _tl.score_genes(X, list(gene_list), adata.var_names.to_numpy(),
@@ -146,6 +150,8 @@ def score_genes(adata, gene_list, score_name: str = "score", ctrl_size: int = 50
 def score_genes_cell_cycle(adata, s_genes, g2m_genes, random_state: int = 0, copy: bool = False):
     """S/G2M scores + phase (``sc.tl.score_genes_cell_cycle``); writes ``obs['S_score'/'G2M_score'/'phase']``."""
     import scipy.sparse as sp
+    from .pp import _reject_backed
+    _reject_backed(adata, "score_genes_cell_cycle")
     adata = adata.copy() if copy else adata
     X = np.asarray(adata.X.todense() if sp.issparse(adata.X) else adata.X, dtype=np.float32)
     res = _tl.score_genes_cell_cycle(X, list(s_genes), list(g2m_genes),
