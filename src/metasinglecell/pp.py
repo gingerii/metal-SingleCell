@@ -313,7 +313,8 @@ def pca(adata, n_comps: int = 50, layer=None, use_highly_variable: bool | None =
     Xsub = X[:, mask]
     inp = CSR.from_scipy(sp.csr_matrix(Xsub).astype(np.float32)) if sp.issparse(Xsub) and zero_center \
         else np.asarray(Xsub.todense() if sp.issparse(Xsub) else Xsub, dtype=np.float32)
-    X_pca, comps, vr = _pca(inp, n_comps=n_comps, solver=svd_solver, random_state=random_state)
+    X_pca, comps, vr = _pca(inp, n_comps=n_comps, solver=svd_solver, random_state=random_state,
+                            zero_center=zero_center)
     adata.obsm["X_pca"] = np.asarray(X_pca)
     pcs = np.zeros((adata.n_vars, n_comps), dtype=np.float32)
     pcs[mask] = np.asarray(comps).T

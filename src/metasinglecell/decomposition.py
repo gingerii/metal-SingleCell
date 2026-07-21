@@ -48,6 +48,15 @@ def _center_gpu(X: np.ndarray):
     return Xc
 
 
+def _as_gpu(X: np.ndarray):
+    """Move to the GPU (fp32) without centering — the ``zero_center=False`` path."""
+    import mlx.core as mx
+
+    Xg = mx.array(np.asarray(X, dtype=np.float32))
+    mx.eval(Xg)
+    return Xg
+
+
 def pca(
     X,
     n_comps: int = 50,
@@ -55,6 +64,7 @@ def pca(
     random_state: int = 0,
     n_oversamples: int = 10,
     n_iter: int = 7,
+    zero_center: bool = True,
 ):
     """Principal component analysis. See module docstring for solver semantics.
 
@@ -62,17 +72,23 @@ def pca(
     runs **sparse-aware**: implicit mean-centering (zero_center=True) with a Metal
     SpMM range-finder, never densifying — this is the scalable atlas path (matches
     ``rapids-singlecell``/scanpy PCA on sparse lognorm). Scaling (z-scoring) is the
-    dense path on purpose, since z-scoring destroys sparsity.
+    dense path on purpose, since z-scoring destroys sparsity. ``zero_center=False``
+    decomposes ``X`` directly (uncentered, TruncatedSVD-style) on the dense path; the
+    sparse-CSR path is inherently centering-based, so it requires ``zero_center=True``.
     """
     from .sparse import CSR
 
     if isinstance(X, CSR):
         if solver != "randomized":
             raise ValueError("CSR input supports solver='randomized' only (sparse path)")
+        if not zero_center:
+            raise ValueError("sparse CSR PCA is centering-based; pass a dense array for "
+                             "zero_center=False (uncentered) PCA")
         return _pca_randomized_sparse(X, n_comps, random_state, n_oversamples, n_iter)
 
     n_samples = X.shape[0]
-    Xc = _center_gpu(X)
+    # zero_center=False → decompose X as-is (no mean subtraction); still fp32 on the GPU.
+    Xc = _center_gpu(X) if zero_center else _as_gpu(X)
 
     if solver == "randomized":
         return _pca_randomized(Xc, n_samples, n_comps, random_state, n_oversamples, n_iter)

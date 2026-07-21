@@ -24,13 +24,13 @@ def leiden(connectivities, resolution: float = 1.0, random_state: int = 0,
         from .graph import Graph
         from .graph.leiden import leiden as gpu_leiden
 
-        # The GPU Leiden converges within ONE multilevel pass (its local-moving and
-        # refinement each iterate to convergence), so n_iterations>1 cannot change the
-        # result (verified ARI 1.000) — clamp to 1 to avoid ~2x redundant work. igraph's
-        # n_iterations IS meaningful, so it's honored on that backend below.
+        # Honor the caller's n_iterations (scanpy default 2). One multilevel pass reaches a
+        # fixed point on clean/mid graphs (ARI 1.000 for n_iter 1 vs 2 there), but at ≥~1M
+        # cells the fuzzy graph can be under-converged at a single pass (a 2nd iteration closes
+        # the gap) — so silently clamping to 1 traded quality for speed at the target scale.
         g = Graph.from_scipy(connectivities)
         return gpu_leiden(g, resolution=resolution, random_state=random_state,
-                          n_iterations=1, variant=variant, commit_prob=commit_prob)
+                          n_iterations=n_iterations, variant=variant, commit_prob=commit_prob)
 
     if backend != "igraph":
         raise ValueError(f"unknown backend {backend!r} (gpu|igraph)")
