@@ -89,10 +89,38 @@ def pca(
         U, S, Vt = svds(Xc64, k=n_comps, random_state=random_state)
         order = np.argsort(-S)  # svds returns ascending; reorder descending
         U, S, Vt = U[:, order], S[order], Vt[order]
+    elif solver == "covariance_eigh":
+        # One-pass covariance + dense eigendecomposition — the out-of-core keystone
+        # (rapids-singlecell's Dask PCA). Build the gene×gene covariance, eigh in fp64,
+        # take the top components. Numerically safe here because Xc is already centered.
+        C, S, Vt, U = _covariance_eigh(Xc64, n_samples, n_comps)
     else:
-        raise ValueError(f"unknown solver {solver!r} (full|arpack|randomized)")
+        raise ValueError(f"unknown solver {solver!r} (full|arpack|randomized|covariance_eigh)")
 
     return _finalize(U, S, Vt, n_samples, n_comps, total_var)
+
+
+def _eigh_components(cov: np.ndarray, n_samples: int, n_comps: int):
+    """Top-``n_comps`` (S, Vt) from a fp64 gene×gene covariance via symmetric eigh.
+
+    Shared by the in-core ``covariance_eigh`` solver and the streaming PCA. Returns
+    descending singular values ``S`` and components ``Vt`` (n_comps × genes); tiny
+    negative eigenvalues from roundoff are clamped to 0.
+    """
+    w, V = np.linalg.eigh(cov)                 # ascending eigenpairs of a symmetric PSD matrix
+    w = np.clip(w[::-1], 0.0, None)            # → descending, clamp roundoff negatives
+    V = V[:, ::-1]
+    S = np.sqrt(w * (n_samples - 1))           # singular values of the centered data
+    return S[:n_comps], V[:, :n_comps].T
+
+
+def _covariance_eigh(Xc64: np.ndarray, n_samples: int, n_comps: int):
+    """In-core covariance-eigh: C = XcᵀXc/(n−1), top components, scores U = Xc·V/S."""
+    C = (Xc64.T @ Xc64) / (n_samples - 1)
+    S, Vt = _eigh_components(C, n_samples, n_comps)
+    Sk = np.where(S == 0, 1.0, S)
+    U = (Xc64 @ Vt.T) / Sk                     # normalized scores (U·S = projection)
+    return C, S, Vt, U
 
 
 def _ortho(Z):
