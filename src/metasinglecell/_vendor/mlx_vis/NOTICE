@@ -1,6 +1,16 @@
-This directory vendors a single module from the `mlx-vis` project:
+This directory vendors several modules from the `mlx-vis` project (mlx-vis 0.7.0):
 
-    nndescent.py  —  copied verbatim from mlx_vis/_nndescent/nndescent.py (mlx-vis 0.7.0)
+    nndescent.py  —  copied verbatim from mlx_vis/_nndescent/nndescent.py
+    normalize.py  —  copied verbatim from mlx_vis/_normalize.py
+    knn.py        —  from mlx_vis/_knn.py; only the internal import was rewritten to be
+                     relative (`from .nndescent import NNDescent`)
+    tsne.py       —  from mlx_vis/_tsne/tsne.py; internal imports rewritten to be relative,
+                     plus a one-line bugfix (bind `X_mx` before the PCA-init block so
+                     fit_transform does not raise UnboundLocalError when pca_dim is None or
+                     the input dim <= pca_dim). The patch is marked `VENDOR PATCH
+                     (metasinglecell)` in the source.
+    umap.py       —  from mlx_vis/_umap/umap.py; only the internal imports were rewritten to
+                     be relative (`from .normalize ...`, `from .knn ...`)
 
 Original work Copyright Han Xiao (github.com/hanxiao/mlx-vis), licensed under the
 Apache License, Version 2.0 (see the LICENSE file in this directory).
@@ -11,8 +21,11 @@ Apache License, Version 2.0 (see the LICENSE file in this directory).
   Paper   : arXiv:2603.04035
 
 Vendored into metal-SingleCell (rather than taken as a runtime dependency) to keep the
-dependency footprint minimal; the file is used unmodified. metal-SingleCell adapts its
-output at call sites (over-build + self-prepend in metasinglecell.neighbors) but does not
-modify this vendored source.
+dependency footprint minimal. metal-SingleCell also adapts vendored outputs at its own call
+sites without modifying these files: `metasinglecell.neighbors` over-builds + self-prepends
+the NNDescent graph; `metasinglecell.embedding.umap` drives the vendored UMAP optimizer
+(`_spectral_init` + `_optimize`) with our own prebuilt connectivity graph; and
+`metasinglecell.tools.tsne` calls the vendored TSNE as its default backend.
 
-Changes to the vendored file: none.
+Changes to the vendored files: as itemized above (relative-import rewrites throughout; the
+tsne.py UnboundLocalError bugfix). No algorithmic changes.
