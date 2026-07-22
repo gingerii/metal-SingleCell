@@ -82,18 +82,11 @@ All benchmarks below were measured on a single laptop:
 ## Speedups vs CPU
 
 Speedup = CPU reference time ÷ our GPU time, **both on the same M3 Max** (vs scanpy / scikit-learn /
-squidpy / igraph / harmonypy / bbknn / scrublet). Methodology: warm-up (defeats MLX first-call kernel
-compile), best-of-N, on **real data** (PBMC 3k, a 1.3 M-neuron atlas at 50k/100k/1M, a 2 M-cell Xenium
-cohort). Clustering is timed **algorithm-only** — the kNN graph is pre-built for *both* sides.
-`–` = not run at that size; values in parentheses are our runtime in seconds where a CPU reference is
-impractical at that scale.
-
-Sizes are cells: **2k–2M are the 1.3 M-neuron atlas** (sub-/over-sampled) and the **2 M-cell Xenium
-cohort** — one consistent data family across the table.
-
-One table, every accelerated function. Speedup = CPU reference wall time ÷ ours (higher = GPU faster);
-**bold** highlights a few standout results. `–` = not run at that size; `(N s)` = our runtime in seconds
-where a CPU reference is impractical at that scale. Rows are grouped by pipeline stage.
+igraph / harmonypy / bbknn / scrublet). Methodology: warm-up (defeats MLX first-call kernel compile),
+best-of-N, on **real data**. Clustering is timed **algorithm-only** (kNN graph pre-built for both sides).
+Sizes are cells: **2k–2M are the 1.3 M-neuron atlas** (sub-/over-sampled) plus a **2 M-cell Xenium
+cohort** — one data family, rows grouped by pipeline stage. **bold** = a standout; `–` = not run;
+`(N s)` = our runtime where a CPU reference is impractical at that scale.
 
 | function | 2k | 50k | 100k | 1M | 2M | accuracy / notes |
 |----------|---:|----:|-----:|---:|---:|:--|
@@ -158,24 +151,17 @@ All five win and hold with scale, and keep running at 253k where squidpy's permu
 become impractical. `co_occurrence` also scales past the n² memory wall via a tiled device-atomic-histogram
 kernel.
 
-◆ **spatial_neighbors** was formerly the one loss (brute-force O(n²), OOM past ~120k). It now uses a
-**uniform-grid (cell-list) spatial index**: points are binned so each cell holds ~a few·k points, and a
-custom Metal kernel has each query scan only its 3×3 (2-D) / 3×3×3 (3-D) cell block — exact (completeness
-guarantee + fp32 brute fallback) and O(n). It **beats squidpy's KD-tree at every scale** and clears the
-wall: **2M cells in 1.27 s (1.8× vs sklearn)**. This also fixed a latent correctness bug — the old brute
-path ranked distances in fp16, which corrupts on raw µm/bin coordinates (>2048 exceeds fp16's integer-exact
-limit). NNDescent is still *not* applicable here: it needs high-dimensional embeddings, and on 2-D
-coordinates its recall collapses to ~6%.
+◆ **spatial_neighbors** was formerly the one loss (brute-force O(n²), OOM past ~120k); a uniform-grid
+spatial index (see *What was solved*) made it exact and O(n), clearing the wall (**2M cells in 1.27 s**).
+NNDescent is *not* applicable here — on 2-D coordinates its recall collapses to ~6%.
 
 Clustering crosses over with cell count: **Louvain wins from ~50k up (58.6× on the real 986k-neuron
 graph)**, and **Leiden — after an O(degree) SIMD-group kernel rewrite + vertex pruning — went from a
 catastrophic 0.05× to a 4.1× end-to-end speedup, winning at every scale ≥50k (4.8× vs igraph on the real
 986k graph)** — see *What was solved*.
 
-**Leiden quality/speed operating points.** The user-facing `msc.tl.leiden` defaults to
-`n_iterations=2` (matching scanpy), which reaches igraph-parity modularity (Q 0.8586 vs igraph 0.8588 on
-the 986k graph) at ~2.6× vs igraph. The `n_iterations=1` fast path is ~4.8× at Q 0.8504 (~1% under
-igraph). Both are valid; pick speed or exact-parity per run.
+**Leiden operating points.** `msc.tl.leiden` defaults to `n_iterations=2` (scanpy parity) — igraph-parity
+modularity at ~2.6×; `n_iterations=1` is the ~4.8× speed point at ~1% lower modularity. Pick per run.
 
 ### Accuracy
 
@@ -213,21 +199,17 @@ run in CI (a CPU lane + a self-hosted Metal-GPU lane).
   integration was rewritten to run every step on-GPU — an analytic block-inverse correction (no linear
   solver), a GPU k-means init, and GPU L2-norms — turning a 0.07–0.59× loss into a **6.3× win at 50k /
   2.2× at 100k**, mixing quality (iLISI) matching or beating harmonypy.
-- **Out-of-core front-end (streaming from disk)** — the sparse, memory-bound front-end
-  (QC → normalize → log1p → HVG → scale → PCA) streams cell-axis row-blocks from a chunked on-disk zarr
-  store, so peak memory is bounded by one block, not the cell count. The **full 1,306,127 × 27,998 atlas
-  (2.6 B non-zeros) — which OOMs an in-core run — completes end-to-end in ~300 s at 25.6 GB peak on a
-  48 GB laptop.** PCA uses a single-pass covariance-eigh solver (rapids-singlecell's Dask-PCA choice).
-  See [*Out-of-core*](#out-of-core-atlas-scale-on-a-laptop).
+- **Out-of-core front-end (streaming from disk)** — the sparse front-end streams row-blocks from a
+  chunked zarr store, so the **full 1.3 M-neuron atlas (2.6 B non-zeros) — which OOMs in-core — completes
+  in ~300 s at 25.6 GB peak** on a 48 GB laptop. See [*Out-of-core*](#out-of-core-atlas-scale-on-a-laptop).
 - **Validated at atlas scale** — a complete 1 M-cell workflow (and every function through 2 M cells)
   runs end-to-end on a 48 GB laptop; the full 28k-gene 1.3 M-neuron atlas runs out-of-core.
 
 ## Out-of-core: atlas-scale on a laptop
 
-The sparse front-end can run on a dataset whose full expression matrix does **not** fit in unified
-memory, by streaming cell-axis row-blocks from a chunked on-disk **zarr** store. Peak memory is bounded
-by one block plus small accumulators — not the cell count — so datasets that OOM an in-core run go
-through on the same 48 GB laptop.
+The sparse front-end runs on datasets whose full expression matrix does **not** fit in unified memory, by
+streaming cell-axis row-blocks from a chunked on-disk **zarr** store — peak memory is bounded by one block,
+not the cell count.
 
 ```bash
 # one-time: convert an .h5ad / 10x .h5 to a chunked-zarr store
@@ -274,16 +256,8 @@ implementation (scanpy / squidpy / `backend="igraph"`) when:**
   launch-latency-bound and CPU harmonypy is sub-second there anyway. Mixing quality matches/beats
   harmonypy at every scale.
 
-**No longer CPU-favored (these changed):**
-- **k-nearest-neighbors at scale** — `neighbors` now uses a GPU NN-descent (vendored mlx-vis) as the
-  default >30k backend, replacing the old CPU-pynndescent fallback: recall matches/beats it while
-  running 4.7–6.6× faster across 50k–1M with reproducible wall time. `bbknn`'s top-k rewrite flips its
-  50k and 100k cases from losses (0.66× / 0.41×) to wins (1.7× / 1.3×).
-- **t-SNE at every scale** — the vendored mlx-vis GPU t-SNE (FFT-interpolation repulsion) replaces the
-  old sklearn Barnes-Hut delegation, winning ~2× at 2k–3k and ~7× at 50k–100k.
-- **`spatial_neighbors` (squidpy `gr`)** — a uniform-grid (cell-list) spatial index replaced the brute
-  O(n²) kNN: now exact and O(n), winning 1.1–3.9× across the platform ladder and clearing the old wall
-  (2M cells in 1.27 s, 1.8× vs sklearn KD-tree; brute OOM'd past ~120k).
+(kNN, t-SNE, and `spatial_neighbors` were formerly CPU-favored and no longer are — see the tables and
+*What was solved*.)
 
 Rule of thumb: the M3 GPU wins on **parallel-arithmetic, bandwidth-bound** work (and on clustering /
 kNN / integration once the data is large enough to amortize launch overhead), and loses on
