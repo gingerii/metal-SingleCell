@@ -11,28 +11,34 @@ from __future__ import annotations
 import numpy as np
 
 
-def spatial_neighbors(coords, n_neighs: int = 6):
+def spatial_neighbors(coords, n_neighs: int = 6, symmetric: bool = False):
     """Spatial connectivity graph from coordinates (squidpy ``gr.spatial_neighbors``).
 
-    KNN on the spatial coordinates (GPU brute-force), symmetrized, returned as a
-    scipy CSR adjacency (binary weights).
+    Exact kNN on the spatial coordinates, returned as a scipy CSR adjacency (binary
+    weights). By default this matches squidpy's generic-coordinate convention exactly:
+    the **directed** k-NN, ``n_neighs`` edges per row, self excluded (squidpy's
+    ``spatial_connectivities`` is likewise directed, ``nnz/n = n_neighs``). Pass
+    ``symmetric=True`` for the undirected union ``(A + Aᵀ)``.
 
-    NB: this deliberately uses the exact brute-force GPU kNN, NOT the ``_knn``
-    dispatcher's NNDescent path. NNDescent is a high-dimensional-embedding method
-    and fails on 2-D spatial coordinates (measured recall ~6% vs exact), so it is
-    the wrong tool here; a GPU spatial index (grid/KD-tree) would be the right
-    O(n log n) accelerator for large sections.
+    NB: this uses ``_knn_grid`` — a uniform-grid (cell-list) spatial index — NOT the
+    high-dim ``_knn`` dispatcher's NNDescent path. NNDescent is a high-dimensional-
+    embedding method and fails on 2-D spatial coordinates (measured recall ~6% vs
+    exact). The grid index is the right O(n) accelerator for low-dim point data: each
+    cell holds ~a few·k points, so a query scans only its 3×3 (2-D) / 3×3×3 (3-D) cell
+    block. Results are exact (grid completeness check + fp32 brute fallback) and scale
+    past the O(n²) brute wall. See SPATIAL_KNN_investigation.md.
     """
     import scipy.sparse as sp
 
-    from .neighbors import _knn_gpu
+    from .neighbors import _knn_grid
 
-    knn_idx, _ = _knn_gpu(np.asarray(coords, dtype=np.float32), n_neighs + 1)
+    knn_idx, _ = _knn_grid(np.asarray(coords, dtype=np.float32), n_neighs + 1)
     n = coords.shape[0]
     rows = np.repeat(np.arange(n), n_neighs)
-    cols = knn_idx[:, 1:].ravel()                      # exclude self
+    cols = knn_idx[:, 1:].ravel()                      # exclude self (self is column 0)
     A = sp.csr_matrix((np.ones(rows.size, np.float32), (rows, cols)), shape=(n, n))
-    A = ((A + A.T) > 0).astype(np.float32)             # symmetric, binary
+    if symmetric:
+        A = ((A + A.T) > 0).astype(np.float32)         # undirected union
     return A.tocsr()
 
 

@@ -41,10 +41,9 @@ REF_CAP = {
     "ligrec": 100_000,                # permutation-heavy
     "calculate_niche": 100_000,       # squidpy neighborhood flavor runs leiden
 }
-# Our brute-force GPU kNN is O(n²) → spatial_neighbors OOMs past ~120k (the grid-hash follow-up
-# target). Above this we record ours as NA rather than crash. The graph the downstream functions
-# (autocorr/niche) consume is built with squidpy's KD-tree, so they still run at scale.
-OURS_CAP = {"spatial_neighbors": 120_000}
+# spatial_neighbors now uses the uniform-grid (cell-list) index (_knn_grid) — exact and O(n), so it
+# scales to 2M (the old brute O(n²) OOM'd past ~120k). No ours-cap needed anymore.
+OURS_CAP = {}
 
 
 def best(fn, reps, warmup=1):

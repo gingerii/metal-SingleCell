@@ -98,30 +98,36 @@ Xenium (63,173) → MERFISH (81,452) → Xenium-breast (253,029). Matched on bot
 (squidpy's KD-tree graph feeds both autocorr/niche), same gene set (200), same `n_perms=100`, same
 interval count (50), same LR pairs.
 
-| function | Visium 2.7k | Stereo 19k | Xenium 63k | MERFISH 81k | Xenium 253k |
-|----------|---:|---:|-----:|-----:|-----:|
-| spatial_autocorr (Moran) | 80.2× | 62.2× | 56.9× | 49.0× | (7.5 s)² |
-| spatial_autocorr (Geary) | 78.5× | 47.0× | 41.5× | 41.5× | (9.7 s)² |
-| co_occurrence | 13.0× | 18.8× | 17.0× | 16.6× | (82 s)² |
-| calculate_niche | 11.9× | 110× | 89× | **123×** | (0.14 s)² |
-| ligrec | 15.3× | 5.6× | 4.6× | 7.0× | (0.65 s)² |
-| spatial_neighbors | 2.0× | 0.72× | 0.20× | 0.19× | (OOM)⁑ |
+| function | Visium 2.7k | Stereo 19k | Xenium 63k | MERFISH 81k | Xenium 253k | Xenium 2M |
+|----------|---:|---:|-----:|-----:|-----:|-----:|
+| spatial_autocorr (Moran) | 80.2× | 62.2× | 56.9× | 49.0× | (7.5 s)² | — |
+| spatial_autocorr (Geary) | 78.5× | 47.0× | 41.5× | 41.5× | (9.7 s)² | — |
+| co_occurrence | 13.0× | 18.8× | 17.0× | 16.6× | (82 s)² | — |
+| calculate_niche | 11.9× | 110× | 89× | **123×** | (0.14 s)² | — |
+| ligrec | 15.3× | 5.6× | 4.6× | 7.0× | (0.65 s)² | — |
+| spatial_neighbors | 1.5× | 3.9× | 2.1× | 3.2× | 1.1× | **1.8×**⁑ |
 
-- **Four of five win large and hold with scale.** `spatial_autocorr` (Moran/Geary) is the biggest —
-  40–80× — because squidpy runs the 100 permutations in numba on CPU while ours does them as batched
-  GPU matmuls on the sparse neighbor graph. `co_occurrence` is a steady **13–19×** (the tiled
-  device-atomic-histogram kernel; at 63k the squidpy ref is 86 s). `calculate_niche` is **89–123×** (a
-  single SpMM composition + GPU k-means vs squidpy's neighborhood-composition + leiden — different
-  niche-clustering backend, so it is a composition-matched, not identical-work, comparison). `ligrec` is
-  4.6–15× (permutation cluster-mean scores).
+- **All five now win.** `spatial_autocorr` (Moran/Geary) is the biggest — 40–80× — because squidpy runs
+  the 100 permutations in numba on CPU while ours does them as batched GPU matmuls on the sparse neighbor
+  graph. `co_occurrence` is a steady **13–19×** (the tiled device-atomic-histogram kernel; at 63k the
+  squidpy ref is 86 s). `calculate_niche` is **89–123×** (a single SpMM composition + GPU k-means vs
+  squidpy's neighborhood-composition + leiden — different niche-clustering backend, so it is a
+  composition-matched, not identical-work, comparison). `ligrec` is 4.6–15× (permutation cluster-mean
+  scores).
 - **They keep running at 253k where squidpy is impractical** (its permutation/pairwise refs exceed the
   100k cap → ours-only wall time: Moran 7.5 s, co_occurrence 82 s, niche 0.14 s).
-- ⁑ **`spatial_neighbors` is the one loss** — it uses exact **brute-force O(n²)** GPU kNN, so it wins only
-  at tiny n (2.0× @2.7k) and degrades to 0.72×/0.20×/0.19× (19k/63k/81k), then OOMs past ~120k. squidpy
-  uses a KD-tree (O(n log n)) — the right tool for 2-D. The expression-space NNDescent upgrade does **not**
-  transfer: NNDescent needs high-dimensional embeddings and its recall collapses to **~6% on 2-D
-  coordinates** (measured), so it is not a valid substitute. The correct accelerator is a GPU spatial
-  index (a 2-D grid-hash) — a planned follow-up, not a reroute.
+- ⁑ **`spatial_neighbors` was the one loss — now fixed.** It previously used brute-force O(n²) GPU kNN
+  (0.20–0.72× at 19–81k, OOM past ~120k). It now uses a **uniform-grid (cell-list) spatial index**
+  (`_knn_grid`): points are binned into a grid sized for ~a few·k points/cell, and each query scans only
+  its 3×3 (2-D) / 3×3×3 (3-D) cell block via a custom Metal kernel (one thread/query, register top-k) —
+  **exact** (grid-completeness guarantee + fp32 brute fallback) and O(n). Result: it **beats squidpy's
+  KD-tree at every scale** (1.1–3.9×) and clears the wall — **2M cells in 1.27 s (1.8× vs sklearn)** where
+  brute OOM'd. Two findings baked in: (1) NNDescent still does **not** transfer to spatial (recall ~6% on
+  2-D coords — it needs high-dim embeddings); (2) the old brute path was also **numerically wrong** for
+  spatial, not just slow — its fp16 distance ranking corrupts on raw µm/bin coordinates (values > 2048
+  exceed fp16's integer-exact limit), so the grid's fp32 arithmetic fixes correctness too. The output
+  adjacency now matches squidpy's directed k-NN convention (edge Jaccard 0.997–1.000; bit-identical at
+  63k). See `SPATIAL_KNN_investigation.md`.
 
 ## Three regimes (the honest verdict)
 1. **WINS, scale up — parallel-arithmetic ops** (bandwidth-bound, the M3's sweet spot): HVG

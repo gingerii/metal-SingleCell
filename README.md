@@ -152,15 +152,19 @@ references run for minutes-to-hours or OOM).
 | co_occurrence | 13.0× | 18.8× | 17.0× | 16.6× | (82 s) | correlation 1.000 |
 | calculate_niche | 11.9× | 110× | 89× | **123×** | (0.14 s) | composition-matched |
 | ligrec | 15.3× | 5.6× | 4.6× | 7.0× | (0.65 s) | 10 pairs, `n_perms=100` |
-| spatial_neighbors ◆ | 2.0× | 0.72× | 0.20× | 0.19× | NA | brute O(n²) ◆ |
+| spatial_neighbors ◆ | 1.5× | 3.9× | 2.1× | 3.2× | 1.1× | exact, Jaccard ≥0.997 ◆ |
 
-Four of the five win large and hold with scale, and keep running at 253k where squidpy's
-permutation/pairwise references become impractical. `co_occurrence` also scales past the n² memory wall via
-a tiled device-atomic-histogram kernel.
+All five win and hold with scale, and keep running at 253k where squidpy's permutation/pairwise references
+become impractical. `co_occurrence` also scales past the n² memory wall via a tiled device-atomic-histogram
+kernel.
 
-◆ **spatial_neighbors** is the one loss: it does an exact brute-force O(n²) kNN on the coordinates while
-squidpy uses a KD-tree, so it wins only at small n and OOMs past ~120k. A GPU spatial-index (grid-hash) is
-the in-progress fix. NNDescent is *not* applicable here — it needs high-dimensional embeddings, and on 2-D
+◆ **spatial_neighbors** was formerly the one loss (brute-force O(n²), OOM past ~120k). It now uses a
+**uniform-grid (cell-list) spatial index**: points are binned so each cell holds ~a few·k points, and a
+custom Metal kernel has each query scan only its 3×3 (2-D) / 3×3×3 (3-D) cell block — exact (completeness
+guarantee + fp32 brute fallback) and O(n). It **beats squidpy's KD-tree at every scale** and clears the
+wall: **2M cells in 1.27 s (1.8× vs sklearn)**. This also fixed a latent correctness bug — the old brute
+path ranked distances in fp16, which corrupts on raw µm/bin coordinates (>2048 exceeds fp16's integer-exact
+limit). NNDescent is still *not* applicable here: it needs high-dimensional embeddings, and on 2-D
 coordinates its recall collapses to ~6%.
 
 Clustering crosses over with cell count: **Louvain wins from ~50k up (58.6× on the real 986k-neuron
@@ -197,6 +201,11 @@ run in CI (a CPU lane + a self-hosted Metal-GPU lane).
 - **A fused co-occurrence kernel** — a tiled device-atomic histogram that matches squidpy exactly,
   runs **13–19× faster** across real Visium/Stereo-seq/Xenium/MERFISH data (measured), and scales past
   the n² memory wall to 250k+ cells where squidpy is impractical.
+- **A GPU uniform-grid spatial index for `spatial_neighbors`** — a cell-list kNN (custom Metal kernel,
+  one thread/query scanning its 3×3 / 3×3×3 cell block) that replaced the brute-force O(n²) path: exact
+  (grid-completeness guarantee + fp32 fallback) and O(n), **beating squidpy's KD-tree at every scale**
+  (1.1–3.9×) and doing **2M cells in 1.27 s** where brute OOM'd past ~120k. It also fixed a latent
+  fp16-ranking bug that corrupted neighbors on large-magnitude coordinates.
 - **GPU-native kNN, t-SNE, and Harmony** — the neighbor graph (>30k) now builds on a GPU **NN-descent**
   (vendored from [mlx-vis](https://github.com/hanxiao/mlx-vis)), retiring the CPU-pynndescent fallback
   (recall-matched at ~0.97, **4.7–6.6× faster** across 50k–1M, reproducible wall time); **t-SNE** runs
@@ -272,6 +281,9 @@ implementation (scanpy / squidpy / `backend="igraph"`) when:**
   50k and 100k cases from losses (0.66× / 0.41×) to wins (1.7× / 1.3×).
 - **t-SNE at every scale** — the vendored mlx-vis GPU t-SNE (FFT-interpolation repulsion) replaces the
   old sklearn Barnes-Hut delegation, winning ~2× at 2k–3k and ~7× at 50k–100k.
+- **`spatial_neighbors` (squidpy `gr`)** — a uniform-grid (cell-list) spatial index replaced the brute
+  O(n²) kNN: now exact and O(n), winning 1.1–3.9× across the platform ladder and clearing the old wall
+  (2M cells in 1.27 s, 1.8× vs sklearn KD-tree; brute OOM'd past ~120k).
 
 Rule of thumb: the M3 GPU wins on **parallel-arithmetic, bandwidth-bound** work (and on clustering /
 kNN / integration once the data is large enough to amortize launch overhead), and loses on

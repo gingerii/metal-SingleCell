@@ -132,6 +132,182 @@ def _knn_gpu(X: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
     return knn_indices, knn_dists
 
 
+# Uniform-grid (cell-list) exact k-NN for LOW-dimensional point data — the right accelerator for
+# spatial coordinates, where the high-dim ANN path (NNDescent) is degenerate (~6% recall on 2-D) and
+# brute-force is O(n²). Points are binned into a uniform grid sized so each cell holds ~a few·k points;
+# each query then only scans its own cell + the surrounding ring (3×3 in 2-D / 3×3×3 in 3-D) — O(1)
+# candidates per query, O(n) total — via the kernel below (one thread per query, register top-k like
+# _topk_rows). EXACT: after searching Chebyshev radius 1, any unexamined point is ≥ cell_size away, so a
+# query whose k-th neighbour distance ≤ cell_size is provably complete; the rare failures (sparse edges,
+# too-small a block) are recomputed by exact brute force. See SPATIAL_KNN_investigation.md.
+_GRID_KNN_SOURCE = """
+    uint q = thread_position_in_grid.x;
+    int n  = iparams[0];
+    int d  = iparams[1];
+    int K  = iparams[2];
+    int gx = iparams[3];
+    int gy = iparams[4];
+    int gz = iparams[5];
+    float ox = fparams[0];
+    float oy = fparams[1];
+    float oz = fparams[2];
+    float cs = fparams[3];
+
+    float qx = coords[q * d + 0];
+    float qy = coords[q * d + 1];
+    float qz = (d == 3) ? coords[q * d + 2] : 0.0f;
+    int cx = (int)floor((qx - ox) / cs); if (cx < 0) cx = 0; if (cx >= gx) cx = gx - 1;
+    int cy = (int)floor((qy - oy) / cs); if (cy < 0) cy = 0; if (cy >= gy) cy = gy - 1;
+    int cz = (d == 3) ? (int)floor((qz - oz) / cs) : 0;
+    if (cz < 0) cz = 0; if (cz >= gz) cz = gz - 1;
+
+    float vals[32]; int inds[32];
+    for (int i = 0; i < K; ++i) { vals[i] = 1e30f; inds[i] = -1; }
+    uint maxp = 0;                                     // position of the current largest of the K
+
+    int dzlo = (d == 3) ? -1 : 0;
+    int dzhi = (d == 3) ?  1 : 0;
+    for (int dz = dzlo; dz <= dzhi; ++dz) {
+        int nz = cz + dz; if (nz < 0 || nz >= gz) continue;
+        for (int dy = -1; dy <= 1; ++dy) {
+            int ny = cy + dy; if (ny < 0 || ny >= gy) continue;
+            for (int dx = -1; dx <= 1; ++dx) {
+                int nx = cx + dx; if (nx < 0 || nx >= gx) continue;
+                int cell = (nz * gy + ny) * gx + nx;
+                uint s = cell_start[cell];
+                uint e = cell_start[cell + 1];
+                for (uint p = s; p < e; ++p) {
+                    int pt = sorted_pts[p];
+                    float ddx = coords[pt * d + 0] - qx;
+                    float ddy = coords[pt * d + 1] - qy;
+                    float dist2 = ddx * ddx + ddy * ddy;
+                    if (d == 3) { float ddz = coords[pt * d + 2] - qz; dist2 += ddz * ddz; }
+                    if (dist2 < vals[maxp]) {
+                        vals[maxp] = dist2; inds[maxp] = pt;
+                        float m = vals[0]; uint mp = 0;    // rescan for the new largest
+                        for (int i = 1; i < K; ++i) { if (vals[i] > m) { m = vals[i]; mp = i; } }
+                        maxp = mp;
+                    }
+                }
+            }
+        }
+    }
+    for (uint i = 0; i < (uint)K; ++i) { out_idx[q * K + i] = inds[i]; out_d2[q * K + i] = vals[i]; }
+"""
+
+
+def _knn_grid(coords: np.ndarray, k: int, min_n: int = 4_000) -> tuple[np.ndarray, np.ndarray]:
+    """Exact self-inclusive k-NN on low-dim (2-D/3-D) point data via a uniform-grid cell list.
+
+    Drop-in for ``_knn_gpu`` on spatial coordinates: same ``(knn_indices, knn_dists)`` contract
+    (shape ``(n, k)``, self first, sorted by distance) but O(n) instead of O(n²). Below ``min_n`` or
+    for ``d > 3`` / ``k > 32`` / degenerate geometry it defers to the exact fp32 brute path. Provably
+    exact: grid results whose k-th distance ≤ cell_size are complete, the rest recomputed by brute.
+
+    NB the fallback is the **fp32-exact** brute (``_exact_knn_rows``), NOT ``_knn_gpu``: the latter ranks
+    on fp16, which corrupts on raw spatial coordinates (µm/bin values in the thousands exceed fp16's
+    2048 integer-exact limit → wrong neighbours on Visium/Stereo-seq lattices). Spatial kNN is fp32
+    throughout.
+    """
+    import mlx.core as mx
+
+    X = np.asarray(coords, dtype=np.float32)
+    n, d = X.shape
+    if n <= min_n or d not in (2, 3) or k > _TOPK_KERNEL_MAX_K or k >= n:
+        return _exact_knn_rows(X, np.arange(n), k)
+
+    # ---- choose a cell size targeting ~a few·k points per cell (uniform-ish spatial density) ----
+    mins = X.min(0); maxs = X.max(0)
+    extent = (maxs - mins).astype(np.float64)
+    nz = extent > 0
+    if not nz.any():                                   # all points coincide → brute
+        return _exact_knn_rows(X, np.arange(n), k)
+    eff_d = int(nz.sum())
+    density = n / float(np.prod(extent[nz]))           # points per unit (area/volume) over occupied axes
+    target = max(2 * k, 8)                              # ~candidates guaranteeing the 3×3 block holds k
+    cell = (target / density) ** (1.0 / eff_d)
+    # cap the dense cell_start table (gx·gy·gz+1) at ~4n by coarsening if the bbox is sparse/elongated
+    for _ in range(8):
+        g = np.where(nz, np.ceil(extent / cell).astype(np.int64) + 1, 1)
+        ncells = int(np.prod(g))
+        if ncells <= 4 * n + 16:
+            break
+        cell *= (ncells / (4.0 * n + 16.0)) ** (1.0 / eff_d)
+    gx, gy, gz = (int(g[0]), int(g[1]), int(g[2]) if d == 3 else 1)
+    origin = mins.astype(np.float32)
+
+    # ---- bin points → cell ids → sorted point list + CSR-style cell offsets ----
+    ci = np.floor((X - origin) / cell).astype(np.int64)
+    ci = np.clip(ci, 0, g[:d] - 1)
+    if d == 3:
+        cell_id = (ci[:, 2] * gy + ci[:, 1]) * gx + ci[:, 0]
+    else:
+        cell_id = ci[:, 1] * gx + ci[:, 0]
+    order = np.argsort(cell_id, kind="stable").astype(np.int32)
+    counts = np.bincount(cell_id, minlength=ncells)
+    cell_start = np.empty(ncells + 1, dtype=np.uint32)
+    cell_start[0] = 0
+    cell_start[1:] = np.cumsum(counts)
+
+    # ---- query kernel: one thread per point, scan own cell + ring, register top-k ----
+    kernel = mx.fast.metal_kernel(
+        name="grid_knn",
+        input_names=["coords", "sorted_pts", "cell_start", "iparams", "fparams"],
+        output_names=["out_idx", "out_d2"],
+        source=_GRID_KNN_SOURCE,
+    )
+    iparams = mx.array([n, d, k, gx, gy, gz], dtype=mx.int32)
+    fparams = mx.array([float(origin[0]), float(origin[1]),
+                        float(origin[2]) if d == 3 else 0.0, float(cell)], dtype=mx.float32)
+    out_idx, out_d2 = kernel(
+        inputs=[mx.array(X), mx.array(order), mx.array(cell_start), iparams, fparams],
+        grid=(n, 1, 1), threadgroup=(min(256, n), 1, 1),
+        output_shapes=[(n, k), (n, k)], output_dtypes=[mx.int32, mx.float32],
+    )
+    mx.eval(out_idx, out_d2)
+    idx = np.asarray(out_idx)
+    d2 = np.asarray(out_d2)
+
+    order_k = np.argsort(d2, axis=1)                   # sort the k by distance, self first
+    idx = np.take_along_axis(idx, order_k, axis=1)
+    d2 = np.take_along_axis(d2, order_k, axis=1)
+    dist = np.sqrt(np.maximum(d2, 0.0))
+
+    # ---- exactness: a query is complete iff it found k candidates AND its k-th ≤ cell_size ----
+    complete = (idx[:, -1] >= 0) & (dist[:, -1] <= float(cell))
+    bad = np.flatnonzero(~complete)
+    if bad.size:
+        bi, bd = _exact_knn_rows(X, bad, k)            # exact brute for the rare failures
+        idx[bad] = bi
+        dist[bad] = bd
+    return idx.astype(np.int64), dist.astype(np.float32)
+
+
+def _exact_knn_rows(coords: np.ndarray, rows: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
+    """Exact k-NN (self first) for a subset of query ``rows`` against all points, tiled on the GPU."""
+    import mlx.core as mx
+
+    X = np.asarray(coords, dtype=np.float32)
+    n = X.shape[0]
+    Xg = mx.array(X)
+    sq = mx.sum(Xg * Xg, axis=1)
+    tile = max(1, 256_000_000 // max(n, 1))
+    oi = np.empty((rows.size, k), np.int64)
+    od = np.empty((rows.size, k), np.float32)
+    for s in range(0, rows.size, tile):
+        rb = rows[s:s + tile]
+        Qg = Xg[mx.array(rb.astype(np.int32))]
+        D2 = mx.maximum(mx.sum(Qg * Qg, axis=1)[:, None] + sq[None, :] - 2.0 * (Qg @ Xg.T), 0.0)
+        loc = _topk_rows(D2, k)
+        Dv = mx.take_along_axis(D2, loc, axis=1)
+        mx.eval(loc, Dv)
+        loc = np.asarray(loc); Dv = np.asarray(Dv)
+        o = np.argsort(Dv, axis=1)
+        oi[s:s + tile] = np.take_along_axis(loc, o, axis=1)
+        od[s:s + tile] = np.sqrt(np.maximum(np.take_along_axis(Dv, o, axis=1), 0.0))
+    return oi, od
+
+
 def bbknn(X_pca: np.ndarray, batch, neighbors_within_batch: int = 3,
           random_state: int = 0):
     """Batch-balanced kNN (rapids-singlecell/scanpy ``pp.bbknn``).
