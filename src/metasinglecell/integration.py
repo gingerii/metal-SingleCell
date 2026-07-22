@@ -20,7 +20,9 @@ import numpy as np
 
 def _l2_normalize(M):
     import mlx.core as mx
-    return M / (mx.linalg.norm(M, axis=1, keepdims=True, stream=mx.cpu) + 1e-12)
+    # Row L2-norm on the GPU. (Previously forced onto stream=mx.cpu, which put a
+    # device→host dependency on the hottest path — every assign + centroid update.)
+    return M / (mx.sqrt(mx.sum(M * M, axis=1, keepdims=True)) + 1e-12)
 
 
 def harmonize(Z, batch, n_clusters: int | None = None, sigma: float = 0.1,
