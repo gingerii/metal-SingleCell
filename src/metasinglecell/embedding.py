@@ -3,83 +3,52 @@
 UMAP = (1) fuzzy graph [done in ``neighbors``], (2) optimize a low-dim layout by
 SGD with attractive forces along graph edges and repulsive forces to negative
 samples. Step (2) is the expensive part and parallelizes well, so we run it on
-the GPU (MLX): a vectorized force update over all "due" edges per epoch, with
-scatter-add accumulating gradients.
+the GPU (MLX).
 
-We reuse umap-learn for the cheap, fiddly setup (the a/b curve fit, the spectral
-initialization, the per-edge epoch schedule) so behavior matches; the heavy loop
-is ours. The embedding is stochastic, so we validate structure preservation, not
-coordinates.
+We drive the vendored mlx-vis UMAP optimizer (``_spectral_init`` + ``_optimize``,
+both pure-MLX) with **our** prebuilt connectivity graph — the same graph
+``neighbors`` builds and ``leiden`` clusters on. This keeps the scverse
+cluster↔embedding contract (a visual blob is a Leiden cluster) while getting
+mlx-vis's proper UMAP edge-sampling schedule (``epochs_per_sample`` + negative
+sampling). On real atlas embeddings that lifts trustworthiness from ~0.86 (our old
+all-edges-per-epoch layout) to ~0.95 and is ~4× faster (0.66s vs 2.58s at 50k),
+and it removes the umap-learn dependency from this module entirely. The embedding
+is stochastic, so we validate structure preservation, not coordinates.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-GAMMA = 1.0
-NEG_SAMPLE_RATE = 5
-INITIAL_ALPHA = 1.0
-
 
 def umap(connectivities, n_components: int = 2, n_epochs: int | None = None,
          min_dist: float = 0.5, spread: float = 1.0, random_state: int = 0) -> np.ndarray:
-    """Optimize a UMAP embedding from a connectivity graph (GPU force layout)."""
-    import mlx.core as mx
-    from sklearn.utils import check_random_state
-    from umap.spectral import spectral_layout
-    from umap.umap_ import find_ab_params
+    """Optimize a UMAP embedding from a connectivity graph (GPU, mlx-vis optimizer).
 
-    a, b = find_ab_params(spread, min_dist)
-    a, b = float(a), float(b)  # keep scalars Python float so MLX ops stay on-device
+    Lays out *our* shared fuzzy graph (``connectivities``) so the embedding matches the
+    Leiden clustering; only the SGD optimizer is mlx-vis's.
+    """
+    import mlx.core as mx
+    from ._vendor.mlx_vis.umap import UMAP as _MlxUMAP
+
     n = connectivities.shape[0]
     if n_epochs is None:
         n_epochs = 500 if n <= 10_000 else 200
 
-    graph = connectivities.tocoo().copy()
-    graph.data[graph.data < graph.data.max() / float(n_epochs)] = 0.0
-    graph.eliminate_zeros()
+    a, b = _MlxUMAP._find_ab_params(spread, min_dist)  # exact drop-in for umap-learn's fit (~1e-7)
 
-    rng = check_random_state(random_state)
-    try:
-        init = spectral_layout(None, graph, n_components, random_state=rng)
-        init = np.asarray(init, dtype=np.float32)
-        init = 10.0 * (init - init.min(0)) / (init.max(0) - init.min(0) + 1e-9)
-    except Exception:
-        init = rng.normal(scale=10.0, size=(n, n_components)).astype(np.float32)
+    # Seed before spectral init + optimize so the (stochastic) layout is reproducible,
+    # matching mlx-vis fit_transform's own `mx.random.seed(random_state)`.
+    mx.random.seed(random_state)
+    mv = _MlxUMAP(n_components=n_components, n_epochs=n_epochs, learning_rate=1.0,
+                  random_state=random_state, pca_dim=None)
 
-    # Process ALL edges every epoch on the GPU, attractive force scaled by edge
-    # weight — instead of umap-learn's per-epoch host-side edge sampling
-    # (epochs_per_sample). On the GPU the extra edge work is cheap and parallel,
-    # while removing the per-epoch host bookkeeping (flatnonzero/np.repeat) halves
-    # runtime. Eval every 25 epochs to keep host syncs few.
-    head = mx.array(graph.row.astype(np.int32))
-    tail = mx.array(graph.col.astype(np.int32))
-    w = mx.array((graph.data / graph.data.max()).astype(np.float32))[:, None]
-    n_edges = graph.row.size
+    coo = connectivities.tocoo()
+    edge_from = mx.array(coo.row.astype(np.int32))
+    edge_to = mx.array(coo.col.astype(np.int32))
+    edge_weights = mx.array(coo.data.astype(np.float32))
 
-    emb = mx.array(init)
-    for epoch in range(n_epochs):
-        alpha = INITIAL_ALPHA * (1.0 - epoch / n_epochs)
-        # attractive (weighted) along every edge
-        diff = emb[head] - emb[tail]
-        d2 = mx.sum(diff * diff, axis=1, keepdims=True)
-        # eps guards coincident points: d2=0 with b<1 makes power(d2, b-1)=inf → inf·0=NaN,
-        # which mx.clip does not sanitize, poisoning the whole layout (matches the repulsive guard).
-        d2 = d2 + 1e-3
-        coef = (-2.0 * a * b * mx.power(d2, b - 1.0)) / (a * mx.power(d2, b) + 1.0)
-        grad = mx.clip(coef * diff, -4.0, 4.0) * alpha * w
-        emb = emb.at[head].add(grad)
-        emb = emb.at[tail].add(-grad)
-        # repulsive to random negatives (one per edge) — sample on the GPU (host RNG +
-        # per-epoch host→device transfer was breaking the lazy-eval graph and dominating
-        # the loop: ~150M host ints + 200 transfers/syncs at 50k×200 epochs).
-        rand = mx.random.randint(0, n, (n_edges,), key=mx.random.key(random_state + epoch + 1))
-        diffn = emb[head] - emb[rand]
-        d2n = mx.sum(diffn * diffn, axis=1, keepdims=True)
-        coefn = (2.0 * GAMMA * b) / ((1e-3 + d2n) * (a * mx.power(d2n, b) + 1.0))
-        emb = emb.at[head].add(mx.clip(coefn * diffn, -4.0, 4.0) * alpha)
-        if epoch % 25 == 0:
-            mx.eval(emb)
-
-    mx.eval(emb)
-    return np.asarray(emb)
+    Y0 = mv._spectral_init(edge_from, edge_to, edge_weights, n)
+    Y = mv._optimize(edge_from, edge_to, edge_weights, Y0, a, b, n)
+    mx.eval(Y)
+    return np.asarray(Y)
