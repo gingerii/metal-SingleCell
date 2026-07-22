@@ -29,6 +29,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/gingerii/metal-SingleCell"
+Documentation = "https://metal-singlecell.readthedocs.io"
 Repository = "https://github.com/gingerii/metal-SingleCell"
 Issues = "https://github.com/gingerii/metal-SingleCell/issues"
 

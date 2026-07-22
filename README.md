@@ -3,6 +3,7 @@
 [![CI](https://github.com/gingerii/metal-SingleCell/actions/workflows/ci.yml/badge.svg)](https://github.com/gingerii/metal-SingleCell/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/metalsinglecell.svg)](https://pypi.org/project/metalsinglecell/)
 [![Python](https://img.shields.io/pypi/pyversions/metalsinglecell.svg)](https://pypi.org/project/metalsinglecell/)
+[![Docs](https://readthedocs.org/projects/metal-singlecell/badge/?version=latest)](https://metal-singlecell.readthedocs.io/en/latest/)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
 <!-- GPU tests: uncomment once a self-hosted Apple-Silicon runner is registered and gpu-parity.yml runs automatically
 [![GPU tests](https://github.com/gingerii/metal-SingleCell/actions/workflows/gpu-parity.yml/badge.svg)](https://github.com/gingerii/metal-SingleCell/actions/workflows/gpu-parity.yml)
@@ -19,6 +20,8 @@ because the M-series GPU has no native sparse-matrix support. This project build
 sparse substrate and the scanpy/squidpy front-end on top of it.
 
 It is a **drop-in API**: swap the import prefix and your existing pipeline runs on the GPU.
+
+**Documentation:** [metal-singlecell.readthedocs.io](https://metal-singlecell.readthedocs.io)
 
 ```python
 import scanpy as sc
