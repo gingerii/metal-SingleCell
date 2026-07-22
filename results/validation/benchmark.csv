@@ -91,3 +91,35 @@ PBMC,2700,bbknn,0.0074,0.0585,7.91,,,per-batch top-k kernel
 1M,1000000,umap,29.0204,NA,NA,,,hybrid layout; ref NA@scale (umap-learn >200k); 188s(old)->29s
 2M,2000000,neighbors,34.8493,NA,NA,,,nndescent; cached atlas PCA emb (full-gene path OOMs @2M; needs XENIUM_H5)
 2M,2000000,umap,53.7012,NA,NA,,,hybrid layout; cached atlas PCA emb
+2.7k,2702,spatial_neighbors,0.0022,0.0043,1.95,,,Visium
+2.7k,2702,spatial_autocorr_moran,0.0725,5.8141,80.22,corr,1.00(v_realspatial),Visium; 200g np=100
+2.7k,2702,spatial_autocorr_geary,0.0693,5.4389,78.53,corr,1.00(v_realspatial),Visium; 200g np=100
+2.7k,2702,co_occurrence,0.0142,0.1839,12.96,corr,1.0000,Visium; 50 intervals
+2.7k,2702,ligrec,0.2048,3.1290,15.28,,,Visium; 10 pairs np=100
+2.7k,2702,calculate_niche,0.0069,0.0828,11.93,composition,exact(v_realspatial),Visium; sq=composition+leiden vs ours composition+kmeans
+19k,19109,spatial_neighbors,0.0365,0.0263,0.72,,,Stereo-seq
+19k,19109,spatial_autocorr_moran,0.4701,29.2573,62.24,corr,1.00(v_realspatial),Stereo-seq; 200g np=100
+19k,19109,spatial_autocorr_geary,0.6289,29.5762,47.03,corr,1.00(v_realspatial),Stereo-seq; 200g np=100
+19k,19109,co_occurrence,0.4583,8.6014,18.77,corr,1.0000,Stereo-seq; 50 intervals
+19k,19109,ligrec,0.5057,2.8284,5.59,,,Stereo-seq; 10 pairs np=100
+19k,19109,calculate_niche,0.0158,1.7461,110.44,composition,exact(v_realspatial),Stereo-seq; sq=composition+leiden vs ours composition+kmeans
+63k,63173,spatial_neighbors,0.4060,0.0819,0.20,,,Xenium
+63k,63173,spatial_autocorr_moran,1.8500,105.3363,56.94,corr,1.00(v_realspatial),Xenium; 200g np=100
+63k,63173,spatial_autocorr_geary,2.5263,104.8867,41.52,corr,1.00(v_realspatial),Xenium; 200g np=100
+63k,63173,co_occurrence,5.0466,85.5738,16.96,corr,1.0000,Xenium; 50 intervals
+63k,63173,ligrec,0.7395,3.3633,4.55,,,Xenium; 10 pairs np=100
+63k,63173,calculate_niche,0.0489,4.3603,89.17,composition,exact(v_realspatial),Xenium; sq=composition+leiden vs ours composition+kmeans
+81k,81452,spatial_neighbors,0.6098,0.1151,0.19,,,MERFISH
+81k,81452,spatial_autocorr_moran,2.3900,117.1706,49.03,corr,1.00(v_realspatial),MERFISH; 200g np=100
+81k,81452,spatial_autocorr_geary,3.0402,126.0749,41.47,corr,1.00(v_realspatial),MERFISH; 200g np=100
+81k,81452,co_occurrence,8.4322,139.8440,16.58,corr,1.0000,MERFISH; 50 intervals
+81k,81452,ligrec,0.3522,2.4627,6.99,,,MERFISH; 10 pairs np=100
+81k,81452,calculate_niche,0.0579,7.1370,123.26,composition,exact(v_realspatial),MERFISH; sq=composition+leiden vs ours composition+kmeans
+253k,253029,spatial_neighbors,,NA,NA,,,Xenium; ours brute O(n²) impractical >120k — grid-hash follow-up
+253k,253029,spatial_autocorr_moran,7.5001,NA,NA,corr,1.00(v_realspatial),Xenium; 200g np=100; squidpy impractical >100k
+253k,253029,spatial_autocorr_geary,9.7489,NA,NA,corr,1.00(v_realspatial),Xenium; 200g np=100; squidpy impractical >100k
+253k,253029,co_occurrence,82.2571,NA,NA,corr,1.0000,Xenium; 50 intervals; squidpy impractical >100k
+253k,253029,ligrec,0.6511,NA,NA,,,Xenium; 10 pairs np=100; squidpy impractical >100k
+253k,253029,calculate_niche,0.1366,NA,NA,composition,exact(v_realspatial),Xenium; sq=composition+leiden vs ours composition+kmeans; squidpy impractical >100k
+1M,1000000,harmonize,31.2979,69.6372,2.22,,,GPU correction+kmeans; synthetic batch; harmonypy reps=1
+1M,1000000,tsne,176.1816,NA,NA,,,mlxvis FFT-interp; sklearn-BH impractical @1M (ours-only)

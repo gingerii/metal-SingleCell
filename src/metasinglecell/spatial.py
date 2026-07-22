@@ -16,6 +16,12 @@ def spatial_neighbors(coords, n_neighs: int = 6):
 
     KNN on the spatial coordinates (GPU brute-force), symmetrized, returned as a
     scipy CSR adjacency (binary weights).
+
+    NB: this deliberately uses the exact brute-force GPU kNN, NOT the ``_knn``
+    dispatcher's NNDescent path. NNDescent is a high-dimensional-embedding method
+    and fails on 2-D spatial coordinates (measured recall ~6% vs exact), so it is
+    the wrong tool here; a GPU spatial index (grid/KD-tree) would be the right
+    O(n log n) accelerator for large sections.
     """
     import scipy.sparse as sp
 

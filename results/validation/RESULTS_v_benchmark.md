@@ -24,12 +24,12 @@ _(Updated to fold in step-2 optimizations: the `from_scipy` transfer fix and `_k
 | neighbors | 2.8⁵ | 4.7⁵ | 4.9⁵ | **6.6**⁵ | (34.8s)²·⁹ | recall~0.97 |
 | umap | 20.9⁶ | **29.6**⁶ | 28.2⁶ | (29s)²·⁶ | (53.7s)²·⁹ | trust 0.86→0.95⁶ |
 | scrublet | **20.3** | 6.4 | – | – | – | AUC 0.95 |
-| t-SNE | 2.2³ | 7.0³ | 6.6³ | – | – | trust~0.98³ |
+| t-SNE | 2.2³ | 7.0³ | 6.6³ | (176s)² | – | trust~0.98³ |
 | draw_graph | 21.5 | NA | NA | – | – | preservation |
 | highly_variable_genes | 3.2 | 25.9 | 32.9 | **15.8**¹ | **49.2** | overlap 1.000 |
-| louvain | 0.14 | 1.77 | 2.94 | **11.63**⁸ | (11.5s)² | Q≥igraph |
-| leiden | 0.05 | 0.30 | 0.37 | 0.90⁸ | (24.5s)² | Q≥igraph |
-| harmonize | 0.15⁴ | **6.3**⁴ | 2.2⁴ | – | – | mixing ≥ harmonypy |
+| louvain | 0.14 | 21.9⁸ | 21.0⁸ | 9.7⁸ | (16.1s)² | Q≥igraph |
+| leiden | 0.05 | 4.6⁸ | 3.6⁸ | **3.2**⁸ | 3.5⁸ | Q≥igraph |
+| harmonize | 0.15⁴ | **6.3**⁴ | 2.2⁴ | 2.2⁴ | – | mixing ≥ harmonypy |
 | bbknn | 7.9 | **1.7** | 1.3 | – | – | mixing✓; top-k kernel |
 
 ¹ **After the transfer fix** (`from_scipy` no longer makes redundant dtype copies): normalize @1M
@@ -61,17 +61,19 @@ seeds; synthetic 100k–1M ARI **1.000** vs colored, identical cluster counts. P
 **commit-probability raised 0.5→0.9** (the random half-commit can commit 90% — 10% hold still breaks
 swaps): converges in fewer passes, validated identical quality (real PBMC bestQ 0.7182, synthetic
 ARI 1.000, cp-sweep flat Q). Combined real-neuron speedups (**algorithm-only**,
-see below): Louvain 1M **2.04×→11.63×** (6.0s vs igraph louvain 70s); Leiden 1M **0.15×→0.90×**
-(12.6s vs igraph leiden 11.3s — essentially tied), 100k 0.09×→0.37×, 50k 0.04×→0.30×; 2M louvain
-53→11.5s, leiden 165→24.5s. Unlocked by confirming Metal float-atomics work (prior "no float-atomics"
+see below): Louvain 1M **2.04×→11.63×** (6.0s vs igraph louvain 70s); Leiden 1M **0.15×→0.90×** (fair,
+coloring-free) — and then a further **SIMD-group O(degree) kernel + vertex-pruning + sync-every-4** pass
+(refreshed in `5b3fc7e`) took Leiden all the way to a **win at every scale ≥50k: 50k 4.6×, 100k 3.6×,
+1M 3.2×** (7.5s vs igraph leiden 23.9s), **2M 3.5×**, and **4.8× on the real 986k-neuron graph**
+(2.8s vs 13.5s). Unlocked by confirming Metal float-atomics work (prior "no float-atomics"
 claim was wrong); the coloring-free moves don't strictly need atomics, but the correction reopened
 the design space.
 
 **FAIRNESS FIX (timing methodology):** clustering now times the ALGORITHM ONLY — both our GPU `Graph`
 and the igraph `Graph` are constructed in the prep section, OUTSIDE the timed region. Previously the
 igraph reference built its graph *inside* the timed call (`conn.nonzero()` + `list(zip(...))` over
-~15M edges + `ig.Graph(...)`), which at 1M is seconds and inflated the reference — that had flattered
-our clustering speedups (leiden 1M looked like 1.10× but is 0.90× fairly). All other functions were
+~15M edges + `ig.Graph(...)`), which at 1M is seconds and inflated the reference. With the graph
+pre-built and the SIMD-kernel/pruning rewrite (⁸), Leiden 1M is a fair **3.2×** win. All other functions were
 already timed correctly (each function's prerequisites — PCA embedding, kNN graph — are built in prep
 and excluded; only the function call itself is in the timer). ⁷ **After the Leiden `n_iterations` fix** (default 2→1, gpu backend clamps to 1): our parallel
 Leiden's local-moving AND refinement each iterate to convergence within ONE multilevel pass, so
@@ -89,6 +91,38 @@ Speedups vs umap-learn: 20.9/29.6/28.2× at PBMC/50k/100k (small-N is lower than
 hybrid's spectral-init has more fixed overhead at 2.7k cells, but it is higher quality). `embedding.py`
 is now umap-learn-free (only `fuzzy_simplicial_set` in neighbors.py still uses it).
 
+## Spatial (`gr`) functions — vs squidpy CPU, real multi-platform ladder
+Driver: `validation_notebooks/v_benchmark_spatial.py` (one dataset/process; same warm-up + best-of-N +
+matched-work protocol). Real data spanning platforms and density: Visium (2,702) → Stereo-seq (19,109) →
+Xenium (63,173) → MERFISH (81,452) → Xenium-breast (253,029). Matched on both sides: same spatial graph
+(squidpy's KD-tree graph feeds both autocorr/niche), same gene set (200), same `n_perms=100`, same
+interval count (50), same LR pairs.
+
+| function | Visium 2.7k | Stereo 19k | Xenium 63k | MERFISH 81k | Xenium 253k |
+|----------|---:|---:|-----:|-----:|-----:|
+| spatial_autocorr (Moran) | 80.2× | 62.2× | 56.9× | 49.0× | (7.5 s)² |
+| spatial_autocorr (Geary) | 78.5× | 47.0× | 41.5× | 41.5× | (9.7 s)² |
+| co_occurrence | 13.0× | 18.8× | 17.0× | 16.6× | (82 s)² |
+| calculate_niche | 11.9× | 110× | 89× | **123×** | (0.14 s)² |
+| ligrec | 15.3× | 5.6× | 4.6× | 7.0× | (0.65 s)² |
+| spatial_neighbors | 2.0× | 0.72× | 0.20× | 0.19× | (OOM)⁑ |
+
+- **Four of five win large and hold with scale.** `spatial_autocorr` (Moran/Geary) is the biggest —
+  40–80× — because squidpy runs the 100 permutations in numba on CPU while ours does them as batched
+  GPU matmuls on the sparse neighbor graph. `co_occurrence` is a steady **13–19×** (the tiled
+  device-atomic-histogram kernel; at 63k the squidpy ref is 86 s). `calculate_niche` is **89–123×** (a
+  single SpMM composition + GPU k-means vs squidpy's neighborhood-composition + leiden — different
+  niche-clustering backend, so it is a composition-matched, not identical-work, comparison). `ligrec` is
+  4.6–15× (permutation cluster-mean scores).
+- **They keep running at 253k where squidpy is impractical** (its permutation/pairwise refs exceed the
+  100k cap → ours-only wall time: Moran 7.5 s, co_occurrence 82 s, niche 0.14 s).
+- ⁑ **`spatial_neighbors` is the one loss** — it uses exact **brute-force O(n²)** GPU kNN, so it wins only
+  at tiny n (2.0× @2.7k) and degrades to 0.72×/0.20×/0.19× (19k/63k/81k), then OOMs past ~120k. squidpy
+  uses a KD-tree (O(n log n)) — the right tool for 2-D. The expression-space NNDescent upgrade does **not**
+  transfer: NNDescent needs high-dimensional embeddings and its recall collapses to **~6% on 2-D
+  coordinates** (measured), so it is not a valid substitute. The correct accelerator is a GPU spatial
+  index (a 2-D grid-hash) — a planned follow-up, not a reroute.
+
 ## Three regimes (the honest verdict)
 1. **WINS, scale up — parallel-arithmetic ops** (bandwidth-bound, the M3's sweet spot): HVG
    **up to 49×**, normalize_pearson_residuals ~9×, rank_genes ~9×, pca 4–5×, kmeans/diffmap 3–4×,
@@ -98,14 +132,14 @@ is now umap-learn-free (only `fuzzy_simplicial_set` in neighbors.py still uses i
 2. **CLUSTERING — largely RECLAIMED by the coloring-free rewrite (⁸)**: replacing graph-coloring
    local-moving/refinement with cuGraph-style **synchronous moves + a random half-commit** rule
    removed the coloring pass (was ~60% of Louvain, and refinement re-colored every pass). Louvain
-   now **wins from 50k up (1.8× / 2.9× / 11.6× at 50k/100k/1M** vs igraph louvain, was
-   0.41/0.84/2.04×); leiden went **0.04/0.05/0.15× → 0.30/0.37/0.90×** — the full journey at 1M
-   0.08→0.15→0.49→**0.90×** (12.6s vs igraph leiden 11.3s, essentially TIED). Quality equal/better
+   now **wins from 50k up (21.9× / 21.0× / 9.7× at 50k/100k/1M** vs igraph louvain); leiden, after
+   the coloring-free rewrite AND a **SIMD-group O(degree) kernel + vertex-pruning** pass (⁸), went
+   **0.04/0.05/0.15× → 4.6/3.6/3.2×** at 50k/100k/1M — the full journey at 1M
+   0.08→0.15→0.49→0.90→**3.2×** (7.5s vs igraph leiden 23.9s). Quality equal/better
    (real PBMC sync Q ≥ colored ≥ igraph; synthetic ARI 1.000 to 1M). **All timings are
    algorithm-only — both our GPU graph and the igraph graph are pre-built outside the timer (⁸)** —
-   so leiden does NOT quite cross to a GPU win at 1M (igraph's optimized Leiden is genuinely fast,
-   11.3s), but the once-catastrophic gap (0.08×, ~13×) is essentially closed. Our Louvain crushes
-   igraph's slower Louvain (11.6×); igraph Leiden is the faster CPU option overall.
+   so leiden now **crosses to a clear GPU win at scale** (2M 3.5×, real 986k-neuron graph 4.8×),
+   closing the once-catastrophic gap. Our Louvain also crushes igraph's slower Louvain.
 3. **ITERATIVE/kNN — now RECLAIMED at scale** (post-optimization): **harmonize** moved fully on-GPU
    (analytic-inverse correction + GPU kmeans/norm, ⁴) — **wins 6.3×/2.2× at 50k/100k** (was 0.59×/0.28×);
    only small-N (≤~3.5k) stays CPU-favored (launch-latency floor — not worth a fused kernel, 3.5k harmony

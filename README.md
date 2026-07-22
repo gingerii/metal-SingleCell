@@ -92,7 +92,7 @@ Sizes are cells: **2k–2M are the 1.3 M-neuron atlas** (sub-/over-sampled) and 
 cohort** — one consistent data family across the table.
 
 One table, every accelerated function. Speedup = CPU reference wall time ÷ ours (higher = GPU faster);
-**bold** marks the largest win in a row. `–` = not run at that size; `(N s)` = our runtime in seconds
+**bold** highlights a few standout results. `–` = not run at that size; `(N s)` = our runtime in seconds
 where a CPU reference is impractical at that scale. Rows are grouped by pipeline stage.
 
 | function | 2k | 50k | 100k | 1M | 2M | accuracy / notes |
@@ -106,7 +106,7 @@ where a CPU reference is impractical at that scale. Rows are grouped by pipeline
 | neighbors | 1.4× | 4.7× | 4.9× | **6.6×** | (34.8 s) | kNN recall ~0.97 ⁂ |
 | bbknn | 7.4× | 1.7× | 1.3× | – | – | per-batch top-k kernel |
 | umap ‡ | 15.1× | **29.6×** | 28.2× | (29 s) | (54 s) | trustworthiness 0.95 |
-| tsne | 2.1× | 7.0× | 6.6× | – | – | trustworthiness ~0.98 |
+| tsne | 2.1× | 7.0× | 6.6× | (176 s) | – | trustworthiness ~0.98 |
 | diffmap | 1.7× | 2.9× | 2.7× | 3.6× | (36 s) | |
 | draw_graph | 16.1× | (2.4 s) | (4.4 s) | – | – | |
 | kmeans | 1.1× | 3.5× | 4.0× | (1.1 s) | (3.2 s) | |
@@ -115,12 +115,30 @@ where a CPU reference is impractical at that scale. Rows are grouped by pipeline
 | rank_genes_groups (t-test) | 3.7× | 9.6× | 7.6× | – | – | top-k overlap 1.000 |
 | rank_genes_groups (logreg) | 0.9× | 2.2× | – | – | – | |
 | score_genes | (0.2 s) | (4.6 s) | (9.7 s) | – | – | ref not benchmarked § |
-| harmonize | 0.17× | **6.3×** | 2.2× | – | – | mixing ≥ harmonypy |
-| co_occurrence (spatial) | – | ~1.6× | ~1.6× | – | – | correlation 1.000 vs squidpy |
+| harmonize | 0.17× | **6.3×** | 2.2× | 2.2× | – | mixing ≥ harmonypy |
 
 Sizes are cells; **2k–2M are the 1.3 M-neuron atlas** (sub-/over-sampled) and the **2 M-cell Xenium
 cohort** — one consistent data family. 2M `neighbors`/`umap` are measured on the cached atlas PCA
 embedding (the full-gene path OOMs at 2M).
+
+### Spatial (`gr`) functions — vs squidpy CPU, across real spatial platforms
+
+| function | Visium 2.7k | Stereo-seq 19k | Xenium 63k | MERFISH 81k | Xenium 253k |
+|----------|---:|---:|-----:|-----:|-----:|
+| spatial_autocorr (Moran) | 80× | 62× | 57× | 49× | (7.5 s)◇ |
+| spatial_autocorr (Geary) | 79× | 47× | 42× | 41× | (9.7 s)◇ |
+| co_occurrence | 13.0× | 18.8× | 17.0× | 16.6× | (82 s)◇ |
+| calculate_niche | 11.9× | 110× | 89× | **123×** | (0.14 s)◇ |
+| ligrec | 15.3× | 5.6× | 4.6× | 7.0× | (0.65 s)◇ |
+| spatial_neighbors | 2.0× | 0.72× | 0.20× | 0.19× | NA◆ |
+
+Measured on real Visium / Stereo-seq / Xenium / MERFISH data (matched graph, thresholds, and
+permutation counts on both sides; `n_perms=100`). Four of the five functions win large and hold with
+scale, and keep running at 253k where squidpy's permutation/pairwise references become impractical.
+◇ *squidpy impractical >100k (permutation/pairwise) → our GPU wall time shown.* ◆ **spatial_neighbors**
+is the one loss: it uses exact brute-force O(n²) kNN (squidpy uses a KD-tree), so it wins only at small n
+and OOMs past ~120k — a GPU spatial-index (grid-hash) is the planned fix. NNDescent is *not* applicable
+(it needs high-dimensional embeddings; on 2-D coordinates its recall collapses to ~6%).
 
 ‡ **umap** — the shipped **hybrid layout** (mlx-vis's GPU SGD optimizer driven by our shared neighbor
 graph) fixes the old layout's superlinear-at-scale problem (1M 188 s → 29 s) and, versus the *previous*
@@ -172,7 +190,8 @@ run in CI (a CPU lane + a self-hosted Metal-GPU lane).
   O(degree²) rescans) plus **vertex pruning** and **batched host-sync**, for a **4.1× end-to-end speedup**
   (11.9 s → 2.9 s on the 986k graph) at equal-or-better modularity — winning at every scale ≥50k.
 - **A fused co-occurrence kernel** — a tiled device-atomic histogram that matches squidpy exactly,
-  runs ~1.6× faster, and scales past the n² memory wall to 100k+ cells.
+  runs **13–19× faster** across real Visium/Stereo-seq/Xenium/MERFISH data (measured), and scales past
+  the n² memory wall to 250k+ cells where squidpy is impractical.
 - **GPU-native kNN, t-SNE, and Harmony** — the neighbor graph (>30k) now builds on a GPU **NN-descent**
   (vendored from [mlx-vis](https://github.com/hanxiao/mlx-vis)), retiring the CPU-pynndescent fallback
   (recall-matched at ~0.97, **4.7–6.6× faster** across 50k–1M, reproducible wall time); **t-SNE** runs
