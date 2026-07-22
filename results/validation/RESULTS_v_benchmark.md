@@ -21,28 +21,37 @@ _(Updated to fold in step-2 optimizations: the `from_scipy` transfer fix and `_k
 | kmeans | 2.1 | 3.5 | 4.0 | (1.1s)² | (3.2s)² | ARI~0.8 |
 | diffmap | 2.1 | 2.9 | 2.7 | **3.63** | (36s)² | corr 0.99 |
 | regress_out | 1.6 | 1.7 | 1.6 | – | – | corr 1.000 |
-| neighbors | 2.2⁵ | 2.2⁵ | 1.8⁵ | 1.05 | (392s)² | validated |
-| umap | **34.0**⁶ | 10.5⁶ | 7.8⁶ | (188s)² | (75s)² | preservation 0.13 |
+| neighbors | 2.8⁵ | 4.7⁵ | 4.9⁵ | **6.6**⁵ | (34.8s)²·⁹ | recall~0.97 |
+| umap | 20.9⁶ | **29.6**⁶ | 28.2⁶ | (29s)²·⁶ | (53.7s)²·⁹ | trust 0.86→0.95⁶ |
 | scrublet | **20.3** | 6.4 | – | – | – | AUC 0.95 |
-| t-SNE | 0.9 | 1.0 | 1.0 | – | – | =sklearn-BH >30k³ |
+| t-SNE | 2.2³ | 7.0³ | 6.6³ | – | – | trust~0.98³ |
 | draw_graph | 21.5 | NA | NA | – | – | preservation |
 | highly_variable_genes | 3.2 | 25.9 | 32.9 | **15.8**¹ | **49.2** | overlap 1.000 |
 | louvain | 0.14 | 1.77 | 2.94 | **11.63**⁸ | (11.5s)² | Q≥igraph |
 | leiden | 0.05 | 0.30 | 0.37 | 0.90⁸ | (24.5s)² | Q≥igraph |
-| harmonize | 0.07⁴ | 0.59⁴ | 0.28⁴ | – | – | mixing > harmonypy |
-| bbknn | 6.8 | 0.66 | 0.41 | – | – | mixing✓ |
+| harmonize | 0.15⁴ | **6.3**⁴ | 2.2⁴ | – | – | mixing ≥ harmonypy |
+| bbknn | 7.9 | **1.7** | 1.3 | – | – | mixing✓; top-k kernel |
 
 ¹ **After the transfer fix** (`from_scipy` no longer makes redundant dtype copies): normalize @1M
 **0.82×→1.69×**, HVG @1M **11.9×→15.8×**. The 1M run uses the 20k-gene neuron panel, where the
 host→device transfer of the ~16 GB matrix is significant under memory pressure; on the realistic
 5,101-gene panel at 2M it's higher (normalize 2.8×, HVG 49×). ² ours-only (reference impractical
-at this scale); time shown — all RUN at 2M, no OOM. ³ above n=30k our t-SNE delegates to sklearn
-Barnes-Hut, so ≈1×. ⁴ **After the harmonize fix** (`max_iter_clustering` 200→20): PBMC 9.5s→1.3s,
-50k 14.4s→7.0s, 100k 46.9s→22.8s; still CPU-favored on speed but mixing quality beats harmonypy.
-⁵ **After the custom top-k Metal kernel** (replaces `mx.argpartition`, the kNN bottleneck —
-~5.7× the distance compute): neighbors 1.7/1.6/1.5× → **2.2/2.2/1.8×**; the brute core
-(`_knn_gpu`) alone went 267ms→56ms (4.8×) @25k, recall preserved (0.96). This is the one place
-MLX clearly underperformed a specialized kernel (cuML's neighbors edge); it narrows that gap.
+at this scale); time shown. ³ **t-SNE now runs on the GPU at every scale** (vendored mlx-vis,
+`backend="mlxvis"` default): sparse kNN-calibrated affinities + **FFT-interpolation** repulsive (the
+FIt-SNE analog, so no Barnes-Hut tree needed). Was delegating to sklearn-BH above 30k (≈1×); now
+**2.2× (PBMC) → 7.0× (50k) → 6.6× (100k)** at equal/better trustworthiness (~0.98). `backend="exact"`
+(dense-GPU O(n²)) and `backend="sklearn"` retained as oracles. ⁴ **After GPU-harmonization (E1–E4):**
+the ridge correction moved on-GPU (harmony-pytorch's **analytic block-inverse** — no linear solver),
+KMeans init → GPU `tools.kmeans`, the L2-norm → GPU, and convergence-sync/block tuning. Flips the loss
+to a **win at scale: 0.59×→6.3× (50k), 0.28×→2.2× (100k)**; PBMC 0.07×→0.15× (small-N stays CPU-favored
+— launch-latency floor). Mixing (iLISI) ≥ harmonypy throughout; `correction="host"` fp64 oracle kept.
+⁵ **After adopting mlx-vis NNDescent for the >30k kNN path** (GPU approximate k-NN, recall-matched
+~0.97; ≤30k stays brute-GPU exact): neighbors **2.2/1.8× → 4.7/4.9×** at 50k/100k and **1.05×→6.6× at
+1M** (was the old brute/pynndescent ladder). Collapses the ladder to brute+NNDescent, reproducible wall
+time. ⁹ **2M neighbors/umap** measured on the cached atlas PCA embedding oversampled to 2M×50 — the
+harness's full-gene neuron path OOMs at 2M (4.0e9 nnz ≈ 32 GB; the Xenium 5,101-gene 2M path needs
+`XENIUM_H5`, unset this run). Same shipped defaults + timing protocol, fed a pre-built embedding;
+monotone with 1M (neighbors 17.2→34.8s, umap 29.0→53.7s).
 ⁸ **After the coloring-free rewrite** (`variant="sync"`, now default in both `louvain` and `leiden`):
 all vertices pick their best community from one snapshot per pass (no graph coloring — was ~60% of
 Louvain runtime; refinement re-colored every pass), and a **random half-commit** (`commit_prob=0.5`)
@@ -71,15 +80,20 @@ identical Q and cluster count for n_iter 1 vs 2 across clean/noisy/many-cluster 
 ~halved Leiden: PBMC 2.63→0.55s, 100k 13.06→9.74s, **1M 176→95s (0.08×→0.15×)**, 2M 252→165s.
 cuGraph builds one dendrogram (≈ n_iter=1) for the same reason. Examining cuGraph's single-pass
 refinement: NOT portable as a speedup here — capping our refinement passes is *slower* (under-
-converged refinement → larger contracted graphs → more downstream work). ⁶ **After moving umap's negative sampling to the GPU** (was host `np.random` + per-epoch
-host→device transfer, breaking the lazy-eval graph): layout ~1.4× faster → umap 20.6/8.2/6.4× →
-**34.0/10.5/7.8×**, quality preserved (PBMC nbr-preservation 0.128 vs umap-learn 0.157).
-`fuzzy_simplicial_set` was found NOT to be a bottleneck (0.02–0.04s warm; earlier 1.3s was numba JIT).
+converged refinement → larger contracted graphs → more downstream work). ⁶ **After the hybrid UMAP layout** (our shared neighbor graph fed into mlx-vis's GPU UMAP optimizer —
+`_spectral_init` + `_optimize` with the proper `epochs_per_sample` SGD): **trustworthiness 0.86→0.95**
+and ~4× faster than the old all-edges-per-epoch GPU layout, while keeping the shared-graph
+cluster↔embedding contract (only the layout changed). The `epochs_per_sample` schedule also fixed the
+old layout's **superlinear-at-scale** problem — 1M **188s→29s**, 2M **53.7s** (now monotone with 1M).
+Speedups vs umap-learn: 20.9/29.6/28.2× at PBMC/50k/100k (small-N is lower than the old 34× because the
+hybrid's spectral-init has more fixed overhead at 2.7k cells, but it is higher quality). `embedding.py`
+is now umap-learn-free (only `fuzzy_simplicial_set` in neighbors.py still uses it).
 
 ## Three regimes (the honest verdict)
 1. **WINS, scale up — parallel-arithmetic ops** (bandwidth-bound, the M3's sweet spot): HVG
    **up to 49×**, normalize_pearson_residuals ~9×, rank_genes ~9×, pca 4–5×, kmeans/diffmap 3–4×,
-   normalize ~3×. umap 6–21×, scrublet 6–20× also win. The `from_scipy` transfer fix lifted the
+   normalize ~3×. umap **21–30×** (hybrid layout), t-SNE 2–7× (GPU FFT-interp), scrublet 6–20× also win.
+   The `from_scipy` transfer fix lifted the
    at-scale numbers further (normalize @1M 0.82→1.69×, HVG @1M 11.9→15.8×).
 2. **CLUSTERING — largely RECLAIMED by the coloring-free rewrite (⁸)**: replacing graph-coloring
    local-moving/refinement with cuGraph-style **synchronous moves + a random half-commit** rule
@@ -92,10 +106,14 @@ host→device transfer, breaking the lazy-eval graph): layout ~1.4× faster → 
    so leiden does NOT quite cross to a GPU win at 1M (igraph's optimized Leiden is genuinely fast,
    11.3s), but the once-catastrophic gap (0.08×, ~13×) is essentially closed. Our Louvain crushes
    igraph's slower Louvain (11.6×); igraph Leiden is the faster CPU option overall.
-3. **WORKLOAD-bound — iterative/graph/kNN** (step-2 outcome): harmonize improved ~2× + better
-   quality (one real bug fixed) but is small-matrix iterative work the CPU wins; bbknn is
-   kNN-bound (approximate-CPU is competitive); leiden refinement is hardware-bound. These are not
-   closeable to GPU wins on M3 — a workload limit, not a backlog of bugs.
+3. **ITERATIVE/kNN — now RECLAIMED at scale** (post-optimization): **harmonize** moved fully on-GPU
+   (analytic-inverse correction + GPU kmeans/norm, ⁴) — **wins 6.3×/2.2× at 50k/100k** (was 0.59×/0.28×);
+   only small-N (≤~3.5k) stays CPU-favored (launch-latency floor — not worth a fused kernel, 3.5k harmony
+   is trivial on any backend). **neighbors** adopted mlx-vis NNDescent (⁵) → 4.7–6.6× at ≥50k. **t-SNE**
+   went GPU (mlx-vis FFT-interp, ³) → 6.6–7× at 50k–100k. **bbknn** flipped to a win at scale
+   (0.66×/0.41× → **1.7×/1.3×**) via the per-batch top-k kernel. The remaining CPU-favored cases are
+   small-N iterative (harmonize/bbknn at PBMC, where the CPU is simply very fast) and igraph Leiden at
+   1M — genuine workload/launch limits, not a backlog of bugs.
 
 ## vs rapids-singlecell (Table 2, A100/3090)
 Their speedups are GPU-vs-CPU on a 2–5× higher-bandwidth GPU; ours are M3 Max GPU-vs-M3 Max CPU.
@@ -113,8 +131,9 @@ M3-Max numbers — every function runs end-to-end through 2M cells on a laptop.
   ARPACK on the sparse graph scales fine; these were the only `–` cells worth filling.
 - The remaining `–` cells are deliberate and not worth computing: dense-output ops
   (`rank_genes`/`score_genes` densify the FULL gene set → ~80 GB at 1M; `pearson` dense ours+ref
-  ≈16–32 GB OOMs the 48 GB M3 at 1M+), uninformative ≈1× (`tsne`>30k = sklearn-BH; `logreg` =
-  sklearn both sides), or workload-bound confirmations (`harmonize`/`bbknn`/`scrublet` at scale).
+  ≈16–32 GB OOMs the 48 GB M3 at 1M+), uninformative ≈1× (`logreg` = sklearn both sides), or
+  reference-impractical at scale (`harmonize`/`bbknn` refs >200k, `scrublet` >50k). `tsne` is no longer
+  a `–`/≈1× case — it runs on the GPU (mlx-vis) and wins 2–7× through 100k.
 - **Transfer is now near-optimal — no further reduction available.** Profiling the host→device
   copy: an 8 GB `mx.array` in isolation runs at **62 GB/s** (145 ms) — near unified-memory
   bandwidth. The redundant-`astype` fix captured the available win; the residual at 1M×20k is
