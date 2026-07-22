@@ -1,6 +1,13 @@
 # metal-SingleCell
 
 [![CI](https://github.com/gingerii/metal-SingleCell/actions/workflows/ci.yml/badge.svg)](https://github.com/gingerii/metal-SingleCell/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/metalsinglecell.svg)](https://pypi.org/project/metalsinglecell/)
+[![Python](https://img.shields.io/pypi/pyversions/metalsinglecell.svg)](https://pypi.org/project/metalsinglecell/)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
+<!-- GPU tests: uncomment once a self-hosted Apple-Silicon runner is registered and gpu-parity.yml runs automatically
+[![GPU tests](https://github.com/gingerii/metal-SingleCell/actions/workflows/gpu-parity.yml/badge.svg)](https://github.com/gingerii/metal-SingleCell/actions/workflows/gpu-parity.yml)
+-->
+
 
 **GPU-accelerated single-cell analysis on Apple Silicon.**
 
