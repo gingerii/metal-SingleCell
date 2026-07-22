@@ -116,26 +116,11 @@ where a CPU reference is impractical at that scale. Rows are grouped by pipeline
 | rank_genes_groups (logreg) | 0.9× | 2.2× | – | – | – | |
 | score_genes | (0.2 s) | (4.6 s) | (9.7 s) | – | – | ref not benchmarked § |
 | harmonize | 0.17× | **6.3×** | 2.2× | 2.2× | – | mixing ≥ harmonypy |
-| spatial_autocorr (Moran) ▵ | 80× | 62× | 57× | 49× | (7.5 s)◇ | vs squidpy |
-| spatial_autocorr (Geary) ▵ | 79× | 47× | 42× | 41× | (9.7 s)◇ | vs squidpy |
-| co_occurrence ▵ | 13.0× | 18.8× | 17.0× | 16.6× | (82 s)◇ | correlation 1.000 |
-| calculate_niche ▵ | 11.9× | 110× | 89× | **123×** | (0.14 s)◇ | composition-matched |
-| ligrec ▵ | 15.3× | 5.6× | 4.6× | 7.0× | (0.65 s)◇ | 10 pairs, np=100 |
-| spatial_neighbors ▵ | 2.0× | 0.72× | 0.20× | 0.19× | NA◆ | brute O(n²) ◆ |
 
 Sizes are cells; **2k–2M are the 1.3 M-neuron atlas** (sub-/over-sampled) and the **2 M-cell Xenium
 cohort** — one consistent data family. 2M `neighbors`/`umap` are measured on the cached atlas PCA
-embedding (the full-gene path OOMs at 2M).
-
-▵ **spatial (`gr`) functions** are measured on a real spatial-platform ladder — for these rows the
-columns left→right are **Visium 2.7k / Stereo-seq 19k / Xenium 63k / MERFISH 81k / Xenium-breast 253k**
-(not the neuron-atlas sizes in the header). Matched graph / thresholds / `n_perms=100` vs squidpy CPU.
-Four of the five win large and hold with scale, and keep running at 253k where squidpy's
-permutation/pairwise references become impractical. ◇ *squidpy impractical >100k → our GPU wall time
-shown.* ◆ **spatial_neighbors** is the one loss: exact brute-force O(n²) kNN (squidpy uses a KD-tree),
-so it wins only at small n and OOMs past ~120k — a GPU spatial-index (grid-hash) is the planned fix.
-NNDescent is *not* applicable (it needs high-dimensional embeddings; on 2-D coordinates its recall
-collapses to ~6%).
+embedding (the full-gene path OOMs at 2M). Spatial (`gr`) functions are in their own table below (they
+run on a different, real spatial-platform size ladder).
 
 ‡ **umap** — the shipped **hybrid layout** (mlx-vis's GPU SGD optimizer driven by our shared neighbor
 graph) fixes the old layout's superlinear-at-scale problem (1M 188 s → 29 s) and, versus the *previous*
@@ -153,7 +138,30 @@ Louvain 58.6×**. Leiden timed at `n_iterations=1` (the speed operating point �
 § **score_genes** runs on-GPU but the CPU reference errors in the current harness (a gene-list plumbing
 bug, not a compute failure); runtimes shown, speedup pending a harness fix.
 
-`co_occurrence` also scales past the n² memory wall via a tiled device-atomic-histogram kernel.
+### Spatial (`gr`) functions
+
+Measured on a **real spatial-platform ladder** — a different data family from the single-cell table above,
+so it gets its own columns. Speedup = squidpy CPU wall time ÷ ours; matched graph / thresholds /
+`n_perms=100`. `(N s)` = our GPU wall time where squidpy becomes impractical (>100k: permutation/pairwise
+references run for minutes-to-hours or OOM).
+
+| function | Visium 2.7k | Stereo-seq 19k | Xenium 63k | MERFISH 81k | Xenium-breast 253k | accuracy |
+|----------|---:|---:|---:|---:|---:|:--|
+| spatial_autocorr (Moran) | 80× | 62× | 57× | 49× | (7.5 s) | vs squidpy |
+| spatial_autocorr (Geary) | 79× | 47× | 42× | 41× | (9.7 s) | vs squidpy |
+| co_occurrence | 13.0× | 18.8× | 17.0× | 16.6× | (82 s) | correlation 1.000 |
+| calculate_niche | 11.9× | 110× | 89× | **123×** | (0.14 s) | composition-matched |
+| ligrec | 15.3× | 5.6× | 4.6× | 7.0× | (0.65 s) | 10 pairs, `n_perms=100` |
+| spatial_neighbors ◆ | 2.0× | 0.72× | 0.20× | 0.19× | NA | brute O(n²) ◆ |
+
+Four of the five win large and hold with scale, and keep running at 253k where squidpy's
+permutation/pairwise references become impractical. `co_occurrence` also scales past the n² memory wall via
+a tiled device-atomic-histogram kernel.
+
+◆ **spatial_neighbors** is the one loss: it does an exact brute-force O(n²) kNN on the coordinates while
+squidpy uses a KD-tree, so it wins only at small n and OOMs past ~120k. A GPU spatial-index (grid-hash) is
+the in-progress fix. NNDescent is *not* applicable here — it needs high-dimensional embeddings, and on 2-D
+coordinates its recall collapses to ~6%.
 
 Clustering crosses over with cell count: **Louvain wins from ~50k up (58.6× on the real 986k-neuron
 graph)**, and **Leiden — after an O(degree) SIMD-group kernel rewrite + vertex pruning — went from a
