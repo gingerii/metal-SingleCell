@@ -35,12 +35,23 @@ downstream tooling are unchanged.
 ## Install
 
 ```bash
-pip install -e .          # in a Python 3.11 env with mlx (Apple Silicon)
+pip install metalsinglecell          # Python ≥ 3.11
 ```
 
-Heavy backends (`mlx`, `scanpy`, `squidpy`) are lazy-imported, so the package imports cleanly in any
-environment. See [`envs/`](envs/) for the conda environment (`envs/metalsinglecell.yml`), which is the
-recommended setup.
+On Apple Silicon this also pulls in `mlx` (the Metal GPU backend); on other platforms it installs the
+pure-NumPy/SciPy core, so the package imports everywhere (`mlx` is a Darwin/arm64-only dependency).
+Heavy backends (`mlx`, `scanpy`, `squidpy`) are lazy-imported, so it imports cleanly in any environment.
+
+For development, clone and install editable:
+
+```bash
+git clone https://github.com/gingerii/metal-SingleCell.git
+cd metal-SingleCell
+pip install -e .
+```
+
+See [`envs/`](envs/) for the conda environment (`envs/metalsinglecell.yml`), which is the recommended
+setup for reproducing the benchmarks.
 
 **uv users:** run `uv python install 3.11` *before* creating your venv. The system python.org 3.11 on
 macOS arm64 can hang indefinitely on first `import scanpy` (a numba/LLVM AOT-compile deadlock on

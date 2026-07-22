@@ -1,7 +1,7 @@
 # Code & software availability
 
 **metal-SingleCell** (this repository) — a Metal/MLX GPU implementation of the scanpy/squidpy
-single-cell analysis stack for Apple Silicon. Version `0.0.1`. Source:
+single-cell analysis stack for Apple Silicon. Version `0.1.0`. Source:
 `https://github.com/gingerii/metal-SingleCell`.
 
 All benchmarks and validation were run on Apple **M3 Max** (40-core GPU, Metal 3, ~400 GB/s; 16-core
@@ -34,6 +34,6 @@ statsmodels 0.14.6.
   packages are the CPU reference implementations used for accuracy/speed validation and for the
   tutorial notebooks (plotting, dataset loaders).
 - Heavy backends are lazy-imported, so `metalsinglecell` installs and imports in any environment;
-  install with `pip install -e .`.
+  install with `pip install metalsinglecell` (or `pip install -e .` from a clone for development).
 - Environment specifications: [`envs/`](envs/). Full benchmark methodology and per-function results:
   [`results/validation/RESULTS_v_benchmark.md`](results/validation/RESULTS_v_benchmark.md).
