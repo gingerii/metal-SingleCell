@@ -31,7 +31,7 @@ def _has(mod):
 
 def pytest_collection_modifyitems(config, items):
     """Auto-skip GPU/data tests when the environment can't run them."""
-    from metasinglecell import config as msc_config
+    from metalsinglecell import config as msc_config
     have_mlx = _has("mlx")
     have_pbmc = (msc_config.REPO_ROOT / "data" / "pbmc3k_raw.h5ad").exists()
     for item in items:
@@ -49,7 +49,7 @@ def pbmc_counts():
     import numpy as np
     import scanpy as sc
     import scipy.sparse as sp
-    from metasinglecell import config
+    from metalsinglecell import config
     a = sc.read_h5ad(config.REPO_ROOT / "data" / "pbmc3k_raw.h5ad")
     a.X = sp.csr_matrix(a.X).astype(np.float32)
     a.var["mt"] = a.var_names.str.startswith("MT-")
@@ -59,6 +59,6 @@ def pbmc_counts():
 @pytest.fixture(scope="session")
 def cpu_oracle(tmp_path_factory):
     """Build the fp64 CPU reference snapshots once per session (blocks 01–09 compare vs these)."""
-    from metasinglecell.reference import run_cpu_reference
+    from metalsinglecell.reference import run_cpu_reference
     out = tmp_path_factory.mktemp("cpu_oracle")
     return run_cpu_reference(out_dir=out)

@@ -5,7 +5,7 @@ Rebuilds the counts matrix (snapshot ``00_counts``), runs the GPU CSR
 results against snapshots ``02_normalized`` and ``03_lognorm``. fp32 GPU vs fp64
 CPU, so we expect tiny (not exact) differences — tolerances are fp32-appropriate.
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/02_normalize_log1p_parity.py
 """
 
@@ -13,9 +13,9 @@ import logging
 
 import scipy.sparse as sp
 
-from metasinglecell import config, validation
-from metasinglecell.reference import TARGET_SUM
-from metasinglecell.sparse import CSR
+from metalsinglecell import config, validation
+from metalsinglecell.reference import TARGET_SUM
+from metalsinglecell.sparse import CSR
 
 
 def main() -> None:

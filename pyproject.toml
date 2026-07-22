@@ -3,8 +3,8 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "metasinglecell"
-version = "0.0.1"
+name = "metalsinglecell"
+version = "0.1.0"
 description = "GPU-accelerated single-cell analysis on Apple Silicon (Metal/MLX) — a drop-in for rapids-singlecell."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -45,4 +45,4 @@ where = ["src"]
 # Ship the vendored mlx-vis license + attribution in the wheel/sdist (Apache-2.0 §4 requires
 # the license text on redistribution).
 [tool.setuptools.package-data]
-"metasinglecell._vendor.mlx_vis" = ["LICENSE", "NOTICE"]
+"metalsinglecell._vendor.mlx_vis" = ["LICENSE", "NOTICE"]

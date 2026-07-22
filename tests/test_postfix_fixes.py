@@ -28,7 +28,7 @@ def _row(step, check, metric, value, passed):
 
 def _pbmc():
     import scanpy as sc
-    from metasinglecell import config
+    from metalsinglecell import config
     a = sc.read_h5ad(config.REPO_ROOT / "data" / "pbmc3k_raw.h5ad")
     a.X = sp.csr_matrix(a.X).astype(np.float32)
     a.var["mt"] = a.var_names.str.startswith("MT-")
@@ -38,7 +38,7 @@ def _pbmc():
 # ---------------- Step 2 — new drop-in defaults match scanpy ----------------
 def test_hvg_default_cutoff_matches_scanpy():
     import scanpy as sc
-    from metasinglecell import pp as msc_pp
+    from metalsinglecell import pp as msc_pp
     a = _pbmc(); msc_pp.normalize_total(a, target_sum=1e4); msc_pp.log1p(a)
     b = a.copy()
     msc_pp.highly_variable_genes(a)                     # default n_top_genes=None → cutoff mode
@@ -52,7 +52,7 @@ def test_hvg_default_cutoff_matches_scanpy():
 
 def test_scale_default_no_clip_matches_scanpy():
     import scanpy as sc
-    from metasinglecell import pp as msc_pp
+    from metalsinglecell import pp as msc_pp
     a = _pbmc(); msc_pp.normalize_total(a, target_sum=1e4); msc_pp.log1p(a)
     b = a.copy()
     msc_pp.scale(a)                                     # default max_value=None (no clip)
@@ -65,7 +65,7 @@ def test_scale_default_no_clip_matches_scanpy():
 
 def test_qc_slot_names_and_qc_vars_match_scanpy():
     import scanpy as sc
-    from metasinglecell import pp as msc_pp
+    from metalsinglecell import pp as msc_pp
     a = _pbmc(); b = a.copy()
     msc_pp.calculate_qc_metrics(a, qc_vars=["mt"], percent_top=[50], log1p=True)
     sc.pp.calculate_qc_metrics(b, qc_vars=["mt"], percent_top=[50], log1p=True, inplace=True)
@@ -85,8 +85,8 @@ def test_qc_var_rename_incore_vs_streaming_slotnames():
     """gene_total_counts→total_counts must apply on BOTH in-core and streaming QC paths."""
     import anndata as ad, zarr
     from anndata.io import sparse_dataset
-    from metasinglecell import config, pp as msc_pp
-    from metasinglecell.backed import write_backed_zarr
+    from metalsinglecell import config, pp as msc_pp
+    from metalsinglecell.backed import write_backed_zarr
     a = _pbmc()
     incore = a.copy(); msc_pp.calculate_qc_metrics(incore)
     zp = config.PROCESSED_DIR / "backed" / "pbmc_postfix_qc.zarr"
@@ -106,7 +106,7 @@ def test_qc_var_rename_incore_vs_streaming_slotnames():
 
 # ---------------- Step 4 — BLOCKER kNN top-k for n_neighbors>32 ----------------
 def test_knn_topk_all_k_match_bruteforce():
-    from metasinglecell.neighbors import _knn_gpu, _TOPK_KERNEL_MAX_K
+    from metalsinglecell.neighbors import _knn_gpu, _TOPK_KERNEL_MAX_K
     rng = np.random.default_rng(0)
     X = rng.standard_normal((500, 20)).astype(np.float32)
     D = np.sqrt(((X[:, None, :] - X[None, :, :]) ** 2).sum(-1))
@@ -123,7 +123,7 @@ def test_knn_topk_all_k_match_bruteforce():
 
 # ---------------- Step 5 — disputed severities ----------------
 def test_pca_zero_center_false_is_uncentered():
-    from metasinglecell.decomposition import pca
+    from metalsinglecell.decomposition import pca
     rng = np.random.default_rng(0)
     X = rng.standard_normal((300, 40)).astype(np.float32) + 5.0
 
@@ -142,8 +142,8 @@ def test_pca_zero_center_false_is_uncentered():
 
 
 def test_pca_sparse_zero_center_false_raises():
-    from metasinglecell.decomposition import pca
-    from metasinglecell.sparse import CSR
+    from metalsinglecell.decomposition import pca
+    from metalsinglecell.sparse import CSR
     csr = CSR.from_scipy(sp.random(100, 30, density=0.2, format="csr", dtype=np.float32))
     raised = False
     try:
@@ -157,8 +157,8 @@ def test_pca_sparse_zero_center_false_raises():
 def test_backed_wrappers_reject():
     import anndata as ad, zarr, shutil
     from anndata.io import sparse_dataset
-    from metasinglecell import config, pp as msc_pp, tl as msc_tl
-    from metasinglecell.backed import write_backed_zarr
+    from metalsinglecell import config, pp as msc_pp, tl as msc_tl
+    from metalsinglecell.backed import write_backed_zarr
     a = _pbmc()
     zp = config.PROCESSED_DIR / "backed" / "pbmc_postfix_reject.zarr"
     if zp.exists():
@@ -184,7 +184,7 @@ def test_backed_wrappers_reject():
 
 # ---------------- Step 6 — MINOR edge cases + experimental exclusion ----------------
 def test_bbknn_tiny_batch_no_crash():
-    from metasinglecell.neighbors import bbknn
+    from metalsinglecell.neighbors import bbknn
     rng = np.random.default_rng(0)
     X = rng.standard_normal((60, 10)).astype(np.float32)
     batch = np.array(["a"] * 40 + ["b"] * 2 + ["c"] * 18)   # batch 'b' (2) < k=3
@@ -195,8 +195,8 @@ def test_bbknn_tiny_batch_no_crash():
 
 
 def test_umap_coincident_points_no_nan():
-    from metasinglecell.neighbors import neighbors as nb
-    from metasinglecell.embedding import umap as msc_umap
+    from metalsinglecell.neighbors import neighbors as nb
+    from metalsinglecell.embedding import umap as msc_umap
     rng = np.random.default_rng(0)
     X = rng.standard_normal((60, 10)).astype(np.float32)
     Xd = np.vstack([X, X[:5]]).astype(np.float32)           # 5 exact duplicates
@@ -210,19 +210,19 @@ def test_umap_coincident_points_no_nan():
 def test_experimental_modules_not_importable():
     import importlib
     excluded = []
-    for m in ("metasinglecell.graph.louvain_fused_raw", "metasinglecell.graph.louvain_hybrid"):
+    for m in ("metalsinglecell.graph.louvain_fused_raw", "metalsinglecell.graph.louvain_hybrid"):
         try:
             importlib.import_module(m); excluded.append(False)
         except ModuleNotFoundError:
             excluded.append(True)
     ok = all(excluded)
     _row("6", "experimental_excluded_from_package", "all_excluded", int(ok), ok)
-    assert ok, "experimental modules still importable as metasinglecell.graph.*"
+    assert ok, "experimental modules still importable as metalsinglecell.graph.*"
 
 
 def main():
     import csv, traceback
-    from metasinglecell import config
+    from metalsinglecell import config
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     n_fail = 0
     for t in tests:

@@ -5,12 +5,12 @@ from pathlib import Path
 
 
 def test_repo_root_is_package_parent():
-    from metasinglecell import config
-    assert (config.REPO_ROOT / "src" / "metasinglecell" / "config.py").exists()
+    from metalsinglecell import config
+    assert (config.REPO_ROOT / "src" / "metalsinglecell" / "config.py").exists()
 
 
 def test_data_root_defaults_under_repo():
-    from metasinglecell import config
+    from metalsinglecell import config
     assert config.DATA_DIR == config.DATA_ROOT / "data"
     assert config.PROCESSED_DIR == config.DATA_ROOT / "data" / "processed"
     assert config.EXTERNAL_DIR == config.DATA_ROOT / "data" / "external"
@@ -19,7 +19,7 @@ def test_data_root_defaults_under_repo():
 def test_data_root_env_override(monkeypatch, tmp_path):
     """DATA_ROOT redirects data/ to an external mount; RESULTS_DIR stays at the repo."""
     monkeypatch.setenv("DATA_ROOT", str(tmp_path))
-    import metasinglecell.config as config
+    import metalsinglecell.config as config
     importlib.reload(config)
     try:
         assert config.DATA_ROOT == Path(tmp_path).resolve()
@@ -32,7 +32,7 @@ def test_data_root_env_override(monkeypatch, tmp_path):
 
 
 def test_results_dir_creates(tmp_path, monkeypatch):
-    from metasinglecell import config
+    from metalsinglecell import config
     d = config.results_dir("__unit_test_analysis__", create=True)
     assert d.exists() and d.is_dir()
     assert d == config.RESULTS_DIR / "__unit_test_analysis__"
@@ -43,7 +43,7 @@ def test_results_dir_creates(tmp_path, monkeypatch):
 
 
 def test_ensure_data_dirs_idempotent():
-    from metasinglecell import config
+    from metalsinglecell import config
     config.ensure_data_dirs()
     for d in (config.RAW_DIR, config.PROCESSED_DIR, config.EXTERNAL_DIR):
         assert d.exists()

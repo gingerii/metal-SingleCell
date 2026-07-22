@@ -5,7 +5,7 @@ speed (best-of-N walltime, GPU warmed up). Flags functions whose GPU speedup is
 poor/negative so they can be optimized until hardware-bound. See CLAUDE.md
 "Validation & benchmarking scheme".
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/v_pipeline.py            # default sizes
     python validation_notebooks/v_pipeline.py 10000 50000
 """
@@ -17,7 +17,7 @@ import time
 import numpy as np
 import scipy.sparse as sp
 
-from metasinglecell import config, validation
+from metalsinglecell import config, validation
 
 SIZES = [2_700, 10_000, 50_000, 100_000]
 N_GENES = 2000
@@ -51,10 +51,10 @@ def main():
     import scanpy as sc
     from sklearn.utils.extmath import randomized_svd
 
-    from metasinglecell.decomposition import pca
-    from metasinglecell.neighbors import _knn_gpu
-    from metasinglecell.preprocess import highly_variable_genes
-    from metasinglecell.sparse import CSR
+    from metalsinglecell.decomposition import pca
+    from metalsinglecell.neighbors import _knn_gpu
+    from metalsinglecell.preprocess import highly_variable_genes
+    from metalsinglecell.sparse import CSR
 
     records = []
 
@@ -111,7 +111,7 @@ def main():
         # KNN: neighbors() uses exact GPU brute-force for small n, pynndescent at scale.
         if emb is not None:
             from sklearn.neighbors import NearestNeighbors
-            from metasinglecell.neighbors import neighbors as _nbrs
+            from metalsinglecell.neighbors import neighbors as _nbrs
             gpu = _best(lambda: _nbrs(emb, n_neighbors=15)[0], repeats=1)
             cpu = (_best(lambda: NearestNeighbors(n_neighbors=15).fit(emb).kneighbors(emb), repeats=1)
                    if n < 1_500_000 else float("nan"))  # sklearn prohibitive at >=2M

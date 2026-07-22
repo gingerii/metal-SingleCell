@@ -5,7 +5,7 @@ Builds chunked-along-axis-0 zarr stores from source data and checks that a
   * ``pbmc``   — data/pbmc3k_raw.h5ad (fast smoke test)
   * ``atlas``  — data/external/1M_neurons.h5, optionally subsampled via ``--cells``
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/v_outofcore_prep.py --source pbmc
     python validation_notebooks/v_outofcore_prep.py --source atlas --cells 200000
     python validation_notebooks/v_outofcore_prep.py --source atlas            # full 1.3M
@@ -22,8 +22,8 @@ warnings.filterwarnings("ignore")
 import numpy as np
 import scipy.sparse as sp
 
-from metasinglecell import config
-from metasinglecell.backed import open_backed, write_backed_zarr
+from metalsinglecell import config
+from metalsinglecell.backed import open_backed, write_backed_zarr
 
 
 def _find(rel):

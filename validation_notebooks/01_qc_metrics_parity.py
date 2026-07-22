@@ -5,7 +5,7 @@ the GPU segmented-reduction kernel, and checks per-cell ``total_counts`` and
 ``n_genes_by_counts`` against snapshots ``01_*``. Writes a parity report + log to
 results/qc_metrics/.
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/01_qc_metrics_parity.py
 """
 
@@ -13,8 +13,8 @@ import logging
 
 import scipy.sparse as sp
 
-from metasinglecell import config, validation
-from metasinglecell.sparse import CSR
+from metalsinglecell import config, validation
+from metalsinglecell.sparse import CSR
 
 
 def main() -> None:

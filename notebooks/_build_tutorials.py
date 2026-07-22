@@ -30,9 +30,9 @@ basic = [
  "slots — so plotting still uses `scanpy.pl`. We use the classic **PBMC 3k** dataset."),
 ("code", "import warnings; warnings.filterwarnings('ignore')\n"
  "import numpy as np, scanpy as sc\n"
- "import metasinglecell as msc\n"
+ "import metalsinglecell as msc\n"
  "sc.settings.verbosity = 1\n"
- "print('metasinglecell', msc.__version__)"),
+ "print('metalsinglecell', msc.__version__)"),
 ("md", "## Load data"),
 ("code", "adata = sc.datasets.pbmc3k()\nadata.var_names_make_unique()\nadata"),
 ("md", "## Quality control\nFlag mitochondrial genes and compute QC metrics (scanpy), then filter."),
@@ -86,7 +86,7 @@ pearson = [
  "the Metal GPU via **metal-SingleCell**."),
 ("code", "import warnings; warnings.filterwarnings('ignore')\n"
  "import numpy as np, scanpy as sc\n"
- "import metasinglecell as msc"),
+ "import metalsinglecell as msc"),
 ("md", "## Load and QC"),
 ("code", "adata = sc.datasets.pbmc3k(); adata.var_names_make_unique()\n"
  "adata.var['mt'] = adata.var_names.str.startswith('MT-')\n"
@@ -127,7 +127,7 @@ squidpy = [
  "co-occurrence analysis."),
 ("code", "import warnings; warnings.filterwarnings('ignore')\n"
  "import numpy as np, scanpy as sc, squidpy as sq\n"
- "import metasinglecell as msc"),
+ "import metalsinglecell as msc"),
 ("code", "adata = sq.datasets.imc()\nadata"),
 ("md", "## Spatial neighbors graph\nBuilds `obsp['spatial_connectivities']` from `obsm['spatial']`."),
 ("code", "msc.gr.spatial_neighbors(adata, n_neighs=6)\n"
@@ -166,7 +166,7 @@ brain = [
  "> Requires the 10x 1.3M-neuron file at `data/external/1M_neurons.h5`."),
 ("code", "import warnings; warnings.filterwarnings('ignore')\n"
  "import time, gc, numpy as np, scanpy as sc\n"
- "import metasinglecell as msc\n"
+ "import metalsinglecell as msc\n"
  "t0 = time.time()"),
 ("md", "## Load and subset to 1M cells"),
 ("code", "import os\n"

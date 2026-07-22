@@ -22,7 +22,7 @@ import warnings
 
 import numpy as np
 
-from metasinglecell import config
+from metalsinglecell import config
 
 warnings.filterwarnings("ignore")
 
@@ -49,16 +49,16 @@ def main():
     from sklearn.neighbors import NearestNeighbors
     from sklearn.utils.extmath import randomized_svd
 
-    from metasinglecell import preprocess as pp, tools, validation
-    from metasinglecell.cluster import leiden as leiden_api
-    from metasinglecell.decomposition import pca
-    from metasinglecell.embedding import umap
-    from metasinglecell.graph.csr_graph import Graph
-    from metasinglecell.graph.louvain import louvain as louvain_gpu
-    from metasinglecell.graph.leiden import leiden as leiden_gpu
-    from metasinglecell.integration import harmonize
-    from metasinglecell.neighbors import bbknn, neighbors
-    from metasinglecell.sparse import CSR
+    from metalsinglecell import preprocess as pp, tools, validation
+    from metalsinglecell.cluster import leiden as leiden_api
+    from metalsinglecell.decomposition import pca
+    from metalsinglecell.embedding import umap
+    from metalsinglecell.graph.csr_graph import Graph
+    from metalsinglecell.graph.louvain import louvain as louvain_gpu
+    from metalsinglecell.graph.leiden import leiden as leiden_gpu
+    from metalsinglecell.integration import harmonize
+    from metalsinglecell.neighbors import bbknn, neighbors
+    from metalsinglecell.sparse import CSR
 
     rng = np.random.default_rng(0)
 
@@ -272,7 +272,7 @@ def main():
 def _sc_norm(sc, counts):
     a = sc.AnnData(counts.copy()); sc.pp.normalize_total(a, target_sum=1e4); sc.pp.log1p(a); return a.X
 def _acc_norm(sc, pp, counts):
-    from metasinglecell.sparse import CSR
+    from metalsinglecell.sparse import CSR
     import numpy as np
     a = sc.AnnData(counts.copy()); sc.pp.normalize_total(a, target_sum=1e4); sc.pp.log1p(a)
     mine = np.asarray(CSR.from_scipy(counts).normalize_total(1e4).log1p().data)
@@ -290,7 +290,7 @@ def _centered(X):
     D = np.asarray(X.todense(), np.float64); D -= D.mean(0); return D
 def _acc_pca(pca, rsvd, validation, X):
     import numpy as np
-    from metasinglecell.sparse import CSR
+    from metalsinglecell.sparse import CSR
     _, comps, _ = pca(CSR.from_scipy(X), n_comps=50, solver="randomized")
     _, _, Vt = rsvd(_centered(X), 50, n_iter=5, random_state=0)
     return "subspace", f"{validation.subspace_overlap(comps.T, Vt.T):.3f}"
@@ -320,7 +320,7 @@ def _ig_leiden(conn):
     return ig.Graph(n=conn.shape[0], edges=list(zip(s[m].tolist(), d[m].tolist()))).community_leiden(objective_function="modularity")
 def _acc_modularity(g, louvain_gpu, ig_fn, conn, validation):
     import numpy as np, mlx.core as mx
-    from metasinglecell.graph.primitives import modularity
+    from metalsinglecell.graph.primitives import modularity
     lab = louvain_gpu(g, 1.0); _, d = np.unique(lab, return_inverse=True)
     return "Q", f"{float(modularity(g, mx.array(d.astype(np.int32)), 1.0)):.3f}"
 def _ul_umap(emb):

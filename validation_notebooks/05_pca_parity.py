@@ -5,7 +5,7 @@ The oracle used arpack on the scaled HVG matrix (snapshot ``05_scaled``), saving
 ``06_pca_variance_ratio``. PCs are defined up to sign, so we compare per-component
 absolute correlation (sign-invariant) plus variance_ratio and subspace overlap.
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/05_pca_parity.py
 """
 
@@ -13,9 +13,9 @@ import logging
 
 import numpy as np
 
-from metasinglecell import config, validation
-from metasinglecell.decomposition import pca
-from metasinglecell.reference import N_PCS, SEED
+from metalsinglecell import config, validation
+from metalsinglecell.decomposition import pca
+from metalsinglecell.reference import N_PCS, SEED
 
 
 def main() -> None:

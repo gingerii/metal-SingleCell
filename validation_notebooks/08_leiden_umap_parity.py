@@ -6,7 +6,7 @@ check local-structure preservation (fraction of each cell's graph neighbors that
 land among its nearest neighbors in 2-D) and compare it to umap-learn's own
 embedding. We also time the layout optimization GPU vs umap-learn.
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/08_leiden_umap_parity.py
 """
 
@@ -16,10 +16,10 @@ import time
 import numpy as np
 import scipy.sparse as sp
 
-from metasinglecell import config, validation
-from metasinglecell.cluster import leiden
-from metasinglecell.embedding import umap
-from metasinglecell.reference import LEIDEN_RES
+from metalsinglecell import config, validation
+from metalsinglecell.cluster import leiden
+from metalsinglecell.embedding import umap
+from metalsinglecell.reference import LEIDEN_RES
 
 
 def _graph_neighbors(dist_csr):

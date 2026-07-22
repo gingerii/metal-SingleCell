@@ -125,7 +125,7 @@ class TSNE:
 
         n, dim = X.shape
 
-        # VENDOR PATCH (metasinglecell): upstream 0.7.0 only binds `X_mx` inside the
+        # VENDOR PATCH (metalsinglecell): upstream 0.7.0 only binds `X_mx` inside the
         # PCA-preprocessing branch below, but the PCA-init block always dereferences it,
         # so fit_transform crashes with UnboundLocalError whenever pca_dim is None or the
         # input dim <= pca_dim (exactly our 50-D PCA-embedding case). Bind it once here.

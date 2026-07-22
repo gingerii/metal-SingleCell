@@ -12,7 +12,7 @@ the pipeline runs at atlas scale on real Xenium without OOM.
 READ-ONLY: the object belongs to another project. Opened backed='r' / h5py 'r';
 nothing is ever written back.
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/v_realxenium.py
 """
 
@@ -23,7 +23,7 @@ import warnings
 
 import numpy as np
 
-from metasinglecell import config
+from metalsinglecell import config
 
 warnings.filterwarnings("ignore")
 
@@ -45,11 +45,11 @@ def main():
     from sklearn.metrics import adjusted_rand_score
     from sklearn.utils.extmath import randomized_svd
 
-    from metasinglecell import preprocess as pp, spatial as gr, validation
-    from metasinglecell.cluster import leiden
-    from metasinglecell.decomposition import pca
-    from metasinglecell.neighbors import neighbors
-    from metasinglecell.sparse import CSR
+    from metalsinglecell import preprocess as pp, spatial as gr, validation
+    from metalsinglecell.cluster import leiden
+    from metalsinglecell.decomposition import pca
+    from metalsinglecell.neighbors import neighbors
+    from metalsinglecell.sparse import CSR
 
     # ---- load ONE real section (read-only backed -> to_memory on the subset) ----
     if not XEN:

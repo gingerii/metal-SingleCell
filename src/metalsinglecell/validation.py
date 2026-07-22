@@ -1,7 +1,7 @@
 """Numerical-parity harness: compare a GPU result against the fp64 CPU oracle.
 
 Every Stage-1/2 kernel is validated here against the snapshots written by
-``metasinglecell.reference``. The harness reports the metrics that matter for an
+``metalsinglecell.reference``. The harness reports the metrics that matter for an
 fp32-GPU-vs-fp64-CPU comparison (max abs/rel error, correlation, allclose) and
 writes a tidy CSV row per check so parity is tracked over time.
 """

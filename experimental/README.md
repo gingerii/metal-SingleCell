@@ -11,4 +11,4 @@ outside `src/`, so they do not ship in the wheel/sdist). Not imported by any pub
   Python apply is far slower at scale.
 
 See the `graph-clustering` skill / `RESULTS_clustering_workarounds.md` for the full evidence. The
-shipped multi-core per-color path (in `src/metasinglecell/graph/louvain.py`) supersedes both.
+shipped multi-core per-color path (in `src/metalsinglecell/graph/louvain.py`) supersedes both.

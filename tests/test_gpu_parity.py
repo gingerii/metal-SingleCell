@@ -22,7 +22,7 @@ def _lognorm(a):
 
 def test_qc_metrics_counts_exact(pbmc_counts):
     import scanpy as sc
-    from metasinglecell import pp as msc_pp, validation
+    from metalsinglecell import pp as msc_pp, validation
     a = pbmc_counts.copy(); b = pbmc_counts.copy()
     msc_pp.calculate_qc_metrics(a)
     sc.pp.calculate_qc_metrics(b, inplace=True, percent_top=None, log1p=False)
@@ -33,7 +33,7 @@ def test_qc_metrics_counts_exact(pbmc_counts):
 
 
 def test_normalize_log1p_matches_scanpy(pbmc_counts):
-    from metasinglecell import pp as msc_pp, validation
+    from metalsinglecell import pp as msc_pp, validation
     a = pbmc_counts.copy()
     msc_pp.normalize_total(a, target_sum=1e4); msc_pp.log1p(a)
     b = _lognorm(pbmc_counts)
@@ -44,7 +44,7 @@ def test_normalize_log1p_matches_scanpy(pbmc_counts):
 
 def test_hvg_seurat_overlap_exact(pbmc_counts):
     import scanpy as sc
-    from metasinglecell import pp as msc_pp
+    from metalsinglecell import pp as msc_pp
     a = _lognorm(pbmc_counts); b = a.copy()
     msc_pp.highly_variable_genes(a, n_top_genes=2000, flavor="seurat")
     sc.pp.highly_variable_genes(b, n_top_genes=2000, flavor="seurat")
@@ -54,7 +54,7 @@ def test_hvg_seurat_overlap_exact(pbmc_counts):
 
 def test_scale_matches_scanpy(pbmc_counts):
     import scanpy as sc
-    from metasinglecell import pp as msc_pp, validation
+    from metalsinglecell import pp as msc_pp, validation
     a = _lognorm(pbmc_counts); b = a.copy()
     msc_pp.scale(a, max_value=10.0)
     sc.pp.scale(b, max_value=10.0)
@@ -65,7 +65,7 @@ def test_scale_matches_scanpy(pbmc_counts):
 @pytest.mark.parametrize("solver", ["full", "arpack", "covariance_eigh"])
 def test_pca_dense_solvers_match_scanpy_subspace(pbmc_counts, solver):
     import scanpy as sc
-    from metasinglecell import pp as msc_pp, validation
+    from metalsinglecell import pp as msc_pp, validation
     a = _lognorm(pbmc_counts)
     sc.pp.highly_variable_genes(a, n_top_genes=2000)
     a = a[:, a.var["highly_variable"]].copy()
@@ -79,7 +79,7 @@ def test_pca_dense_solvers_match_scanpy_subspace(pbmc_counts, solver):
 
 def test_neighbors_knn_overlap(pbmc_counts):
     import scanpy as sc
-    from metasinglecell import pp as msc_pp
+    from metalsinglecell import pp as msc_pp
     a = _lognorm(pbmc_counts)
     sc.pp.highly_variable_genes(a, n_top_genes=2000)
     a = a[:, a.var["highly_variable"]].copy()
@@ -97,8 +97,8 @@ def test_neighbors_knn_overlap(pbmc_counts):
 
 def test_leiden_gpu_modularity_ge_igraph(pbmc_counts):
     import scanpy as sc
-    from metasinglecell import pp as msc_pp
-    from metasinglecell.cluster import leiden
+    from metalsinglecell import pp as msc_pp
+    from metalsinglecell.cluster import leiden
     a = _lognorm(pbmc_counts)
     sc.pp.highly_variable_genes(a, n_top_genes=2000)
     a = a[:, a.var["highly_variable"]].copy()
@@ -107,8 +107,8 @@ def test_leiden_gpu_modularity_ge_igraph(pbmc_counts):
     conn = a.obsp["connectivities"]
     lab_gpu = leiden(conn, resolution=1.0, backend="gpu", n_iterations=2)
     lab_ig = leiden(conn, resolution=1.0, backend="igraph", n_iterations=2)
-    from metasinglecell.graph import Graph
-    from metasinglecell.graph.primitives import modularity
+    from metalsinglecell.graph import Graph
+    from metalsinglecell.graph.primitives import modularity
     import mlx.core as mx
     g = Graph.from_scipy(conn)
     q_gpu = float(modularity(g, mx.array(lab_gpu.astype(np.int32)), 1.0))

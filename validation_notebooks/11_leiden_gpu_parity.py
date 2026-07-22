@@ -3,7 +3,7 @@
 Quality (modularity + ARI vs oracle) on the PBMC graph, and a scale probe where
 the GPU pulls ahead. Validation bar: GPU Leiden modularity >= igraph Leiden - eps.
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/11_leiden_gpu_parity.py
 """
 
@@ -13,10 +13,10 @@ import time
 import numpy as np
 import scipy.sparse as sp
 
-from metasinglecell import config, validation
-from metasinglecell.cluster import leiden
-from metasinglecell.graph import Graph
-from metasinglecell.graph.primitives import modularity
+from metalsinglecell import config, validation
+from metalsinglecell.cluster import leiden
+from metalsinglecell.graph import Graph
+from metalsinglecell.graph.primitives import modularity
 
 
 def _sbm_graph(n, k=15, n_clusters=20, p_in=0.85, seed=0):

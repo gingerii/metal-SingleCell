@@ -8,7 +8,7 @@ sparse counts (~7% density) stand in for real data so we can scale n_cells.
 The point is to find the crossover: tiny data favors the CPU (kernel-launch +
 transfer overhead dominates); the GPU should win once the arithmetic dominates.
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/07_benchmark.py
 """
 
@@ -18,9 +18,9 @@ import time
 import numpy as np
 import scipy.sparse as sp
 
-from metasinglecell import config, validation
-from metasinglecell.decomposition import pca
-from metasinglecell.sparse import CSR
+from metalsinglecell import config, validation
+from metalsinglecell.decomposition import pca
+from metalsinglecell.sparse import CSR
 
 N_GENES = 2000
 SIZES = [2_700, 10_000, 30_000, 100_000]
@@ -97,7 +97,7 @@ def main() -> None:
     # --- brute-force KNN (separate sizes; O(n^2)) ---
     for n in KNN_SIZES:
         emb = np.random.default_rng(0).standard_normal((n, 50)).astype(np.float32)
-        from metasinglecell.neighbors import _knn_gpu
+        from metalsinglecell.neighbors import _knn_gpu
         gpu = _best(lambda: _knn_gpu(emb, 15))
         nn = NearestNeighbors(n_neighbors=15, algorithm="brute")
         cpu = _best(lambda: nn.fit(emb).kneighbors(emb), repeats=1)

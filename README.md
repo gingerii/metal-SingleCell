@@ -15,7 +15,7 @@ It is a **drop-in API**: swap the import prefix and your existing pipeline runs 
 
 ```python
 import scanpy as sc
-import metasinglecell as msc          # pp / tl / gr — mirror sc.pp, sc.tl, sq.gr
+import metalsinglecell as msc          # pp / tl / gr — mirror sc.pp, sc.tl, sq.gr
 
 adata = sc.datasets.pbmc3k()
 msc.pp.normalize_total(adata, target_sum=1e4)
@@ -39,7 +39,7 @@ pip install -e .          # in a Python 3.11 env with mlx (Apple Silicon)
 ```
 
 Heavy backends (`mlx`, `scanpy`, `squidpy`) are lazy-imported, so the package imports cleanly in any
-environment. See [`envs/`](envs/) for the conda environment (`envs/metasinglecell.yml`), which is the
+environment. See [`envs/`](envs/) for the conda environment (`envs/metalsinglecell.yml`), which is the
 recommended setup.
 
 **uv users:** run `uv python install 3.11` *before* creating your venv. The system python.org 3.11 on
@@ -213,11 +213,11 @@ not the cell count.
 
 ```bash
 # one-time: convert an .h5ad / 10x .h5 to a chunked-zarr store
-python -m metasinglecell.backed  1M_neurons.h5  atlas.zarr  --block-rows 100000
+python -m metalsinglecell.backed  1M_neurons.h5  atlas.zarr  --block-rows 100000
 ```
 
 ```python
-import anndata as ad, metasinglecell as msc
+import anndata as ad, metalsinglecell as msc
 adata = ad.read_zarr("atlas.zarr")     # backed, not fully loaded
 msc.pp.calculate_qc_metrics(adata)     # each pp step detects the backed .X and streams
 msc.pp.normalize_total(adata); msc.pp.log1p(adata)
@@ -285,7 +285,7 @@ builds on, and the API and workflows are modeled directly on these libraries —
   doi:[10.48550/arXiv.2603.02402](https://doi.org/10.48550/arXiv.2603.02402).
 - **[mlx-vis](https://github.com/hanxiao/mlx-vis)** (Apache-2.0) — the pure-MLX Apple-Silicon GPU
   NNDescent (approximate k-NN graph), t-SNE, and UMAP-layout code that this project's neighbor-graph,
-  t-SNE, and UMAP-layout paths use (vendored under `src/metasinglecell/_vendor/mlx_vis/`, with NOTICE).
+  t-SNE, and UMAP-layout paths use (vendored under `src/metalsinglecell/_vendor/mlx_vis/`, with NOTICE).
   Xiao, H. *mlx-vis: GPU-Native Dimensionality Reduction on Apple Silicon.* arXiv:2603.04035 (2026).
   doi:[10.48550/arXiv.2603.04035](https://doi.org/10.48550/arXiv.2603.04035).
 - **[scanpy](https://scanpy.readthedocs.io)** — Wolf, F. A., Angerer, P. & Theis, F. J. *SCANPY:
@@ -308,6 +308,6 @@ released under permissive licenses (MIT / BSD-3-Clause); MLX is MIT.
 
 Functionally complete and validated (pp / tl / gr + tutorials + benchmark), with an **out-of-core
 streaming front-end** for datasets larger than memory, a GPU-native kNN / t-SNE / Harmony path, and an
-asserting `tests/` suite run in CI (CPU + self-hosted Metal-GPU lanes). Pre-PyPI at version `0.0.1`.
+asserting `tests/` suite run in CI (CPU + self-hosted Metal-GPU lanes). Version `0.1.0`.
 The full benchmark with methodology is in
 [`results/validation/RESULTS_v_benchmark.md`](results/validation/RESULTS_v_benchmark.md).

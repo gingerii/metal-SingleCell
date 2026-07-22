@@ -6,7 +6,7 @@ Each function is checked against its canonical reference (scanpy / sklearn / har
 bbknn / scrublet) on real PBMC3k. Stochastic methods (tsne, harmony, scrublet, draw_graph)
 are validated by structure/agreement, not exact values — as with umap/leiden.
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/v_remaining.py
 """
 
@@ -15,7 +15,7 @@ import warnings
 
 import numpy as np
 
-from metasinglecell import config
+from metalsinglecell import config
 
 warnings.filterwarnings("ignore")
 
@@ -50,10 +50,10 @@ def main():
     from sklearn.neighbors import NearestNeighbors
     from scipy.stats import spearmanr
 
-    from metasinglecell import preprocess as pp, tools, validation
-    from metasinglecell.integration import harmonize
-    from metasinglecell.neighbors import bbknn, neighbors
-    from metasinglecell.sparse import CSR
+    from metalsinglecell import preprocess as pp, tools, validation
+    from metalsinglecell.integration import harmonize
+    from metalsinglecell.neighbors import bbknn, neighbors
+    from metalsinglecell.sparse import CSR
 
     # ---- real PBMC pipeline; restrict downstream to HVGs (canonical) ----
     ad = sc.datasets.pbmc3k()
@@ -63,10 +63,10 @@ def main():
     sc.pp.highly_variable_genes(adl, n_top_genes=2000)
     adh = adl[:, adl.var.highly_variable].copy()
     scaled = pp.scale(CSR.from_scipy(sp.csr_matrix(adh.X).astype(np.float32)))
-    from metasinglecell.decomposition import pca
+    from metalsinglecell.decomposition import pca
     emb = pca(CSR.from_scipy(sp.csr_matrix(adh.X).astype(np.float32)), n_comps=50)[0].astype(np.float32)
     dist_g, conn = neighbors(emb, n_neighbors=15)
-    from metasinglecell.cluster import leiden
+    from metalsinglecell.cluster import leiden
     groups = leiden(conn, resolution=1.0, backend="igraph")
     refnb = [set(dist_g.indices[dist_g.indptr[i]:dist_g.indptr[i + 1]]) for i in range(emb.shape[0])]
     log.info("PBMC: %d cells, %d HVG, %d leiden groups", adh.n_obs, adh.n_vars, len(set(groups)))
@@ -160,7 +160,7 @@ def main():
 
     # 8. embedding_density vs scanpy (density correlation on the UMAP)
     try:
-        from metasinglecell.embedding import umap
+        from metalsinglecell.embedding import umap
         U = umap(conn)
         dens_mine = tools.embedding_density(U)
         a8 = adh.copy(); a8.obsm["X_umap"] = U; sc.tl.embedding_density(a8, basis="umap")

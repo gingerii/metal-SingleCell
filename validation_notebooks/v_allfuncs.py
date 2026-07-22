@@ -5,7 +5,7 @@ O(n²) spatial/tsne). Each row: GPU time, CPU-reference time, speedup, accuracy.
 CPU baselines: scanpy / sklearn / igraph / umap-learn (squidpy/harmonypy/fa2/bbknn
 unavailable -> NumPy reference or "no baseline").
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/v_allfuncs.py
 """
 
@@ -16,7 +16,7 @@ import warnings
 import numpy as np
 import scipy.sparse as sp
 
-from metasinglecell import config, validation
+from metalsinglecell import config, validation
 
 warnings.filterwarnings("ignore")
 N = 50_000
@@ -67,15 +67,15 @@ def main():
     # ---------- shared artifacts ----------
     counts = sp.random(N, N_GENES, density=0.07, format="csr", random_state=0)
     counts.data = rng.integers(1, 50, counts.data.size).astype(np.float32)
-    from metasinglecell.sparse import CSR
+    from metalsinglecell.sparse import CSR
     csr = CSR.from_scipy(counts)
     lognorm = csr.normalize_total(1e4).log1p()
-    from metasinglecell.preprocess import (calculate_qc_metrics, filter_cells, highly_variable_genes,
+    from metalsinglecell.preprocess import (calculate_qc_metrics, filter_cells, highly_variable_genes,
                                            normalize_pearson_residuals, regress_out, scale, scrublet)
     hvdf = highly_variable_genes(lognorm, n_top_genes=1000)
     hv_idx = np.flatnonzero(hvdf["highly_variable"].to_numpy())[:1000]
     dense_hv = lognorm.toarray()[:, hv_idx].astype(np.float32)
-    from metasinglecell.decomposition import pca
+    from metalsinglecell.decomposition import pca
     emb = pca(dense_hv, n_comps=50, solver="randomized")[0].astype(np.float32)
     ad = sc.AnnData(counts.copy())
     adl = ad.copy(); sc.pp.normalize_total(adl, target_sum=1e4); sc.pp.log1p(adl)
@@ -104,22 +104,22 @@ def main():
     bench("normalize_pearson_residuals", N, lambda: normalize_pearson_residuals(counts),
           lambda: sc.experimental.pp.normalize_pearson_residuals(ad.copy(), inplace=False),
           "exact", "scanpy.exp", grepeat=2)
-    from metasinglecell.neighbors import neighbors, bbknn
+    from metalsinglecell.neighbors import neighbors, bbknn
     bench("neighbors", N, lambda: neighbors(emb, n_neighbors=15)[1],
           lambda: sc.pp.neighbors(sc.AnnData(emb.copy()), n_neighbors=15), "pynndescent", "scanpy", grepeat=1)
     bench("bbknn", N, lambda: bbknn(emb, rng.integers(0, 2, N))[1], None,
           "validated", "none(no bbknn pkg)", grepeat=1)
     bench("scrublet", 15000, lambda: scrublet(counts[:15000]), None, "AUC~0.96", "none", grepeat=1)
-    from metasinglecell.integration import harmonize
+    from metalsinglecell.integration import harmonize
     bench("harmony_integrate", N, lambda: harmonize(emb, rng.integers(0, 2, N), max_iter_harmony=3),
           None, "validated", "none(no harmonypy)", grepeat=1)
 
     # ---------- tl ----------
-    from metasinglecell import tools
-    from metasinglecell.cluster import leiden as cl_leiden
-    from metasinglecell.graph import Graph
-    from metasinglecell.graph.louvain import louvain as gpu_louvain
-    from metasinglecell.graph.leiden import leiden as gpu_leiden
+    from metalsinglecell import tools
+    from metalsinglecell.cluster import leiden as cl_leiden
+    from metalsinglecell.graph import Graph
+    from metalsinglecell.graph.louvain import louvain as gpu_louvain
+    from metalsinglecell.graph.leiden import leiden as gpu_leiden
     conn = neighbors(emb, n_neighbors=15)[1]
     g = Graph.from_scipy(conn)
     import igraph as ig
@@ -133,7 +133,7 @@ def main():
           lambda: gi.community_leiden(objective_function="modularity", weights="weight", n_iterations=2),
           "Q>=igraph", "igraph", grepeat=1)
     import umap as umap_learn
-    bench("umap", N, lambda: tools.draw_graph(conn, n_iter=200) if False else __import__("metasinglecell.embedding", fromlist=["umap"]).umap(conn),
+    bench("umap", N, lambda: tools.draw_graph(conn, n_iter=200) if False else __import__("metalsinglecell.embedding", fromlist=["umap"]).umap(conn),
           lambda: umap_learn.UMAP(n_neighbors=15).fit_transform(emb), "preserv~", "umap-learn", grepeat=1)
     labels = np.asarray(gpu_louvain(g, 1.0))
     bench("rank_genes_groups", N, lambda: tools.rank_genes_groups(dense_hv, labels, method="t-test"),
@@ -150,7 +150,7 @@ def main():
     bench("draw_graph", N, lambda: tools.draw_graph(conn, n_iter=200), None, "preserv~1", "none(no fa2)", grepeat=1)
 
     # ---------- gr (spatial, smaller) ----------
-    from metasinglecell import spatial
+    from metalsinglecell import spatial
     coords = rng.random((N_SP, 2)).astype(np.float32)
     W = spatial.spatial_neighbors(coords, 6)
     Xsp = rng.standard_normal((N_SP, 50)).astype(np.float32)

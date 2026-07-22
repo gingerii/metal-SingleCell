@@ -8,7 +8,7 @@ This directory vendors several modules from the `mlx-vis` project (mlx-vis 0.7.0
                      plus a one-line bugfix (bind `X_mx` before the PCA-init block so
                      fit_transform does not raise UnboundLocalError when pca_dim is None or
                      the input dim <= pca_dim). The patch is marked `VENDOR PATCH
-                     (metasinglecell)` in the source.
+                     (metalsinglecell)` in the source.
     umap.py       —  from mlx_vis/_umap/umap.py; only the internal imports were rewritten to
                      be relative (`from .normalize ...`, `from .knn ...`)
 
@@ -22,10 +22,10 @@ Apache License, Version 2.0 (see the LICENSE file in this directory).
 
 Vendored into metal-SingleCell (rather than taken as a runtime dependency) to keep the
 dependency footprint minimal. metal-SingleCell also adapts vendored outputs at its own call
-sites without modifying these files: `metasinglecell.neighbors` over-builds + self-prepends
-the NNDescent graph; `metasinglecell.embedding.umap` drives the vendored UMAP optimizer
+sites without modifying these files: `metalsinglecell.neighbors` over-builds + self-prepends
+the NNDescent graph; `metalsinglecell.embedding.umap` drives the vendored UMAP optimizer
 (`_spectral_init` + `_optimize`) with our own prebuilt connectivity graph; and
-`metasinglecell.tools.tsne` calls the vendored TSNE as its default backend.
+`metalsinglecell.tools.tsne` calls the vendored TSNE as its default backend.
 
 Changes to the vendored files: as itemized above (relative-import rewrites throughout; the
 tsne.py UnboundLocalError bugfix). No algorithmic changes.

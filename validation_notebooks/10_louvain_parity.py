@@ -4,7 +4,7 @@ Quality bar for a clustering optimizer = modularity, not label parity. We check
 GPU Louvain's Q against igraph Louvain/Leiden on the same PBMC graph, plus ARI vs
 the oracle labels (within the established RNG floor), and a small scaling probe.
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/10_louvain_parity.py
 """
 
@@ -14,10 +14,10 @@ import time
 import numpy as np
 import scipy.sparse as sp
 
-from metasinglecell import config, validation
-from metasinglecell.graph import Graph
-from metasinglecell.graph.louvain import louvain
-from metasinglecell.graph.primitives import modularity
+from metalsinglecell import config, validation
+from metalsinglecell.graph import Graph
+from metalsinglecell.graph.louvain import louvain
+from metalsinglecell.graph.primitives import modularity
 
 
 def _sbm_graph(n, k=15, n_clusters=20, p_in=0.85, seed=0):

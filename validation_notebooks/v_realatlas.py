@@ -13,7 +13,7 @@ Subsamples REAL cells to a size sweep (100k -> 500k -> full) and at each size:
   - leiden GPU vs igraph  : ARI + modularity + the walltime win (hour->minutes)
 and confirms the full pipeline RUNS at 1.3M on the M3 without OOM.
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/v_realatlas.py
 """
 
@@ -24,7 +24,7 @@ import warnings
 
 import numpy as np
 
-from metasinglecell import config
+from metalsinglecell import config
 
 warnings.filterwarnings("ignore")
 H5 = "data/external/1M_neurons.h5"
@@ -44,11 +44,11 @@ def main():
     from sklearn.utils.extmath import randomized_svd
     AnnData = adata_mod.AnnData
 
-    from metasinglecell import preprocess as pp, validation
-    from metasinglecell.cluster import leiden
-    from metasinglecell.decomposition import pca
-    from metasinglecell.neighbors import neighbors
-    from metasinglecell.sparse import CSR
+    from metalsinglecell import preprocess as pp, validation
+    from metalsinglecell.cluster import leiden
+    from metalsinglecell.decomposition import pca
+    from metalsinglecell.neighbors import neighbors
+    from metalsinglecell.sparse import CSR
 
     t0 = time.perf_counter()
     ad = sc.read_10x_h5(H5)

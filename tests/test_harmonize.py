@@ -34,8 +34,8 @@ def _ilisi(Z, batch, k=30):
 
 def test_gpu_correction_matches_host_oracle():
     """The on-GPU analytic block-inverse correction ≈ the fp64-host solve."""
-    from metasinglecell.integration import harmonize
-    from metasinglecell.validation import subspace_overlap
+    from metalsinglecell.integration import harmonize
+    from metalsinglecell.validation import subspace_overlap
     Z, batch, _ = _synthetic()
     Zg = harmonize(Z, batch, correction="gpu", random_state=0)
     Zh = harmonize(Z, batch, correction="host", random_state=0)
@@ -47,7 +47,7 @@ def test_harmonize_mixes_at_least_as_well_as_harmonypy():
     """Batch mixing (iLISI) increases vs raw and is no worse than CPU harmonypy."""
     import pandas as pd
     harmonypy = pytest.importorskip("harmonypy")
-    from metasinglecell.integration import harmonize
+    from metalsinglecell.integration import harmonize
     Z, batch, _ = _synthetic()
     mix_raw = _ilisi(Z, batch)
     ho = harmonypy.run_harmony(Z.astype(np.float64), pd.DataFrame({"b": batch}), ["b"])
@@ -61,8 +61,8 @@ def test_harmonize_mixes_at_least_as_well_as_harmonypy():
 
 def test_block_proportion_quality_neutral():
     """Larger blocks (0.1) give essentially the same integration as the reference 0.05."""
-    from metasinglecell.integration import harmonize
-    from metasinglecell.validation import subspace_overlap
+    from metalsinglecell.integration import harmonize
+    from metalsinglecell.validation import subspace_overlap
     Z, batch, _ = _synthetic()
     Z05 = harmonize(Z, batch, block_proportion=0.05, random_state=0)
     Z10 = harmonize(Z, batch, block_proportion=0.1, random_state=0)

@@ -4,7 +4,7 @@ Reconstructs the HVG-subset log-normalized matrix the oracle scaled (snapshot
 ``03_lognorm`` subset to the ``04_hvg_flag`` genes), runs the GPU ``scale``
 (max_value=10), and checks the dense result against snapshot ``05_scaled``.
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/04_scale_parity.py
 """
 
@@ -12,10 +12,10 @@ import logging
 
 import scipy.sparse as sp
 
-from metasinglecell import config, validation
-from metasinglecell.preprocess import scale
-from metasinglecell.reference import SCALE_MAX
-from metasinglecell.sparse import CSR
+from metalsinglecell import config, validation
+from metalsinglecell.preprocess import scale
+from metalsinglecell.reference import SCALE_MAX
+from metalsinglecell.sparse import CSR
 
 
 def main() -> None:

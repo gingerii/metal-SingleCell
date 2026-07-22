@@ -7,7 +7,7 @@ larger REAL dataset — 100k cells subsampled from the 10x 1.3M-neuron atlas, HV
 Inherently O(n²) methods (exact tsne, gaussian-KDE embedding_density) are subsample-only by
 design and are NOT run at 100k (documented limitation); the rest scale.
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/v_remaining_scale.py
 """
 
@@ -18,7 +18,7 @@ import warnings
 
 import numpy as np
 
-from metasinglecell import config
+from metalsinglecell import config
 
 warnings.filterwarnings("ignore")
 N = 100_000
@@ -38,12 +38,12 @@ def main():
     from sklearn.metrics import adjusted_rand_score, roc_auc_score
     from sklearn.neighbors import NearestNeighbors
 
-    from metasinglecell import preprocess as pp, tools, validation
-    from metasinglecell.cluster import leiden
-    from metasinglecell.decomposition import pca
-    from metasinglecell.integration import harmonize
-    from metasinglecell.neighbors import bbknn, neighbors
-    from metasinglecell.sparse import CSR
+    from metalsinglecell import preprocess as pp, tools, validation
+    from metalsinglecell.cluster import leiden
+    from metalsinglecell.decomposition import pca
+    from metalsinglecell.integration import harmonize
+    from metalsinglecell.neighbors import bbknn, neighbors
+    from metalsinglecell.sparse import CSR
 
     t0 = time.perf_counter()
     ad = sc.read_10x_h5("data/external/1M_neurons.h5"); ad.var_names_make_unique()

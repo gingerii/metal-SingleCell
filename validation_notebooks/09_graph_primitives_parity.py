@@ -3,7 +3,7 @@
 Deterministic reductions, so these must match exactly (fp tolerance). Run on the
 PBMC neighbor graph (07_connectivities) with the oracle leiden labels (08_leiden).
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/09_graph_primitives_parity.py
 """
 
@@ -12,9 +12,9 @@ import logging
 import numpy as np
 import scipy.sparse as sp
 
-from metasinglecell import config, validation
-from metasinglecell.graph import Graph
-from metasinglecell.graph.primitives import (contract, modularity,
+from metalsinglecell import config, validation
+from metalsinglecell.graph import Graph
+from metalsinglecell.graph.primitives import (contract, modularity,
                                              neighbor_community_weights)
 
 

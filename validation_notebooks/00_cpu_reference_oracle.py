@@ -1,9 +1,9 @@
 """Driver: build the fp64 CPU reference oracle (PBMC3k).
 
-Lightweight — all logic lives in ``metasinglecell.reference``. Run inside the
+Lightweight — all logic lives in ``metalsinglecell.reference``. Run inside the
 dedicated env:
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/00_cpu_reference_oracle.py
 
 Writes full-precision snapshots to data/processed/reference/ and a manifest +
@@ -14,8 +14,8 @@ every Metal/MLX kernel built in later stages.
 import logging
 from pathlib import Path
 
-from metasinglecell import config
-from metasinglecell.reference import run_cpu_reference
+from metalsinglecell import config
+from metalsinglecell.reference import run_cpu_reference
 
 
 def main() -> None:

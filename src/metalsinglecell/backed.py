@@ -16,7 +16,7 @@ import logging
 
 import numpy as np
 
-log = logging.getLogger("metasinglecell.backed")
+log = logging.getLogger("metalsinglecell.backed")
 
 # Default budget for a densified per-block matrix (bytes). block_rows is auto-sized
 # from the gene count H so an n_b×H fp32 block stays under this (PCA/scale densify).
@@ -329,7 +329,7 @@ def convert_to_backed_zarr(in_path, out_path, block_rows: int = 20_000):
     writes a cell-axis-chunked CSR zarr via :func:`write_backed_zarr` (which round-trip
     checks a block). Returns the output path. Reproducible from the shell:
 
-        python -m metasinglecell.backed in.h5ad out.zarr --block-rows 100000
+        python -m metalsinglecell.backed in.h5ad out.zarr --block-rows 100000
     """
     import scanpy as sc
 
@@ -345,7 +345,7 @@ def _main(argv=None):
     import argparse
 
     ap = argparse.ArgumentParser(
-        prog="python -m metasinglecell.backed",
+        prog="python -m metalsinglecell.backed",
         description="Convert an .h5ad/.h5 counts matrix to a chunked backed zarr for streaming.")
     ap.add_argument("in_path", help="source .h5ad or 10x .h5")
     ap.add_argument("out_path", help="destination .zarr (chunked along the cell axis)")

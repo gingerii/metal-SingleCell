@@ -4,7 +4,7 @@ The squidpy-GPU ``gr`` functions were previously only checked on synthetic spati
 patterns. This validates them on a REAL spatial dataset (10x Visium V1 Breast
 Cancer, ~3.8k spots with real tissue coordinates) against squidpy itself.
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/v_realspatial.py
 """
 
@@ -13,7 +13,7 @@ import warnings
 
 import numpy as np
 
-from metasinglecell import config
+from metalsinglecell import config
 
 warnings.filterwarnings("ignore")
 
@@ -29,7 +29,7 @@ def main():
     import scipy.sparse as sp
     import squidpy as sq
 
-    from metasinglecell import spatial as gr
+    from metalsinglecell import spatial as gr
 
     # ---- real Visium spatial data ----
     ad = sc.datasets.visium_sge("V1_Breast_Cancer_Block_A_Section_1")

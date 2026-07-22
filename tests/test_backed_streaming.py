@@ -21,7 +21,7 @@ def backed_pbmc(pbmc_counts, tmp_path_factory):
     import anndata as ad
     import zarr
     from anndata.io import sparse_dataset
-    from metasinglecell.backed import write_backed_zarr
+    from metalsinglecell.backed import write_backed_zarr
     a = pbmc_counts.copy()
     keep = np.sort(np.argsort(-np.asarray(a.X.sum(0)).ravel())[:2000])   # top-2000-gene panel
     a = a[:, keep].copy()
@@ -36,13 +36,13 @@ def backed_pbmc(pbmc_counts, tmp_path_factory):
 
 
 def _incore_lognorm(a):
-    from metasinglecell.sparse import CSR
+    from metalsinglecell.sparse import CSR
     ts = float(np.median(np.asarray(sp.csr_matrix(a.X).sum(1)).ravel()))
     return CSR.from_scipy(sp.csr_matrix(a.X)).normalize_total(ts).log1p()
 
 
 def test_streaming_qc_bit_exact(backed_pbmc):
-    from metasinglecell import pp as msc_pp, validation
+    from metalsinglecell import pp as msc_pp, validation
     a, make_backed, _ = backed_pbmc
     incore = a.copy(); msc_pp.calculate_qc_metrics(incore)
     b = make_backed(); msc_pp.calculate_qc_metrics(b)
@@ -53,8 +53,8 @@ def test_streaming_qc_bit_exact(backed_pbmc):
 
 
 def test_streaming_normalize_log1p_bit_exact(backed_pbmc):
-    from metasinglecell import pp as msc_pp, validation
-    from metasinglecell.backed import open_backed
+    from metalsinglecell import pp as msc_pp, validation
+    from metalsinglecell.backed import open_backed
     a, make_backed, zp = backed_pbmc
     b = make_backed()
     msc_pp.calculate_qc_metrics(b); msc_pp.normalize_total(b); msc_pp.log1p(b)
@@ -67,9 +67,9 @@ def test_streaming_normalize_log1p_bit_exact(backed_pbmc):
 
 
 def test_streaming_pca_subspace_matches_incore(backed_pbmc):
-    from metasinglecell import pp as msc_pp, preprocess as _pp, validation
-    from metasinglecell.decomposition import pca as _pca
-    from metasinglecell.sparse import CSR
+    from metalsinglecell import pp as msc_pp, preprocess as _pp, validation
+    from metalsinglecell.decomposition import pca as _pca
+    from metalsinglecell.sparse import CSR
     a, make_backed, _ = backed_pbmc
     b = make_backed()
     msc_pp.calculate_qc_metrics(b); msc_pp.normalize_total(b); msc_pp.log1p(b)
@@ -87,8 +87,8 @@ def test_streaming_pca_subspace_matches_incore(backed_pbmc):
 
 def test_materialize_roundtrip_and_guard(backed_pbmc, tmp_path):
     """materialize checkpoints post-log1p bit-exact; guards the log1p boundary."""
-    from metasinglecell import pp as msc_pp, validation
-    from metasinglecell.backed import open_backed
+    from metalsinglecell import pp as msc_pp, validation
+    from metalsinglecell.backed import open_backed
     a, make_backed, _ = backed_pbmc
     b = make_backed()
     msc_pp.calculate_qc_metrics(b); msc_pp.normalize_total(b); msc_pp.log1p(b)

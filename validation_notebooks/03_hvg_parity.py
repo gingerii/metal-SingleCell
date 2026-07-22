@@ -4,7 +4,7 @@ Builds a CSR from the log-normalized snapshot (``03_lognorm``), runs the GPU
 gene-moments kernel + host seurat binning, and checks per-gene ``means``,
 ``dispersions_norm`` and the ``highly_variable`` flag against snapshots ``04_*``.
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/03_hvg_parity.py
 """
 
@@ -12,10 +12,10 @@ import logging
 
 import scipy.sparse as sp
 
-from metasinglecell import config, validation
-from metasinglecell.preprocess import highly_variable_genes
-from metasinglecell.reference import N_TOP_GENES
-from metasinglecell.sparse import CSR
+from metalsinglecell import config, validation
+from metalsinglecell.preprocess import highly_variable_genes
+from metalsinglecell.reference import N_TOP_GENES
+from metalsinglecell.sparse import CSR
 
 
 def main() -> None:

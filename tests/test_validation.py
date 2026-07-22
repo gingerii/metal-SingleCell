@@ -4,7 +4,7 @@ import numpy as np
 
 
 def test_compare_identical_passes_exact():
-    from metasinglecell import validation
+    from metalsinglecell import validation
     a = np.linspace(0, 1, 100)
     r = validation.compare("id", a, a.copy())
     assert r["passed"] and r["exact_match"]
@@ -12,7 +12,7 @@ def test_compare_identical_passes_exact():
 
 
 def test_compare_within_tolerance_passes_not_exact():
-    from metasinglecell import validation
+    from metalsinglecell import validation
     a = np.linspace(1, 2, 100)
     r = validation.compare("close", a + 1e-8, a, rtol=1e-5, atol=1e-6)
     assert r["passed"] and not r["exact_match"]
@@ -20,20 +20,20 @@ def test_compare_within_tolerance_passes_not_exact():
 
 
 def test_compare_beyond_tolerance_fails():
-    from metasinglecell import validation
+    from metalsinglecell import validation
     a = np.ones(50)
     r = validation.compare("far", a + 0.1, a, rtol=1e-5, atol=1e-6)
     assert not r["passed"] and r["max_abs_err"] >= 0.1
 
 
 def test_compare_shape_mismatch_fails_gracefully():
-    from metasinglecell import validation
+    from metalsinglecell import validation
     r = validation.compare("shape", np.ones(10), np.ones(11))
     assert not r["passed"] and r["reason"] == "shape_mismatch"
 
 
 def test_compare_nonfinite_masks_must_match():
-    from metasinglecell import validation
+    from metalsinglecell import validation
     a = np.array([1.0, 2.0, np.nan, 4.0])
     b = np.array([1.0, 2.0, np.nan, 4.0])
     assert validation.compare("nan_ok", a, b)["passed"]           # matching nan masks
@@ -42,7 +42,7 @@ def test_compare_nonfinite_masks_must_match():
 
 
 def test_subspace_overlap_identical_and_orthogonal():
-    from metasinglecell import validation
+    from metalsinglecell import validation
     rng = np.random.default_rng(0)
     A = rng.standard_normal((50, 5))
     assert abs(validation.subspace_overlap(A, A.copy()) - 1.0) < 1e-9
@@ -52,7 +52,7 @@ def test_subspace_overlap_identical_and_orthogonal():
 
 
 def test_compare_signed_columns_sign_invariant():
-    from metasinglecell import validation
+    from metalsinglecell import validation
     rng = np.random.default_rng(1)
     A = rng.standard_normal((80, 4))
     B = A * np.array([1, -1, 1, -1])                              # per-column sign flips
@@ -62,7 +62,7 @@ def test_compare_signed_columns_sign_invariant():
 
 def test_write_report_roundtrips(tmp_path):
     import csv
-    from metasinglecell import validation
+    from metalsinglecell import validation
     recs = [validation.compare("a", np.ones(3), np.ones(3)),
             validation.compare("b", np.ones(3), np.zeros(3))]
     out = validation.write_report(recs, "__unit_test_report__", filename="unit.csv")

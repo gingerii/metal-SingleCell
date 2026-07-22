@@ -6,7 +6,7 @@ scanpy's k-NN can be approximate (pynndescent), so the meaningful check is the
 per-cell neighbor-set overlap (ours is exact); connectivities are compared on
 their shared support.
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/06_neighbors_parity.py
 """
 
@@ -15,9 +15,9 @@ import logging
 import numpy as np
 import scipy.sparse as sp
 
-from metasinglecell import config, validation
-from metasinglecell.neighbors import neighbors
-from metasinglecell.reference import N_NEIGHBORS
+from metalsinglecell import config, validation
+from metalsinglecell.neighbors import neighbors
+from metalsinglecell.reference import N_NEIGHBORS
 
 
 def main() -> None:

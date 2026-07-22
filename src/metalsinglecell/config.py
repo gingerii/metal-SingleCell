@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-# Repo root = two levels up from this file (src/metasinglecell/config.py).
+# Repo root = two levels up from this file (src/metalsinglecell/config.py).
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # DATA_ROOT lets you point data/ at an external mount; defaults to the repo.

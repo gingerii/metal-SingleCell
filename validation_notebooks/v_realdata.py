@@ -5,7 +5,7 @@ flagged functions vs scanpy on real data, and tests the IVF-KNN scale path on a
 real-structure embedding tiled up to 100k (real cluster structure, unlike the
 random synthetic worst case).
 
-    conda activate metasinglecell
+    conda activate metalsinglecell
     python validation_notebooks/v_realdata.py
 """
 
@@ -15,7 +15,7 @@ import warnings
 
 import numpy as np
 
-from metasinglecell import config, validation
+from metalsinglecell import config, validation
 
 warnings.filterwarnings("ignore")
 
@@ -30,12 +30,12 @@ def main():
     from sklearn.metrics import adjusted_rand_score
     from sklearn.neighbors import NearestNeighbors
 
-    from metasinglecell import preprocess as pp, tools
-    from metasinglecell.cluster import leiden
-    from metasinglecell.decomposition import pca
-    from metasinglecell.embedding import umap
-    from metasinglecell.neighbors import _knn_ivf, neighbors
-    from metasinglecell.sparse import CSR
+    from metalsinglecell import preprocess as pp, tools
+    from metalsinglecell.cluster import leiden
+    from metalsinglecell.decomposition import pca
+    from metalsinglecell.embedding import umap
+    from metalsinglecell.neighbors import _knn_ivf, neighbors
+    from metalsinglecell.sparse import CSR
 
     # ---- real PBMC3k pipeline ----
     ad = sc.datasets.pbmc3k()

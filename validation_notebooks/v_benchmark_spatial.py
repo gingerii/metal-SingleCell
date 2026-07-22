@@ -18,7 +18,7 @@ import warnings
 
 import numpy as np
 
-from metasinglecell import config
+from metalsinglecell import config
 
 warnings.filterwarnings("ignore")
 
@@ -67,8 +67,8 @@ def main():
     import squidpy as sq
     import mlx.core as mx
 
-    from metasinglecell import spatial as gr
-    from metasinglecell import tools
+    from metalsinglecell import spatial as gr
+    from metalsinglecell import tools
 
     print(f"=== loading {key} ({platform}) ===", flush=True)
     ad = ad_io.read_h5ad(path)
@@ -97,8 +97,8 @@ def main():
     if "X_pca" in ad.obsm:
         emb = np.asarray(ad.obsm["X_pca"], dtype=np.float32)[:, :30]
     else:
-        from metasinglecell.sparse import CSR
-        from metasinglecell.decomposition import pca
+        from metalsinglecell.sparse import CSR
+        from metalsinglecell.decomposition import pca
         ng = min(2000, ad.n_vars)
         sc.pp.highly_variable_genes(ad, n_top_genes=ng, flavor="seurat")
         hv = ad.var["highly_variable"].to_numpy()

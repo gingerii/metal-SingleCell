@@ -5,11 +5,11 @@ single-cell analysis stack for Apple Silicon. Version `0.0.1`. Source:
 `https://github.com/gingerii/metal-SingleCell`.
 
 All benchmarks and validation were run on Apple **M3 Max** (40-core GPU, Metal 3, ~400 GB/s; 16-core
-CPU; 48 GB unified memory), **macOS 14.4**, with the single `metasinglecell` conda environment below.
+CPU; 48 GB unified memory), **macOS 14.4**, with the single `metalsinglecell` conda environment below.
 GPU compute uses Apple's Metal backend through MLX; CPU references use the standard scanpy/squidpy
 stack on the same machine.
 
-## metasinglecell environment (Python 3.11.15)
+## metalsinglecell environment (Python 3.11.15)
 
 **GPU backend:** mlx 0.31.2.
 
@@ -33,7 +33,7 @@ statsmodels 0.14.6.
 - The package itself depends only on **numpy**, **scipy**, and **mlx** (the GPU substrate); all other
   packages are the CPU reference implementations used for accuracy/speed validation and for the
   tutorial notebooks (plotting, dataset loaders).
-- Heavy backends are lazy-imported, so `metasinglecell` installs and imports in any environment;
+- Heavy backends are lazy-imported, so `metalsinglecell` installs and imports in any environment;
   install with `pip install -e .`.
 - Environment specifications: [`envs/`](envs/). Full benchmark methodology and per-function results:
   [`results/validation/RESULTS_v_benchmark.md`](results/validation/RESULTS_v_benchmark.md).
