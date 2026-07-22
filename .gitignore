@@ -45,3 +45,7 @@ RESOURCES.md
 
 # stray build scratch script
 scratchpad_build_brain1m_graph.py
+
+# Sphinx docs build output
+docs/_build/
+docs/api/generated/

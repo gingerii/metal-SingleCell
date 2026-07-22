@@ -1,0 +1,5 @@
+sphinx>=7
+myst-nb>=1.1
+sphinx-design>=0.6
+pydata-sphinx-theme>=0.15
+sphinx-autodoc-typehints>=2.0

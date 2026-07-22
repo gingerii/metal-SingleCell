@@ -1,0 +1,23 @@
+# ReadTheDocs build configuration
+# https://docs.readthedocs.io/en/stable/config-file/v2.html
+version: 2
+
+build:
+  os: ubuntu-24.04
+  tools:
+    python: "3.11"
+
+sphinx:
+  configuration: docs/conf.py
+  fail_on_warning: false
+
+python:
+  install:
+    - requirements: docs/requirements.txt
+    # Install the package itself (core deps only; heavy backends are mocked in conf.py).
+    # mlx is Darwin/arm64-only, so on RTD's Linux workers only the NumPy/SciPy core installs.
+    - method: pip
+      path: .
+
+formats:
+  - htmlzip
