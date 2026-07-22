@@ -25,11 +25,70 @@ def _l2_normalize(M):
     return M / (mx.sqrt(mx.sum(M * M, axis=1, keepdims=True)) + 1e-12)
 
 
+def _correction_gpu(Zg, R, Phi_g, O, ridge_lambda: float, B: int):
+    """On-GPU Harmony ridge correction — analytic block-inverse, no linear solver.
+
+    Port of harmony-pytorch's ``correction`` (lilab-bcb/harmony-pytorch), the acknowledged
+    upstream for scanpy's/rapids' Harmony. Each cluster's ridge system is the tiny
+    ``(B+1)×(B+1)`` matrix ``Φ₁ᵀ diag(R_k) Φ₁ + λ·pen``; harmony-pytorch inverts it in closed
+    form from its block structure (a diagonal build + two matmuls) instead of calling a solver —
+    which sidesteps MLX's CPU-backed ``linalg.solve`` entirely and keeps every op on the GPU.
+
+    This is a **Jacobi** correction (all K clusters use the fixed ``Zg`` passed in, accumulating
+    into ``Z``), matching harmony-pytorch — unlike our previous running-``Zc`` (Gauss-Seidel)
+    host loop. Conventions here: ``R`` is (K×N), ``O`` is (K×B), ``Phi_g`` is (N×B). fp32 on-device
+    (the upstream reference runs fp32 on-device too).
+    """
+    import mlx.core as mx
+    N, d = Zg.shape
+    K = R.shape[0]
+    Phi_1 = mx.concatenate([mx.ones((N, 1)), Phi_g], axis=1)   # N × (B+1)
+    Z = Zg
+    for k in range(K):
+        O_k = O[k]                                             # (B,)
+        N_k = mx.sum(O_k)
+        factor = 1.0 / (O_k + ridge_lambda)                   # (B,)
+        c = N_k + mx.sum(-factor * O_k * O_k)
+        c_inv = 1.0 / c
+        top = -factor * O_k                                   # P[0, 1:]  (B,)
+        P = mx.eye(B + 1)
+        P = P.at[0, 1:].add(top)
+        diag_vec = mx.concatenate([c_inv[None], factor])      # (B+1,)
+        P_t_B_inv = mx.diag(diag_vec)
+        P_t_B_inv = P_t_B_inv.at[1:, 0].add(top * c_inv)
+        inv_mat = P_t_B_inv @ P                               # (B+1)×(B+1)
+        Phi_t_diag_R = Phi_1.T * R[k][None, :]                # (B+1) × N
+        W = inv_mat @ (Phi_t_diag_R @ Zg)                     # (B+1) × d  (uses fixed Zg)
+        W = mx.concatenate([mx.zeros((1, d)), W[1:]], axis=0)  # keep global mean (W[0]=0)
+        Z = Z - Phi_t_diag_R.T @ W
+    mx.eval(Z)
+    return Z
+
+
+def _correction_host(Zg, R, Phi, ridge_lambda: float, B: int, K: int):
+    """fp64 host ridge correction (running-Zc / Gauss-Seidel) — retained as a validation
+    oracle / fp64 numerical anchor. K small (B+1)×(B+1) ``np.linalg.solve`` on the CPU.
+    """
+    import mlx.core as mx
+    N = Zg.shape[0]
+    phi1 = np.concatenate([np.ones((N, 1)), np.asarray(Phi, np.float64)], axis=1)  # N × (B+1)
+    Rn = np.asarray(R, np.float64)                       # K × N
+    Zc = np.asarray(Zg, np.float64)
+    pen = np.diag([0.0] + [ridge_lambda] * B)
+    for k in range(K):
+        phi_rk = phi1 * Rn[k][:, None]
+        A = phi_rk.T @ phi1 + pen
+        W = np.linalg.solve(A, phi_rk.T @ Zc)
+        W[0] = 0.0
+        Zc = Zc - phi_rk @ W
+    return mx.array(Zc.astype(np.float32))
+
+
 def harmonize(Z, batch, n_clusters: int | None = None, sigma: float = 0.1,
               theta: float = 2.0, ridge_lambda: float = 1.0,
               max_iter_harmony: int = 10, max_iter_clustering: int = 20,
               tol_harmony: float = 1e-4, tol_clustering: float = 1e-5,
-              random_state: int = 0) -> np.ndarray:
+              random_state: int = 0, correction: str = "gpu") -> np.ndarray:
     """Harmony batch correction of an embedding. Returns the corrected ``Z``.
 
     ``Z`` is (cells × n_pcs); ``batch`` is a length-cells array of batch labels.
@@ -110,19 +169,13 @@ def harmonize(Z, batch, n_clusters: int | None = None, sigma: float = 0.1,
                 break
 
         # ---- correction: per-cluster ridge regression removing batch shift ----
-        # fp64 host ridge solve (stability-critical, matching the module's fp64 anchor policy):
-        # the K small (B+1)×(B+1) solves are cheap, so run them in fp64 not fp32.
-        phi1 = np.concatenate([np.ones((N, 1)), np.asarray(Phi, np.float64)], axis=1)  # N × (B+1)
-        Rn = np.asarray(R, np.float64)                       # K × N
-        Zc = np.asarray(Zg, np.float64)                      # corrected embedding (host)
-        pen = np.diag([0.0] + [ridge_lambda] * B)            # don't penalize intercept
-        for k in range(K):
-            phi_rk = phi1 * Rn[k][:, None]                   # N × (B+1)
-            A = phi_rk.T @ phi1 + pen
-            W = np.linalg.solve(A, phi_rk.T @ Zc)            # (B+1) × d
-            W[0] = 0.0                                       # keep the global mean
-            Zc = Zc - phi_rk @ W
-        Zg = mx.array(Zc.astype(np.float32))
+        # "gpu" (default): on-GPU analytic block-inverse (ported from harmony-pytorch) — no
+        # linear solver, no host round-trip. "host": fp64 CPU oracle (running-Zc). See the
+        # two _correction_* helpers. O here is (K×B); it pairs with R (K×N).
+        if correction == "gpu":
+            Zg = _correction_gpu(Zg, R, Phi_g, O, ridge_lambda, B)
+        else:
+            Zg = _correction_host(Zg, R, Phi, ridge_lambda, B, K)
         Z_norm = _l2_normalize(Zg)
         R = assign(Y)
         O = R @ Phi_g
