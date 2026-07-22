@@ -91,34 +91,54 @@ impractical at that scale.
 Sizes are cells: **2k–2M are the 1.3 M-neuron atlas** (sub-/over-sampled) and the **2 M-cell Xenium
 cohort** — one consistent data family across the table.
 
-### Tier 1 — large GPU wins (parallel-arithmetic, bandwidth-bound)
+One table, every accelerated function. Speedup = CPU reference wall time ÷ ours (higher = GPU faster);
+**bold** marks the largest win in a row. `–` = not run at that size; `(N s)` = our runtime in seconds
+where a CPU reference is impractical at that scale. Rows are grouped by pipeline stage.
 
-| function | 2k | 50k | 100k | 1M | 2M |
-|----------|---:|----:|-----:|---:|---:|
-| highly_variable_genes | 5.8× | 25.9× | 32.9× | 15.8× | **49.2×** |
-| umap | **32.2×** | 10.5× | 7.8× | (188 s) | (75 s) |
-| scrublet | 15.1× | 6.4× | – | – | – |
-| draw_graph | 16.1× | – | – | – | – |
-| normalize_pearson_residuals | 7.4× | 9.8× | 9.1× | – | – |
-| rank_genes_groups (t-test) | 3.7× | 9.6× | 7.6× | – | – |
-| pca (sparse) | 2.1× | 4.3× | 4.4× | 4.5× | (8.0 s) |
-| kmeans | 1.1× | 3.5× | 4.0× | (1.1 s) | (3.2 s) |
-| diffmap | 1.7× | 2.9× | 2.7× | 3.6× | (36 s) |
-| normalize + log1p | 5.4× | 3.5× | 3.5× | 1.7× | 2.8× |
+| function | 2k | 50k | 100k | 1M | 2M | accuracy / notes |
+|----------|---:|----:|-----:|---:|---:|:--|
+| normalize + log1p | 5.4× | 3.5× | 3.5× | 1.7× | 2.8× | Δ ≈ 1e-6 |
+| normalize_pearson_residuals | 7.4× | 9.8× | 9.1× | – | – | exact |
+| highly_variable_genes | 5.8× | 25.9× | 32.9× | 15.8× | **49.2×** | gene-overlap 1.000 |
+| regress_out | 1.5× | 1.7× | 1.6× | – | – | Δ ≈ 1e-5 |
+| scrublet | 15.1× | 6.4× | – | – | – | doublet scores match |
+| pca (sparse) | 2.1× | 4.3× | 4.4× | 4.5× | (8.0 s) | subspace 0.97–0.99 |
+| neighbors | 1.4× | 4.7× | 4.9× | **6.6×** | (34.8 s) | kNN recall ~0.97 ⁂ |
+| bbknn | 7.4× | 1.7× | 1.3× | – | – | per-batch top-k kernel |
+| umap ‡ | 15.1× | **29.6×** | 28.2× | (29 s) | (54 s) | trustworthiness 0.95 |
+| tsne | 2.1× | 7.0× | 6.6× | – | – | trustworthiness ~0.98 |
+| diffmap | 1.7× | 2.9× | 2.7× | 3.6× | (36 s) | |
+| draw_graph | 16.1× | (2.4 s) | (4.4 s) | – | – | |
+| kmeans | 1.1× | 3.5× | 4.0× | (1.1 s) | (3.2 s) | |
+| leiden † | 0.05× | 4.6× | 3.6× | 3.2× | 3.5× | Q at igraph parity |
+| louvain † | 0.14× | 21.9× | 21.0× | 9.7× | (16.1 s) | Q at igraph parity |
+| rank_genes_groups (t-test) | 3.7× | 9.6× | 7.6× | – | – | top-k overlap 1.000 |
+| rank_genes_groups (logreg) | 0.9× | 2.2× | – | – | – | |
+| score_genes | (0.2 s) | (4.6 s) | (9.7 s) | – | – | ref not benchmarked § |
+| harmonize | 0.17× | **6.3×** | 2.2× | – | – | mixing ≥ harmonypy |
+| co_occurrence (spatial) | – | ~1.6× | ~1.6× | – | – | correlation 1.000 vs squidpy |
 
-### Tier 2 — GPU wins **at scale** (graph clustering)
+Sizes are cells; **2k–2M are the 1.3 M-neuron atlas** (sub-/over-sampled) and the **2 M-cell Xenium
+cohort** — one consistent data family. 2M `neighbors`/`umap` are measured on the cached atlas PCA
+embedding (the full-gene path OOMs at 2M).
 
-| function | 2k | 50k | 100k | 1M | 2M | real 1M† |
-|----------|---:|----:|-----:|---:|---:|---:|
-| louvain | 0.14× | 21.9× | 21.0× | 9.7× | (16.1 s) | **58.6×** |
-| leiden | 0.05× | 4.6× | 3.6× | 3.2× | 3.5× | **4.8×** |
+‡ **umap** — the shipped **hybrid layout** (mlx-vis's GPU SGD optimizer driven by our shared neighbor
+graph) fixes the old layout's superlinear-at-scale problem (1M 188 s → 29 s) and, versus the *previous*
+GPU layout, is ~4× faster at 50k (0.66 s vs 2.58 s) **and** higher quality (trustworthiness 0.95 vs
+0.86), while preserving the `neighbors`→`{leiden,umap}` shared-graph contract. `embedding.py` is now
+umap-learn-free.
 
-†*real 1M* = the actual 986k-neuron kNN-15 graph (not synthetic); 50k–2M are SBM benchmark graphs where
-igraph is unusually fast, so they understate the real-data advantage. Leiden timed at `n_iterations=1`
-(the speed operating point — see note below).
+⁂ **neighbors** uses a GPU brute path ≤30k (exact) and a vendored mlx-vis GPU NN-descent above (recall
+~0.97), retiring the CPU-pynndescent fallback — reproducible wall time, 4.7–6.6× across 50k–1M.
 
-`co_occurrence` (spatial): ~1.6× vs squidpy at 25k–100k, exact match, and scales past the n² memory
-wall via a tiled device-atomic-histogram kernel.
+† **leiden / louvain** rows are SBM benchmark graphs (50k–2M), on which igraph is unusually fast, so they
+*understate* the real-data advantage: on the actual 986k-neuron kNN-15 graph, **Leiden is 4.8× and
+Louvain 58.6×**. Leiden timed at `n_iterations=1` (the speed operating point — see below).
+
+§ **score_genes** runs on-GPU but the CPU reference errors in the current harness (a gene-list plumbing
+bug, not a compute failure); runtimes shown, speedup pending a harness fix.
+
+`co_occurrence` also scales past the n² memory wall via a tiled device-atomic-histogram kernel.
 
 Clustering crosses over with cell count: **Louvain wins from ~50k up (58.6× on the real 986k-neuron
 graph)**, and **Leiden — after an O(degree) SIMD-group kernel rewrite + vertex pruning — went from a
@@ -135,9 +155,9 @@ igraph). Both are valid; pick speed or exact-parity per run.
 Every accelerated function is validated against its CPU reference: normalize/Pearson exact (Δ≈1e-6),
 HVG gene-overlap **1.000**, PCA subspace 0.97–0.99, rank-genes top-k overlap 1.000, Leiden modularity at
 igraph parity (Q 0.8586 vs 0.8588 at `n_iterations=2`; Q 0.8504 at the `n_iterations=1` speed point),
-kNN recall ≈0.99, co-occurrence correlation **1.000** vs squidpy. An asserting `tests/` suite is in
-progress (drop-in defaults, kNN and numerical-accuracy guards landed; streaming/out-of-core coverage is
-being added).
+kNN recall ≈0.99, co-occurrence correlation **1.000** vs squidpy. An asserting `tests/` suite covers
+drop-in defaults, GPU-parity, numerical-accuracy guards, streaming/out-of-core, and harmonize quality,
+run in CI (a CPU lane + a self-hosted Metal-GPU lane).
 
 ## What was solved
 
@@ -153,6 +173,13 @@ being added).
   (11.9 s → 2.9 s on the 986k graph) at equal-or-better modularity — winning at every scale ≥50k.
 - **A fused co-occurrence kernel** — a tiled device-atomic histogram that matches squidpy exactly,
   runs ~1.6× faster, and scales past the n² memory wall to 100k+ cells.
+- **GPU-native kNN, t-SNE, and Harmony** — the neighbor graph (>30k) now builds on a GPU **NN-descent**
+  (vendored from [mlx-vis](https://github.com/hanxiao/mlx-vis)), retiring the CPU-pynndescent fallback
+  (recall-matched at ~0.97, **4.7–6.6× faster** across 50k–1M, reproducible wall time); **t-SNE** runs
+  entirely on the Metal GPU (mlx-vis, FFT-interpolation repulsion, **~7× at 50k–100k**); and **Harmony**
+  integration was rewritten to run every step on-GPU — an analytic block-inverse correction (no linear
+  solver), a GPU k-means init, and GPU L2-norms — turning a 0.07–0.59× loss into a **6.3× win at 50k /
+  2.2× at 100k**, mixing quality (iLISI) matching or beating harmonypy.
 - **Out-of-core front-end (streaming from disk)** — the sparse, memory-bound front-end
   (QC → normalize → log1p → HVG → scale → PCA) streams cell-axis row-blocks from a chunked on-disk zarr
   store, so peak memory is bounded by one block, not the cell count. The **full 1,306,127 × 27,998 atlas
@@ -205,21 +232,28 @@ runs in memory as usual — the `n × 50` embedding is small even at atlas scale
 We benchmarked honestly; the GPU does not win everywhere on this hardware. **Use the CPU
 implementation (scanpy / squidpy / `backend="igraph"`) when:**
 
-- **k-nearest-neighbors above ~250k cells.** `neighbors` dispatches to CPU `pynndescent` past 250k
-  because a graph-based ANN genuinely beats our GPU brute/IVF there (measured: GPU IVF is ~2× *slower*
-  at 1M). `bbknn` (batch-balanced kNN) is CPU-favored at scale for the same reason.
 - **Leiden / Louvain below ~50k cells.** igraph's lazy-sequential optimizer is extremely fast on small
   graphs; the GPU only wins once parallelism outweighs launch/coloring overhead (keep the default
   `backend="igraph"` for small data).
-- **Harmony integration.** An iterative small-matrix algorithm the CPU wins (our mixing quality
-  matches/beats harmonypy, but it's slower on M3).
-- **t-SNE above ~30k cells.** We delegate to scikit-learn's Barnes-Hut (≈1×); exact t-SNE is GPU-only
-  below 30k.
+- **Harmony integration below ~50k cells.** After the GPU rewrite Harmony *wins* at scale (6.3× at 50k,
+  2.2× at 100k — the speedup peaks near 50k because our correction is superlinear in N while harmonypy is
+  near-linear), but at a few-thousand cells it still loses (~0.15×) — the clustering loop is
+  launch-latency-bound and CPU harmonypy is sub-second there anyway. Mixing quality matches/beats
+  harmonypy at every scale.
 
-Rule of thumb: the M3 GPU wins on **parallel-arithmetic, bandwidth-bound** work (and on clustering
-once graphs are large), and loses on **iterative / latency-bound / well-optimized-ANN** work. Against
-an already-optimized CPU reference (numba / igraph / pynndescent), a GPU kernel on M3 typically wins
-~1.5–2× (the bandwidth ratio), not 10× — the large wins come from removing genuine algorithmic waste.
+**No longer CPU-favored (these changed):**
+- **k-nearest-neighbors at scale** — `neighbors` now uses a GPU NN-descent (vendored mlx-vis) as the
+  default >30k backend, replacing the old CPU-pynndescent fallback: recall matches/beats it while
+  running 4.7–6.6× faster across 50k–1M with reproducible wall time. `bbknn`'s top-k rewrite flips its
+  50k and 100k cases from losses (0.66× / 0.41×) to wins (1.7× / 1.3×).
+- **t-SNE at every scale** — the vendored mlx-vis GPU t-SNE (FFT-interpolation repulsion) replaces the
+  old sklearn Barnes-Hut delegation, winning ~2× at 2k–3k and ~7× at 50k–100k.
+
+Rule of thumb: the M3 GPU wins on **parallel-arithmetic, bandwidth-bound** work (and on clustering /
+kNN / integration once the data is large enough to amortize launch overhead), and loses on
+**launch-latency-bound work at small N**. Against an already-optimized CPU reference
+(numba / igraph / pynndescent), a GPU kernel on M3 typically wins ~1.5–2× (the bandwidth ratio) on raw
+arithmetic; the large wins come from removing genuine algorithmic waste.
 
 ## vs rapids-singlecell (NVIDIA)
 
@@ -239,9 +273,10 @@ builds on, and the API and workflows are modeled directly on these libraries —
   and the source of the tutorials and out-of-core design reproduced here. Dicks, S. *et al.
   GPU-accelerated single-cell analysis at scale with rapids-singlecell.* arXiv:2603.02402 (2026).
   doi:[10.48550/arXiv.2603.02402](https://doi.org/10.48550/arXiv.2603.02402).
-- **[mlx-vis](https://github.com/hanxiao/mlx-vis)** — the pure-MLX Apple-Silicon GPU implementations of
-  NNDescent (approximate k-NN graph) and t-SNE that this project's neighbor-graph and t-SNE paths build
-  on. Xiao, H. *mlx-vis: GPU-Native Dimensionality Reduction on Apple Silicon.* arXiv:2603.04035 (2026).
+- **[mlx-vis](https://github.com/hanxiao/mlx-vis)** (Apache-2.0) — the pure-MLX Apple-Silicon GPU
+  NNDescent (approximate k-NN graph), t-SNE, and UMAP-layout code that this project's neighbor-graph,
+  t-SNE, and UMAP-layout paths use (vendored under `src/metasinglecell/_vendor/mlx_vis/`, with NOTICE).
+  Xiao, H. *mlx-vis: GPU-Native Dimensionality Reduction on Apple Silicon.* arXiv:2603.04035 (2026).
   doi:[10.48550/arXiv.2603.04035](https://doi.org/10.48550/arXiv.2603.04035).
 - **[scanpy](https://scanpy.readthedocs.io)** — Wolf, F. A., Angerer, P. & Theis, F. J. *SCANPY:
   large-scale single-cell gene expression data analysis.* Genome Biology 19, 15 (2018).
@@ -262,6 +297,7 @@ released under permissive licenses (MIT / BSD-3-Clause); MLX is MIT.
 ## Status
 
 Functionally complete and validated (pp / tl / gr + tutorials + benchmark), with an **out-of-core
-streaming front-end** for datasets larger than memory. An asserting `tests/` suite + CI is in progress
-(pre-PyPI). Version `0.0.1`. The full benchmark with methodology is in
+streaming front-end** for datasets larger than memory, a GPU-native kNN / t-SNE / Harmony path, and an
+asserting `tests/` suite run in CI (CPU + self-hosted Metal-GPU lanes). Pre-PyPI at version `0.0.1`.
+The full benchmark with methodology is in
 [`results/validation/RESULTS_v_benchmark.md`](results/validation/RESULTS_v_benchmark.md).
