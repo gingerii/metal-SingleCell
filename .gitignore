@@ -5,6 +5,15 @@ data/
 results/*
 !results/.gitkeep
 !results/**/.gitkeep
+# ...except the benchmark methodology doc, which the README/CODE_AVAILABILITY link to
+!results/validation/
+results/validation/*
+!results/validation/RESULTS_v_benchmark.md
+
+# Local-only working material (kept on disk, not published to the repo)
+SPATIAL_KNN_investigation.md
+experimental/
+validation_notebooks/
 
 # Python
 __pycache__/
