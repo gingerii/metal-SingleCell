@@ -94,7 +94,6 @@ def harmonize(Z, batch, n_clusters: int | None = None, sigma: float = 0.1,
     ``Z`` is (cells × n_pcs); ``batch`` is a length-cells array of batch labels.
     """
     import mlx.core as mx
-    from sklearn.cluster import KMeans
 
     Z = np.asarray(Z, dtype=np.float32)
     N, d = Z.shape
@@ -115,9 +114,15 @@ def harmonize(Z, batch, n_clusters: int | None = None, sigma: float = 0.1,
     Pr_g = mx.array(Pr_b)
 
     # --- initialize centroids (cosine KMeans on the normalized embedding) ---
-    km = KMeans(n_clusters=K, n_init=10, max_iter=25, random_state=random_state)
-    km.fit(np.asarray(Z_norm))
-    Y = _l2_normalize(mx.array(km.cluster_centers_.astype(np.float32)))
+    # GPU Lloyd's (our tools.kmeans) on the L2-normalized embedding — for unit vectors
+    # Euclidean k-means ≡ cosine k-means, the same normalized-space init sklearn/harmony-pytorch
+    # use. Returns labels; derive normalized centroids with one one-hot matmul. Replaces the
+    # host sklearn KMeans (n_init=10) — a CPU excursion at every run's start. Init only needs to
+    # be reasonable (Harmony refines it).
+    from .tools import kmeans as _kmeans
+    labels = _kmeans(np.asarray(Z_norm), n_clusters=K, max_iter=25, random_state=random_state)
+    onehot = (mx.array(labels)[:, None] == mx.arange(K)[None, :]).astype(mx.float32)  # N × K
+    Y = _l2_normalize((onehot.T @ Z_norm) / mx.maximum(mx.sum(onehot, axis=0, keepdims=True).T, 1.0))
 
     # soft assignment R (K × N) from cosine distance
     def assign(Y, omega_n=None):
