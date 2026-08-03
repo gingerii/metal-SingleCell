@@ -32,6 +32,7 @@ def _spread(Y):
     return core / (Y.max(axis=0) - Y.min(axis=0))
 
 
+@pytest.mark.metal
 def test_disconnected_graph_init_is_not_collapsed():
     """The failure mode: one big component plus rare tight ones."""
     graph = _disconnected_graph([4000] + [40] * 20)
@@ -47,6 +48,7 @@ def test_disconnected_graph_init_is_not_collapsed():
     assert len(np.unique(np.round(Y, 2), axis=0)) > 0.9 * graph.shape[0]
 
 
+@pytest.mark.metal
 def test_components_are_separated_and_sized_by_cell_count():
     graph = _disconnected_graph([2000, 2000, 30])
     with pytest.warns(UserWarning, match="connected components"):
@@ -61,6 +63,26 @@ def test_components_are_separated_and_sized_by_cell_count():
     assert extent(small) < extent(big_a)
 
 
+def test_multi_component_placement_without_a_gpu():
+    """Components below the spectral-layout floor are scattered, not stacked.
+
+    Every component here is small enough to take the scatter branch, so this exercises the
+    component split, the disc packing and the placement with no MLX — i.e. it runs on the
+    CPU lane, where the rest of the layout tests are skipped.
+    """
+    graph = _disconnected_graph([10] * 12)
+    with pytest.warns(UserWarning, match="connected components"):
+        Y = embedding._initial_embedding(graph, 2, random_state=0)
+
+    assert Y.shape == (120, 2)
+    assert not embedding._is_degenerate(Y)
+    centroids = Y.reshape(12, 10, 2).mean(axis=1)
+    d = np.linalg.norm(centroids[:, None, :] - centroids[None, :, :], axis=-1)
+    np.fill_diagonal(d, np.inf)
+    assert d.min() > 0.5, d.min()          # components occupy distinct regions
+
+
+@pytest.mark.metal
 def test_connected_graph_still_uses_a_plain_spectral_layout():
     graph = _disconnected_graph([3000])
     import warnings
@@ -113,6 +135,7 @@ def test_weak_edges_are_pruned():
     assert pruned.data.min() == pytest.approx(1.0)
 
 
+@pytest.mark.metal
 def test_umap_end_to_end_on_a_disconnected_graph():
     graph = _disconnected_graph([3000] + [40] * 10)
     with pytest.warns(UserWarning, match="connected components"):
