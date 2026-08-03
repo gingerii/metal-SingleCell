@@ -24,7 +24,9 @@ Vendored into metal-SingleCell (rather than taken as a runtime dependency) to ke
 dependency footprint minimal. metal-SingleCell also adapts vendored outputs at its own call
 sites without modifying these files: `metalsinglecell.neighbors` over-builds + self-prepends
 the NNDescent graph; `metalsinglecell.embedding.umap` drives the vendored UMAP optimizer
-(`_spectral_init` + `_optimize`) with our own prebuilt connectivity graph; and
+(`_optimize`, plus `_find_ab_params`) with our own prebuilt connectivity graph and our own
+component-aware initialization (the vendored `_spectral_init` assumes a connected graph —
+see `metalsinglecell.embedding._initial_embedding`); and
 `metalsinglecell.tools.tsne` calls the vendored TSNE as its default backend.
 
 Changes to the vendored files: as itemized above (relative-import rewrites throughout; the

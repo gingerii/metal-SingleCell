@@ -75,12 +75,17 @@ def louvain(adata, resolution: float = 1.0, key_added: str = "louvain", random_s
 
 
 def umap(adata, min_dist: float = 0.5, spread: float = 1.0, n_components: int = 2,
-         n_epochs: int | None = None, random_state: int = 0, copy: bool = False):
-    """UMAP embedding (``sc.tl.umap``); writes ``adata.obsm['X_umap']``."""
+         n_epochs: int | None = None, random_state: int = 0,
+         init: str | np.ndarray = "spectral", copy: bool = False):
+    """UMAP embedding (``sc.tl.umap``); writes ``adata.obsm['X_umap']``.
+
+    ``init`` is ``"spectral"`` (default), ``"random"``, or an ``(n_obs, n_components)`` array.
+    """
     from .embedding import umap as _umap
     adata = adata.copy() if copy else adata
     adata.obsm["X_umap"] = _umap(_conn(adata), n_components=n_components, n_epochs=n_epochs,
-                                 min_dist=min_dist, spread=spread, random_state=random_state)
+                                 min_dist=min_dist, spread=spread, random_state=random_state,
+                                 init=init)
     return adata if copy else None
 
 
