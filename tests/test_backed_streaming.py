@@ -75,7 +75,7 @@ def test_streaming_pca_subspace_matches_incore(backed_pbmc):
     msc_pp.calculate_qc_metrics(b); msc_pp.normalize_total(b); msc_pp.log1p(b)
     msc_pp.highly_variable_genes(b, n_top_genes=1000, flavor="seurat")
     msc_pp.scale(b, max_value=10.0)
-    msc_pp.pca(b, n_comps=50, use_highly_variable=True)
+    msc_pp.pca(b, n_comps=50, mask_var="highly_variable")
     # in-core reference: lognorm → hvg → subset → scale → covariance_eigh
     ln = _incore_lognorm(a)
     mask = _pp.highly_variable_genes(ln, n_top_genes=1000, flavor="seurat")["highly_variable"].to_numpy()

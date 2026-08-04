@@ -71,7 +71,7 @@ def test_pca_dense_solvers_match_scanpy_subspace(pbmc_counts, solver):
     a = a[:, a.var["highly_variable"]].copy()
     sc.pp.scale(a, max_value=10.0)
     ref = a.copy()
-    msc_pp.pca(a, n_comps=50, svd_solver=solver, use_highly_variable=False)
+    msc_pp.pca(a, n_comps=50, svd_solver=solver, mask_var=None)
     sc.pp.pca(ref, n_comps=50, svd_solver="arpack")
     ov = validation.subspace_overlap(a.obsm["X_pca"], ref.obsm["X_pca"])
     assert ov >= 0.98, f"{solver} subspace {ov}"

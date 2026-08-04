@@ -78,6 +78,14 @@ def pca(
     """
     from .sparse import CSR
 
+    # The randomized solver sketches `n_comps + n_oversamples` columns. If that exceeds the
+    # feature count the range finder is rank-deficient and MLX's eigh raises a C++ exception
+    # that nothing catches — aborting the interpreter rather than failing. Clamp, as
+    # sklearn's randomized_svd does. Hit by any PCA on a small panel or a small HVG set.
+    n_features = X.shape[1]
+    n_comps = min(n_comps, min(X.shape[0], n_features))
+    n_oversamples = max(0, min(n_oversamples, n_features - n_comps))
+
     if isinstance(X, CSR):
         if solver != "randomized":
             raise ValueError("CSR input supports solver='randomized' only (sparse path)")

@@ -118,7 +118,7 @@ cohort** — one data family, rows grouped by pipeline stage. **bold** = a stand
 | pca (sparse) | 2.1× | 4.3× | 4.4× | 4.5× | (8.0 s) | subspace 0.97–0.99 |
 | neighbors | 1.4× | 4.7× | 4.9× | **6.6×** | (34.8 s) | kNN recall ~0.97 ⁂ |
 | bbknn | 7.4× | 1.7× | 1.3× | – | – | per-batch top-k kernel |
-| umap ‡ | 15.1× | **29.6×** | 28.2× | (29 s) | (54 s) | trustworthiness 0.95 |
+| umap ‡ | 11.3× | **21.6×** | 21.4× | (45 s) | – | trustworthiness 0.94–0.95 |
 | tsne | 2.1× | 7.0× | 6.6× | (176 s) | – | trustworthiness ~0.98 |
 | diffmap | 1.7× | 2.9× | 2.7× | 3.6× | (36 s) | |
 | draw_graph | 16.1× | (2.4 s) | (4.4 s) | – | – | |
@@ -135,11 +135,26 @@ cohort** — one consistent data family. 2M `neighbors`/`umap` are measured on t
 embedding (the full-gene path OOMs at 2M). Spatial (`gr`) functions are in their own table below (they
 run on a different, real spatial-platform size ladder).
 
-‡ **umap** — the shipped **hybrid layout** (mlx-vis's GPU SGD optimizer driven by our shared neighbor
-graph) fixes the old layout's superlinear-at-scale problem (1M 188 s → 29 s) and, versus the *previous*
-GPU layout, is ~4× faster at 50k (0.66 s vs 2.58 s) **and** higher quality (trustworthiness 0.95 vs
-0.86), while preserving the `neighbors`→`{leiden,umap}` shared-graph contract. `embedding.py` is now
-umap-learn-free.
+‡ **umap** — both the initialization and the layout SGD are ours (`embedding.py`), driven by the shared
+neighbor graph so the `neighbors`→`{leiden,umap}` contract holds. `embedding.py` is umap-learn-free.
+
+These numbers were **re-measured in 0.1.1**, which replaced the mlx-vis SGD optimizer used through
+0.1.0. That optimizer clipped each *edge's* gradient but then applied every incident edge to the same
+stale positions, so a high-degree node accumulated hundreds of un-damped pushes and the layout sheared
+apart ([#1](https://github.com/gingerii/metal-SingleCell/issues/1)). It is scale-dependent, which is
+why it went unnoticed: at 50k–100k the atlas embeds fine, but **at 1M it was collapsing** — 99% of
+cells inside 4% of the panel (core 0.041, coordinate range 1033), versus core 0.912 / range 37 now.
+The 0.1.0 speedups in this row were therefore partly measured on a degenerate embedding, and the 1M
+figure it previously advertised (29 s) is not comparable to the 45 s here.
+
+The replacement ports umap-learn's `optimize_layout_euclidean` and keeps the parallel per-epoch
+evaluation, bounding the accumulated per-node step in place of the reference's sequential feedback.
+Cost is ~20% against the old optimizer; quality now tracks the CPU reference (0.9441 ± 0.0035 vs
+umap-learn's 0.9571 at 100k, atlas, 3 seeds). The 2M column is not yet re-measured, hence `–`.
+
+`random_state` pins the initialization and the negative samples, but the layout is **not bit-exact**:
+gradients are accumulated with an atomic scatter-add and float addition is not associative. Repeat
+runs at one seed agree on structure (k-NN overlap 0.87–0.89), not coordinates.
 
 ⁂ **neighbors** uses a GPU brute path ≤30k (exact) and a vendored mlx-vis GPU NN-descent above (recall
 ~0.97), retiring the CPU-pynndescent fallback — reproducible wall time, 4.7–6.6× across 50k–1M.

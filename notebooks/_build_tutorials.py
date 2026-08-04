@@ -53,7 +53,7 @@ basic = [
 ("code", "adata.raw = adata\nadata = adata[:, adata.var.highly_variable].copy()"),
 ("md", "## Scale and PCA"),
 ("code", "msc.pp.scale(adata, max_value=10)\n"
- "msc.pp.pca(adata, n_comps=50, use_highly_variable=False)\n"
+ "msc.pp.pca(adata, n_comps=50, mask_var=None)\n"
  "sc.pl.pca_variance_ratio(adata, log=True, n_pcs=50)"),
 ("md", "## Neighbors, UMAP, and Leiden clustering\n`backend='gpu'` runs the Metal parallel Leiden."),
 ("code", "msc.pp.neighbors(adata, n_neighbors=15)\n"
@@ -106,7 +106,7 @@ pearson = [
 ("md", "## Pearson residuals → PCA\n`normalize_pearson_residuals` writes the residuals into `adata.X`; "
  "PCA then runs on them."),
 ("code", "msc.pp.normalize_pearson_residuals(adata, theta=100.0)\n"
- "msc.pp.pca(adata, n_comps=50, use_highly_variable=False)\n"
+ "msc.pp.pca(adata, n_comps=50, mask_var=None)\n"
  "sc.pl.pca_variance_ratio(adata, log=True, n_pcs=50)"),
 ("md", "## Neighbors, UMAP, Leiden on the residual PCA"),
 ("code", "msc.pp.neighbors(adata, n_neighbors=15)\n"
@@ -195,7 +195,7 @@ brain = [
  "del adata.layers['counts']; gc.collect(); adata.shape"),
 ("md", "## Sparse PCA, neighbors, UMAP, Leiden\nWe run PCA directly on the sparse log-normalized "
  "HVG matrix (no densifying `scale`/`regress_out`, which would need ~20 GB at this scale)."),
-("code", "msc.pp.pca(adata, n_comps=50, use_highly_variable=False)\n"
+("code", "msc.pp.pca(adata, n_comps=50, mask_var=None)\n"
  "adata.obsm['X_pca'].shape"),
 ("code", "msc.pp.neighbors(adata, n_neighbors=15)\n"
  "msc.tl.leiden(adata, resolution=1.0, backend='gpu')\n"
