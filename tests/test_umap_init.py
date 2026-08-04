@@ -41,7 +41,7 @@ def test_disconnected_graph_init_is_not_collapsed():
 
     assert Y.shape == (graph.shape[0], 2)
     assert np.all(np.isfinite(Y))
-    assert not embedding._is_degenerate(Y)
+    assert embedding._is_usable(Y)
     # The old init put >97% of cells on a handful of points; the core spanned ~2% of the box.
     assert np.all(_spread(Y) > 0.3), _spread(Y)
     # Every component must occupy its own region, not one shared point.
@@ -75,7 +75,7 @@ def test_multi_component_placement_without_a_gpu():
         Y = embedding._initial_embedding(graph, 2, random_state=0)
 
     assert Y.shape == (120, 2)
-    assert not embedding._is_degenerate(Y)
+    assert embedding._is_usable(Y)
     centroids = Y.reshape(12, 10, 2).mean(axis=1)
     d = np.linalg.norm(centroids[:, None, :] - centroids[None, :, :], axis=-1)
     np.fill_diagonal(d, np.inf)
@@ -89,7 +89,7 @@ def test_connected_graph_still_uses_a_plain_spectral_layout():
     with warnings.catch_warnings():
         warnings.simplefilter("error")           # no component / degeneracy warning
         Y = embedding._initial_embedding(graph, 2, random_state=0)
-    assert not embedding._is_degenerate(Y)
+    assert embedding._is_usable(Y)
     assert np.all(_spread(Y) > 0.3)
 
 
@@ -103,14 +103,18 @@ def test_pack_discs_do_not_overlap():
     assert np.all(d >= need), (d - need).min()
 
 
-def test_degeneracy_detector():
+def test_usable_init_check():
+    """Only outright-unusable inits are rejected; concentration is the optimizer's problem."""
     n = 1000
     rng = np.random.RandomState(0)
-    assert not embedding._is_degenerate(rng.uniform(-10, 10, (n, 2)))
-    # piecewise-constant, as the old init produced on a disconnected graph
-    collapsed = np.repeat([[0.0, 0.0], [10.0, 10.0]], [n - 2, 2], axis=0)
-    assert embedding._is_degenerate(collapsed)
-    assert embedding._is_degenerate(np.full((n, 2), np.nan))
+    assert embedding._is_usable(rng.uniform(-10, 10, (n, 2)))
+    assert not embedding._is_usable(np.full((n, 2), np.nan))
+    assert not embedding._is_usable(np.zeros((n, 2)))            # zero extent on both axes
+
+    # A heavily concentrated but finite init is ACCEPTED: the trust region in the SGD
+    # recovers from it, and replacing it measurably hurt the multi-component case.
+    concentrated = np.repeat([[0.0, 0.0], [10.0, 10.0]], [n - 2, 2], axis=0)
+    assert embedding._is_usable(concentrated)
 
 
 def test_init_options():

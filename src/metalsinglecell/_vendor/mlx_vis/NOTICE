@@ -23,11 +23,23 @@ Apache License, Version 2.0 (see the LICENSE file in this directory).
 Vendored into metal-SingleCell (rather than taken as a runtime dependency) to keep the
 dependency footprint minimal. metal-SingleCell also adapts vendored outputs at its own call
 sites without modifying these files: `metalsinglecell.neighbors` over-builds + self-prepends
-the NNDescent graph; `metalsinglecell.embedding.umap` drives the vendored UMAP optimizer
-(`_optimize`, plus `_find_ab_params`) with our own prebuilt connectivity graph and our own
-component-aware initialization (the vendored `_spectral_init` assumes a connected graph —
-see `metalsinglecell.embedding._initial_embedding`); and
-`metalsinglecell.tools.tsne` calls the vendored TSNE as its default backend.
+the NNDescent graph, and `metalsinglecell.tools.tsne` calls the vendored TSNE as its default
+backend.
+
+`umap.py` is now used only for `_find_ab_params` (the Gauss-Newton fit of the a/b curve
+parameters). `metalsinglecell.embedding` supplies both halves of the layout itself:
+
+  * `_initial_embedding` replaces `_spectral_init`, which assumes a connected graph. On a
+    disconnected k-NN graph the top eigenspace of the normalized adjacency is spanned by the
+    component indicator vectors, so the power iteration returns a piecewise-constant vector.
+  * `_optimize_layout` replaces `_optimize`, which clipped each edge's gradient to ±4 and
+    then scatter-added every incident edge onto the same positions, with no feedback between
+    them. A high-degree node could move hundreds of units in one epoch, tearing the layout
+    apart (github issue #1). Ours is a port of umap-learn's `optimize_layout_euclidean` that
+    keeps the parallel evaluation and adds a per-node trust region in its place.
+
+Neither is a criticism of mlx-vis at the scale it targets; both failure modes need a large,
+structurally heterogeneous graph to show up.
 
 Changes to the vendored files: as itemized above (relative-import rewrites throughout; the
 tsne.py UnboundLocalError bugfix). No algorithmic changes.
