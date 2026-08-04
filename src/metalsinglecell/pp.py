@@ -14,6 +14,10 @@ import numpy as np
 from . import preprocess as _pp
 from .sparse import CSR
 
+# "argument not supplied", distinct from an explicit None — scanpy's `_empty` sentinel.
+# `pca(mask_var=None)` means ALL variables; omitting it defaults to highly_variable.
+_EMPTY = type("_Empty", (), {"__repr__": lambda self: "_empty", "__bool__": lambda self: False})()
+
 
 def _csr(adata, layer=None):
     """Our GPU CSR — for funcs that take a CSR (normalize/log1p/hvg/scale)."""
@@ -366,13 +370,64 @@ def _percent_top(X, ns):
     return out
 
 
+def _resolve_mask_var(adata, mask_var, use_highly_variable):
+    """scanpy's ``_handle_mask_var``: unify ``mask_var`` with deprecated ``use_highly_variable``.
+
+    Returns ``(stored, mask)`` — what to record in ``uns['pca']['params']['mask_var']``, and the
+    boolean array to select with (``None`` meaning "all variables").
+
+    The three-state default is the subtle part and is easy to get wrong: **omitting**
+    ``mask_var`` selects ``highly_variable`` when that column exists, whereas passing
+    ``mask_var=None`` explicitly means *all* variables. Hence the ``_EMPTY`` sentinel rather
+    than ``None`` as the default.
+    """
+    import warnings
+
+    if use_highly_variable is not None:
+        hint = ('use_highly_variable=True can be called through mask_var="highly_variable". '
+                "use_highly_variable=False can be called through mask_var=None")
+        warnings.warn(
+            f"Argument `use_highly_variable` is deprecated, consider using the mask "
+            f"argument. {hint}", FutureWarning, stacklevel=3,
+        )
+        if mask_var is not _EMPTY:
+            raise ValueError(f"These arguments are incompatible. {hint}")
+        mask_var = "highly_variable" if use_highly_variable else None
+
+    if mask_var is _EMPTY and "highly_variable" in adata.var.columns:
+        mask_var = "highly_variable"
+    if mask_var is _EMPTY or mask_var is None:
+        return None, None
+
+    if isinstance(mask_var, str):
+        if mask_var not in adata.var.columns:
+            raise ValueError(f"Did not find `adata.var[{mask_var!r}]`.")
+        return mask_var, adata.var[mask_var].to_numpy().astype(bool)
+
+    arr = np.asarray(mask_var)
+    if arr.dtype != bool or arr.shape != (adata.n_vars,):
+        raise ValueError(
+            f"The mask must be a boolean array of length n_vars ({adata.n_vars}), a column "
+            f"name in adata.var, or None; got shape {arr.shape} of dtype {arr.dtype}."
+        )
+    return arr, arr
+
+
 def pca(adata, n_comps: int = 50, layer=None, use_highly_variable: bool | None = None,
         zero_center: bool = True, svd_solver: str = "randomized", random_state: int = 0,
-        copy: bool = False):
+        copy: bool = False, *, mask_var=_EMPTY):
     """PCA (``sc.pp.pca``); writes ``obsm['X_pca']``, ``varm['PCs']``, ``uns['pca']``.
 
-    Sparse input → the sparse-aware randomized PCA (no densify). ``use_highly_variable``
-    restricts to ``adata.var['highly_variable']`` (default True if that column exists).
+    Sparse input → the sparse-aware randomized PCA (no densify).
+
+    Args:
+        mask_var: which variables to run on — a boolean array of length ``n_vars``, the name
+            of a boolean column in ``adata.var``, or ``None`` for all variables. **Omitting**
+            it uses ``adata.var['highly_variable']`` when that column exists; that is not the
+            same as passing ``None``, which forces all variables.
+        use_highly_variable: deprecated, as in scanpy ≥1.10 — use ``mask_var`` instead.
+            ``True`` is ``mask_var="highly_variable"``, ``False`` is ``mask_var=None``.
+            Passing both raises.
     """
     import scipy.sparse as sp
 
@@ -380,36 +435,38 @@ def pca(adata, n_comps: int = 50, layer=None, use_highly_variable: bool | None =
     adata = adata.copy() if copy else adata
     if svd_solver in (None, "auto"):                 # scanpy's default/'auto' → our randomized
         svd_solver = "randomized"
-    if use_highly_variable is None:
-        use_highly_variable = "highly_variable" in adata.var
+    mask_param, mask = _resolve_mask_var(adata, mask_var, use_highly_variable)
+    params = {"zero_center": bool(zero_center),
+              "use_highly_variable": mask_param is not None,
+              "mask_var": mask_param}
 
     reader = _backed_reader(adata, layer)
     if reader is not None:                       # out-of-core: fused streaming covariance-eigh
         from .decomposition import pca_covariance_eigh_streaming
-        hvg_mask = adata.var["highly_variable"].to_numpy() if use_highly_variable else None
-        H = int(hvg_mask.sum()) if hvg_mask is not None else adata.n_vars
-        tf = _build_pca_transform(adata, hvg_mask)
+        H = int(mask.sum()) if mask is not None else adata.n_vars
+        tf = _build_pca_transform(adata, mask)
         X_pca, comps, vr = pca_covariance_eigh_streaming(reader, tf, H, n_comps=n_comps)
         adata.obsm["X_pca"] = np.asarray(X_pca)
-        pcs = np.zeros((adata.n_vars, n_comps), dtype=np.float32)
-        pcs[hvg_mask if hvg_mask is not None else slice(None)] = np.asarray(comps).T
+        # n_comps may have been clamped to the rank of the selection — size from the
+        # components actually returned, not from what was asked for.
+        pcs = np.zeros((adata.n_vars, np.asarray(comps).shape[0]), dtype=np.float32)
+        pcs[mask if mask is not None else slice(None)] = np.asarray(comps).T
         adata.varm["PCs"] = pcs
-        adata.uns["pca"] = {"variance_ratio": np.asarray(vr),
-                            "use_highly_variable": bool(use_highly_variable)}
+        adata.uns["pca"] = {"params": params, "variance_ratio": np.asarray(vr)}
         return adata if copy else None
 
     X = adata.layers[layer] if layer is not None else adata.X
-    mask = adata.var["highly_variable"].to_numpy() if use_highly_variable else np.ones(adata.n_vars, bool)
-    Xsub = X[:, mask]
+    sel = mask if mask is not None else np.ones(adata.n_vars, bool)
+    Xsub = X[:, sel]
     inp = CSR.from_scipy(sp.csr_matrix(Xsub).astype(np.float32)) if sp.issparse(Xsub) and zero_center \
         else np.asarray(Xsub.todense() if sp.issparse(Xsub) else Xsub, dtype=np.float32)
     X_pca, comps, vr = _pca(inp, n_comps=n_comps, solver=svd_solver, random_state=random_state,
                             zero_center=zero_center)
     adata.obsm["X_pca"] = np.asarray(X_pca)
-    pcs = np.zeros((adata.n_vars, n_comps), dtype=np.float32)
-    pcs[mask] = np.asarray(comps).T
+    pcs = np.zeros((adata.n_vars, np.asarray(comps).shape[0]), dtype=np.float32)
+    pcs[sel] = np.asarray(comps).T
     adata.varm["PCs"] = pcs
-    adata.uns["pca"] = {"variance_ratio": np.asarray(vr), "use_highly_variable": bool(use_highly_variable)}
+    adata.uns["pca"] = {"params": params, "variance_ratio": np.asarray(vr)}
     return adata if copy else None
 
 
