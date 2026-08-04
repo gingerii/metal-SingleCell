@@ -11,10 +11,14 @@ import numpy as np
 from . import tools as _tl
 
 
-def _conn(adata):
-    if "connectivities" not in adata.obsp:
-        raise ValueError("run msc.pp.neighbors first (no adata.obsp['connectivities'])")
-    return adata.obsp["connectivities"]
+def _conn(adata, neighbors_key: str = "neighbors"):
+    """The connectivity graph, resolved through ``uns[neighbors_key]`` as scanpy does."""
+    key = "connectivities"
+    if neighbors_key in adata.uns:
+        key = adata.uns[neighbors_key].get("connectivities_key", key)
+    if key not in adata.obsp:
+        raise ValueError(f"run msc.pp.neighbors first (no adata.obsp[{key!r}])")
+    return adata.obsp[key]
 
 
 def _benjamini_hochberg(pvals):
@@ -76,16 +80,28 @@ def louvain(adata, resolution: float = 1.0, key_added: str = "louvain", random_s
 
 def umap(adata, min_dist: float = 0.5, spread: float = 1.0, n_components: int = 2,
          n_epochs: int | None = None, random_state: int = 0,
-         init: str | np.ndarray = "spectral", copy: bool = False):
+         init_pos: str | np.ndarray = "spectral", copy: bool = False, *,
+         maxiter: int | None = None, alpha: float = 1.0, gamma: float = 1.0,
+         negative_sample_rate: int = 5, a: float | None = None, b: float | None = None,
+         key_added: str | None = None, neighbors_key: str = "neighbors"):
     """UMAP embedding (``sc.tl.umap``); writes ``adata.obsm['X_umap']``.
 
-    ``init`` is ``"spectral"`` (default), ``"random"``, or an ``(n_obs, n_components)`` array.
+    Argument names follow ``scanpy.tl.umap`` so the namespaces stay swappable:
+    ``init_pos`` (``"spectral"``, ``"random"``, or an ``(n_obs, n_components)`` array),
+    ``alpha`` (learning rate), ``gamma`` (repulsion strength), ``maxiter`` (scanpy's name for
+    the epoch count). ``n_epochs`` is kept as an alias of ``maxiter``; passing both raises.
+    ``a``/``b`` override the curve fitted from ``min_dist``/``spread``.
     """
     from .embedding import umap as _umap
     adata = adata.copy() if copy else adata
-    adata.obsm["X_umap"] = _umap(_conn(adata), n_components=n_components, n_epochs=n_epochs,
-                                 min_dist=min_dist, spread=spread, random_state=random_state,
-                                 init=init)
+    if maxiter is not None and n_epochs is not None and maxiter != n_epochs:
+        raise ValueError("pass either `maxiter` (scanpy's name) or `n_epochs`, not both")
+    Y = _umap(_conn(adata, neighbors_key=neighbors_key), n_components=n_components,
+              n_epochs=maxiter if maxiter is not None else n_epochs,
+              min_dist=min_dist, spread=spread, random_state=random_state, init=init_pos,
+              learning_rate=alpha, gamma=gamma, negative_sample_rate=negative_sample_rate,
+              a=a, b=b)
+    adata.obsm[key_added or "X_umap"] = Y
     return adata if copy else None
 
 

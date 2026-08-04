@@ -61,5 +61,6 @@ Source, issues, and releases.
 installation
 tutorials
 api/index
+api_parity
 GitHub <https://github.com/gingerii/metal-SingleCell>
 ```

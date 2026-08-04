@@ -72,7 +72,8 @@ def umap(connectivities, n_components: int = 2, n_epochs: int | None = None,
          min_dist: float = 0.5, spread: float = 1.0, random_state: int = 0,
          init: str | np.ndarray = "spectral", learning_rate: float = 1.0,
          negative_sample_rate: int = 5, gamma: float = 1.0,
-         max_node_step: float = _MAX_NODE_STEP) -> np.ndarray:
+         max_node_step: float = _MAX_NODE_STEP,
+         a: float | None = None, b: float | None = None) -> np.ndarray:
     """Optimize a UMAP embedding from a connectivity graph (GPU).
 
     Lays out *our* shared fuzzy graph (``connectivities``) so the embedding matches the
@@ -99,7 +100,8 @@ def umap(connectivities, n_components: int = 2, n_epochs: int | None = None,
     if n_epochs is None:
         n_epochs = 500 if n <= 10_000 else 200
 
-    a, b = _MlxUMAP._find_ab_params(spread, min_dist)  # exact drop-in for umap-learn's fit (~1e-7)
+    if a is None or b is None:                    # else use the caller's curve, as scanpy allows
+        a, b = _MlxUMAP._find_ab_params(spread, min_dist)  # drop-in for umap-learn's fit (~1e-7)
 
     # Drop edges too weak to be sampled even once over the run, as umap-learn does before
     # building its epoch schedule. We bring our own graph, so the vendored fuzzy-set builder

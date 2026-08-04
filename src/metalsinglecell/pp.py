@@ -300,26 +300,38 @@ def scrublet(adata, sim_doublet_ratio: float = 2.0, expected_doublet_rate: float
     return adata if copy else None
 
 
+_PERCENT_TOP_DEFAULT = (50, 100, 200, 500)   # scanpy's default
 _QC_VAR_RENAME = {"gene_total_counts": "total_counts"}   # per-gene total → scanpy's var slot name
 
 
-def calculate_qc_metrics(adata, qc_vars=(), percent_top=None, log1p: bool = True,
+def calculate_qc_metrics(adata, qc_vars=(), percent_top=_EMPTY, log1p: bool = True,
                          layer=None, copy: bool = False):
     """Per-cell/per-gene QC metrics (``sc.pp.calculate_qc_metrics``).
 
     ``qc_vars`` (e.g. ``['mt']``) adds ``total_counts_<v>``/``pct_counts_<v>`` for each boolean
-    ``adata.var[v]`` gene set; ``log1p`` adds ``log1p_*`` columns; ``percent_top`` (a list of N,
-    default ``None``) adds ``pct_counts_in_top_N_genes``. The per-gene total lands in
-    ``var['total_counts']`` (scanpy's name), matching ``sc.pp.calculate_qc_metrics``.
+    ``adata.var[v]`` gene set; ``log1p`` adds ``log1p_*`` columns; ``percent_top`` adds
+    ``pct_counts_in_top_N_genes`` per N. The per-gene total lands in ``var['total_counts']``
+    (scanpy's name), matching ``sc.pp.calculate_qc_metrics``.
+
+    ``percent_top`` defaults to scanpy's ``(50, 100, 200, 500)``; it used to default to
+    ``None``, which silently produced none of those columns for anyone swapping ``sc.pp`` →
+    ``msc.pp``. As in scanpy, an N larger than ``n_vars`` is an error — pass a smaller tuple
+    (or ``None``) for a panel with fewer genes than that.
     """
     adata = adata.copy() if copy else adata
+    # Distinguish "the user asked for these" from "this is just the default": the streaming
+    # path cannot produce them, and a default must not turn a working backed call into an error.
+    asked_for_top = percent_top is not _EMPTY
+    if not asked_for_top:
+        percent_top = _PERCENT_TOP_DEFAULT
     reader = _backed_reader(adata, layer)
     if reader is not None:                       # out-of-core: stream row-blocks (base metrics)
         qc_vars = [qc_vars] if isinstance(qc_vars, str) else list(qc_vars)
-        if qc_vars or percent_top:
+        if qc_vars or (percent_top and asked_for_top):
             raise NotImplementedError(
                 "qc_vars/percent_top are not supported on a backed .X (they need a per-cell "
                 "gene-subset densify); load into memory or request base QC metrics only.")
+        percent_top = None                       # default only — skip rather than fail
         from .backed import stream_qc
         m = stream_qc(reader)
     else:
@@ -339,8 +351,14 @@ def calculate_qc_metrics(adata, qc_vars=(), percent_top=None, log1p: bool = True
             adata.obs[f"total_counts_{v}"] = sub
             with np.errstate(invalid="ignore", divide="ignore"):
                 adata.obs[f"pct_counts_{v}"] = np.where(total > 0, 100.0 * sub / total, 0.0)
-        for n_top, vals in zip(sorted(percent_top or []),
-                               _percent_top(X, sorted(percent_top or []))):
+        tops = sorted(percent_top or [])
+        if tops and max(tops) > adata.n_vars:    # scanpy raises IndexError here; say why
+            raise IndexError(
+                f"percent_top={tuple(tops)} asks for more genes than this object has "
+                f"({adata.n_vars}). Pass a smaller tuple, or percent_top=None to skip these "
+                f"columns."
+            )
+        for n_top, vals in zip(tops, _percent_top(X, tops)):
             adata.obs[f"pct_counts_in_top_{n_top}_genes"] = vals
     if log1p:
         for base in ("total_counts", "n_genes_by_counts"):

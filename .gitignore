@@ -49,3 +49,6 @@ scratchpad_build_brain1m_graph.py
 # Sphinx docs build output
 docs/_build/
 docs/api/generated/
+
+# sphinx myst-nb build artifacts
+docs/jupyter_execute/
