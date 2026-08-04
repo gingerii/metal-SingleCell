@@ -47,12 +47,21 @@ _EIG_CHECK_EVERY = 10
 _GRAD_CLIP = 4.0
 
 # Trust region on the ACCUMULATED per-node step — see the module docstring for why a batched
-# port needs one. Chosen by sweep (1/2/4/8/16/32/inf) against scanpy on a healthy 100k set and
-# on the issue-#1 reproduction: healthy data is indifferent (trustworthiness 0.9871–0.9881
-# throughout), while on the pathological graph quality rises to a plateau at 16 (trust 0.865 →
-# 0.883, core 0.888 → 0.910) and only `inf` — no trust region at all — reverts to the collapse
-# (core 0.094). 16 sits on the plateau with `inf` the sole failure, so it is not a knife edge.
-_MAX_NODE_STEP = 16.0
+# port needs one. Tuned on REAL data (1.3M-neuron atlas) and the issue-#1 reproduction, 3 seeds
+# each; synthetic sets are indifferent to it and will mislead you here.
+#
+#   cap    atlas 100k trustworthiness    issue-#1 repro, core (collapse < 0.2)
+#    16          0.9334 ± 0.0065                  0.907 ± 0.024
+#    32          0.9410 ± 0.0017                  0.909 ± 0.013
+#    64          0.9441 ± 0.0035                  0.927 ± 0.011
+#   128               —                           0.401 ± 0.020   <- degrading
+#   inf          0.9463 ± 0.0063                  0.113           <- the bug
+#
+# 64 is not a compromise: it is the best measured value on BOTH axes, and it matches the
+# quality of the optimizer it replaces (0.9433 on the same data). A tighter cap under-optimizes
+# — nodes cannot travel far enough — which costs quality *and* spread. Do not raise it past 64;
+# 128 already degrades, and the whole failure mode returns without a finite bound.
+_MAX_NODE_STEP = 64.0
 
 # Graphs at or below this go to ARPACK rather than the GPU orthogonal iteration; see
 # `_spectral_layout`. Set from the measured crossover.
