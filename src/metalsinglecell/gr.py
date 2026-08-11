@@ -239,10 +239,19 @@ def spatial_neighbors_delaunay(adata, *, radius=None, spatial_key: str = "spatia
     ``radius`` prunes the triangulation afterwards — a scalar ``r`` means ``(0, r)``, a tuple
     is an interval, ``None`` keeps every edge. The triangulation itself is unchanged by it.
 
-    Unlike the other three modes this is **not** GPU-accelerated: the triangulation is a
-    sequential computational-geometry problem with no useful Metal formulation, so it runs on
-    Qhull (``scipy.spatial.Delaunay``), the same library squidpy uses. Edge distances and the
-    radius pruning that follow are ours. Expect parity, not a speedup.
+    Unlike the other three modes the triangulation itself is **not** GPU-accelerated here: it
+    runs on Qhull (``scipy.spatial.Delaunay``), the same library squidpy uses, and only the
+    edge lengths and radius pruning around it are ours. Expect parity, not a speedup.
+
+    That is a "not yet", not a "cannot". GPU Delaunay is a solved problem in the literature —
+    GPU-DT and gDel2D build a digital Voronoi diagram by jump flooding, dualise it, then
+    repair the result by parallel flipping, and report ~10x over Triangle and ~6x over CGAL.
+    Two things make it a project rather than a patch. The jump-flooding stage alone does not
+    yield a valid triangulation (a digital Voronoi region can be disconnected, so its dual can
+    contain duplicated and intersecting triangles); the flipping repair that fixes this is the
+    bulk of the algorithm. And it needs adaptive-exact orientation/incircle predicates, which
+    matter more here than in graphics: a Visium slide is a regular lattice, so cocircular
+    points are the common case rather than a corner case.
     """
     import scipy.sparse as sp
     adata = adata.copy() if copy else adata

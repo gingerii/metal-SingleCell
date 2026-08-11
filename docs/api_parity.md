@@ -49,10 +49,21 @@ Speed against squidpy on a jittered hex lattice (M3 Max, warm-up + best-of-N):
 | 200k | 2.1× | 13.6× | 1.4× | 1.0× |
 | 500k | 2.0× | 13.9× | 1.3× | 1.0× |
 
-**Delaunay is deliberately not accelerated.** Triangulation is a sequential
-computational-geometry problem with no useful Metal formulation, so it runs on Qhull — the
-same library squidpy uses — and lands at parity. Only the edge lengths and radius pruning
-around it are ours. Expect correctness, not a speedup.
+**Delaunay is not accelerated yet.** The triangulation runs on Qhull — the same library
+squidpy uses — so it lands at parity; only the edge lengths and radius pruning around it are
+ours. Qhull is 79-82% of that builder's runtime (8.6 s of 10.9 s at 2M points), so it is the
+thing worth attacking next.
+
+A GPU formulation exists and is well studied: GPU-DT and gDel2D build a digital Voronoi
+diagram by jump flooding, dualise it, and repair the result by parallel flipping, reporting
+~10x over Triangle and ~6x over CGAL. Two things keep it out of this release. Jump flooding
+alone does **not** give a valid triangulation — a digital Voronoi region can be disconnected,
+so its dual can contain duplicated and intersecting triangles — and the flipping repair that
+fixes that is the bulk of the algorithm. It also needs adaptive-exact orientation/incircle
+predicates, which bite harder here than in graphics: a Visium slide is a regular lattice, so
+cocircular points are the common case, not a corner case. Getting that subtly wrong would
+produce a plausible-looking but invalid graph, which is the failure mode this project has
+already shipped twice.
 
 `spatial_neighbors_from_builder` is **not implemented**: it takes a squidpy `GraphBuilder`
 instance, and squidpy is an optional (`oracle`) dependency here, not a runtime one.
