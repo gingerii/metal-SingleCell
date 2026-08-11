@@ -196,6 +196,140 @@ _GRID_KNN_SOURCE = """
 """
 
 
+_GRID_RADIUS_SOURCE = """
+    uint q = thread_position_in_grid.x;
+    int n  = iparams[0];
+    int d  = iparams[1];
+    int gx = iparams[2];
+    int gy = iparams[3];
+    int gz = iparams[4];
+    int ring = iparams[5];
+    int pass2 = iparams[6];
+    float ox = fparams[0];
+    float oy = fparams[1];
+    float oz = fparams[2];
+    float cs = fparams[3];
+    float r2hi = fparams[4];
+    float r2lo = fparams[5];
+
+    float qx = coords[q * d + 0];
+    float qy = coords[q * d + 1];
+    float qz = (d == 3) ? coords[q * d + 2] : 0.0f;
+    int cx = (int)floor((qx - ox) / cs); if (cx < 0) cx = 0; if (cx >= gx) cx = gx - 1;
+    int cy = (int)floor((qy - oy) / cs); if (cy < 0) cy = 0; if (cy >= gy) cy = gy - 1;
+    int cz = (d == 3) ? (int)floor((qz - oz) / cs) : 0;
+    if (cz < 0) cz = 0; if (cz >= gz) cz = gz - 1;
+
+    uint w = pass2 ? row_offset[q] : 0u;    // pass 2 writes from this row's slice start
+    uint cnt = 0u;
+
+    int dzlo = (d == 3) ? -ring : 0;
+    int dzhi = (d == 3) ?  ring : 0;
+    for (int dz = dzlo; dz <= dzhi; ++dz) {
+        int nz = cz + dz; if (nz < 0 || nz >= gz) continue;
+        for (int dy = -ring; dy <= ring; ++dy) {
+            int ny = cy + dy; if (ny < 0 || ny >= gy) continue;
+            for (int dx = -ring; dx <= ring; ++dx) {
+                int nx = cx + dx; if (nx < 0 || nx >= gx) continue;
+                int cell = (nz * gy + ny) * gx + nx;
+                uint s = cell_start[cell];
+                uint e = cell_start[cell + 1];
+                for (uint p = s; p < e; ++p) {
+                    int pt = sorted_pts[p];
+                    if ((uint)pt == q) continue;            // sklearn excludes self
+                    float ddx = coords[pt * d + 0] - qx;
+                    float ddy = coords[pt * d + 1] - qy;
+                    float dist2 = ddx * ddx + ddy * ddy;
+                    if (d == 3) { float ddz = coords[pt * d + 2] - qz; dist2 += ddz * ddz; }
+                    if (dist2 > r2hi || dist2 < r2lo) continue;
+                    if (pass2) { out_col[w] = pt; out_d2[w] = dist2; w++; }
+                    cnt++;
+                }
+            }
+        }
+    }
+    if (!pass2) { out_count[q] = cnt; }
+"""
+
+
+def _radius_grid(coords: np.ndarray, radius: float, min_radius: float = 0.0):
+    """All neighbours within ``radius`` (self excluded), via the uniform-grid cell list.
+
+    Same index as ``_knn_grid`` but a fixed cutoff instead of a top-k, so the result is
+    ragged: one Metal pass counts each row's neighbours, a prefix sum lays out the CSR, and a
+    second pass fills it. Both passes walk the cells in identical order, so the counts and the
+    writes agree by construction.
+
+    The cell side is the radius where that is affordable, which confines the search to the 3×3
+    (2-D) / 3×3×3 (3-D) block around each query. When that would allocate too many cells for a
+    sparse or elongated bounding box, cells are coarsened and the scan widens to ``ring`` cells
+    on each side to compensate — correct either way, just more candidates per query.
+
+    Returns ``(indptr, indices, distances)`` for an ``(n, n)`` CSR.
+    """
+    import mlx.core as mx
+
+    X = np.ascontiguousarray(coords, dtype=np.float32)
+    n, d = X.shape
+    if n == 0:
+        return np.zeros(1, np.int64), np.zeros(0, np.int32), np.zeros(0, np.float32)
+    if d not in (2, 3):
+        raise ValueError(f"radius search expects 2-D or 3-D coordinates, got {d}-D")
+
+    mins = X.min(0)
+    extent = (X.max(0) - mins).astype(np.float64)
+    nz = extent > 0
+    eff_d = max(int(nz.sum()), 1)
+    cell = float(radius) if radius > 0 else 1.0
+    for _ in range(16):                       # keep the dense cell table near ~4n
+        g = np.where(nz, np.ceil(extent / cell).astype(np.int64) + 1, 1)
+        ncells = int(np.prod(g))
+        if ncells <= 4 * n + 16:
+            break
+        cell *= (ncells / (4.0 * n + 16.0)) ** (1.0 / eff_d)
+    ring = int(np.ceil(float(radius) / cell)) if cell > 0 else 1
+    gx, gy, gz = int(g[0]), int(g[1]), int(g[2]) if d == 3 else 1
+
+    ci = np.clip(np.floor((X - mins) / cell).astype(np.int64), 0, g[:d] - 1)
+    cell_id = ((ci[:, 2] * gy + ci[:, 1]) * gx + ci[:, 0]) if d == 3 else (ci[:, 1] * gx + ci[:, 0])
+    order = np.argsort(cell_id, kind="stable").astype(np.int32)
+    cell_start = np.zeros(ncells + 1, dtype=np.uint32)
+    cell_start[1:] = np.cumsum(np.bincount(cell_id, minlength=ncells))
+
+    c_mx = mx.array(X.reshape(-1))
+    pts_mx = mx.array(order)
+    cs_mx = mx.array(cell_start)
+    f = mx.array([float(mins[0]), float(mins[1]), float(mins[2]) if d == 3 else 0.0,
+                  float(cell), float(radius) ** 2, float(min_radius) ** 2], dtype=mx.float32)
+
+    kernel = mx.fast.metal_kernel(
+        name="grid_radius",
+        input_names=["coords", "sorted_pts", "cell_start", "row_offset", "iparams", "fparams"],
+        output_names=["out_count", "out_col", "out_d2"],
+        source=_GRID_RADIUS_SOURCE,
+    )
+    grid, tg = (n, 1, 1), (min(256, n), 1, 1)
+
+    def run(pass2, offsets, nnz):
+        ip = mx.array([n, d, gx, gy, gz, ring, int(pass2)], dtype=mx.int32)
+        out = kernel(inputs=[c_mx, pts_mx, cs_mx, offsets, ip, f], grid=grid, threadgroup=tg,
+                     output_shapes=[(n,), (max(nnz, 1),), (max(nnz, 1),)],
+                     output_dtypes=[mx.uint32, mx.int32, mx.float32])
+        mx.eval(*out)
+        return out
+
+    zero = mx.zeros((n,), dtype=mx.uint32)
+    counts = np.asarray(run(False, zero, 1)[0]).astype(np.int64)
+    indptr = np.zeros(n + 1, dtype=np.int64)
+    np.cumsum(counts, out=indptr[1:])
+    nnz = int(indptr[-1])
+    if nnz == 0:
+        return indptr, np.zeros(0, np.int32), np.zeros(0, np.float32)
+
+    _, col, d2 = run(True, mx.array(indptr[:-1].astype(np.uint32)), nnz)
+    return indptr, np.asarray(col), np.sqrt(np.maximum(np.asarray(d2), 0.0)).astype(np.float32)
+
+
 def _knn_grid(coords: np.ndarray, k: int, min_n: int = 4_000) -> tuple[np.ndarray, np.ndarray]:
     """Exact self-inclusive k-NN on low-dim (2-D/3-D) point data via a uniform-grid cell list.
 
@@ -284,12 +418,27 @@ def _knn_grid(coords: np.ndarray, k: int, min_n: int = 4_000) -> tuple[np.ndarra
 
 
 def _exact_knn_rows(coords: np.ndarray, rows: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
-    """Exact k-NN (self first) for a subset of query ``rows`` against all points, tiled on the GPU."""
+    """Exact k-NN (self first) for a subset of query ``rows`` against all points, tiled on the GPU.
+
+    Ranking uses the Gram identity ``|a|² + |b|² − 2a·b`` because that is one matmul, but at
+    spatial-coordinate magnitudes it *catastrophically cancels*: on Visium (coordinates ~2·10⁴)
+    two spots exactly 273 apart came back at 272.9395, because each fp32 term is ~3·10⁸ and
+    rounds to a multiple of 32 while their difference is only 74529. Two defences:
+
+    * **centre the coordinates first.** Distances are translation-invariant, so this changes
+      nothing mathematically while shrinking the terms that cancel (measured: worst-case error
+      on Visium 0.0605 → 0.0073). This is what protects the *ranking*.
+    * **recompute the k selected distances from direct differences.** ``(a−b)²`` never cancels,
+      so the returned values are exact regardless of what ranking saw. This is what protects
+      the *distances*, and it costs O(rows·k·d).
+    """
     import mlx.core as mx
 
     X = np.asarray(coords, dtype=np.float32)
     n = X.shape[0]
-    Xg = mx.array(X)
+    centre = X.mean(axis=0, dtype=np.float64).astype(np.float32)
+    Xc = np.ascontiguousarray(X - centre)
+    Xg = mx.array(Xc)
     sq = mx.sum(Xg * Xg, axis=1)
     tile = max(1, 256_000_000 // max(n, 1))
     oi = np.empty((rows.size, k), np.int64)
@@ -301,10 +450,15 @@ def _exact_knn_rows(coords: np.ndarray, rows: np.ndarray, k: int) -> tuple[np.nd
         loc = _topk_rows(D2, k)
         Dv = mx.take_along_axis(D2, loc, axis=1)
         mx.eval(loc, Dv)
-        loc = np.asarray(loc); Dv = np.asarray(Dv)
-        o = np.argsort(Dv, axis=1)
+        loc = np.asarray(loc)
+        # exact distances for the selected k, from differences rather than the expansion
+        diff = Xc[loc] - Xc[rb][:, None, :]
+        exact = np.sqrt(np.einsum("rkd,rkd->rk", diff, diff, dtype=np.float64)).astype(np.float32)
+        # order by (distance, index) so exact ties resolve the same way every run, and the
+        # same way as a CPU reference that breaks ties by index
+        o = np.lexsort((loc, exact), axis=1)
         oi[s:s + tile] = np.take_along_axis(loc, o, axis=1)
-        od[s:s + tile] = np.sqrt(np.maximum(np.take_along_axis(Dv, o, axis=1), 0.0))
+        od[s:s + tile] = np.take_along_axis(exact, o, axis=1)
     return oi, od
 
 
