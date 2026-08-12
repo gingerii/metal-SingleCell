@@ -32,9 +32,29 @@ def _benjamini_hochberg(pvals):
     return np.clip(adj, 0.0, 1.0)
 
 
+def _categorical(labels):
+    """Cluster labels as a Categorical with scanpy's category ORDER.
+
+    scanpy natsorts the categories; bare ``pd.Categorical`` sorts the strings, which agrees
+    below 10 clusters and then diverges: ['0','1','10','11',...,'2',...]. Once it does,
+    ``.cat.codes`` no longer equals the integer label, so palettes, legend order and anything
+    indexing by code silently misalign.
+    """
+    import pandas as pd
+    vals = np.asarray([str(x) for x in labels])
+    return pd.Categorical(values=vals, categories=sorted(np.unique(vals), key=_natkey))
+
+
+def _natkey(s):
+    """Natural-order sort key — digit runs compare numerically. Avoids a `natsort` dependency
+    for the one place we need it."""
+    import re
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", str(s))]
+
+
 def leiden(adata, resolution: float = 1.0, key_added: str = "leiden", random_state: int = 0,
            n_iterations: int = 2, backend: str = "igraph", variant: str = "sync",
-           commit_prob: float = 0.9, copy: bool = False):
+           commit_prob: float = 0.9, neighbors_key: str = "neighbors", copy: bool = False):
     """Leiden clustering (``sc.tl.leiden``); writes ``adata.obs[key_added]`` (categorical).
 
     ``backend="gpu"`` runs the Metal parallel Leiden; ``variant`` ("sync"|"colored") and
@@ -44,17 +64,18 @@ def leiden(adata, resolution: float = 1.0, key_added: str = "leiden", random_sta
 
     from .cluster import leiden as _leiden
     adata = adata.copy() if copy else adata
-    lab = _leiden(_conn(adata), resolution=resolution, random_state=random_state,
-                  n_iterations=n_iterations, backend=backend,
+    lab = _leiden(_conn(adata, neighbors_key=neighbors_key), resolution=resolution,
+                  random_state=random_state, n_iterations=n_iterations, backend=backend,
                   variant=variant, commit_prob=commit_prob)
-    adata.obs[key_added] = pd.Categorical([str(x) for x in lab])
-    adata.uns[key_added] = {"params": {"resolution": resolution, "n_iterations": n_iterations}}
+    adata.obs[key_added] = _categorical(lab)
+    adata.uns[key_added] = {"params": {"resolution": resolution, "random_state": random_state,
+                                       "n_iterations": n_iterations}}
     return adata if copy else None
 
 
 def louvain(adata, resolution: float = 1.0, key_added: str = "louvain", random_state: int = 0,
             backend: str = "igraph", variant: str = "sync", commit_prob: float = 0.9,
-            copy: bool = False):
+            neighbors_key: str = "neighbors", copy: bool = False):
     """Louvain clustering (``sc.tl.louvain``); writes ``adata.obs[key_added]`` (categorical).
 
     ``backend="gpu"`` runs the Metal parallel Louvain; ``variant`` ("sync"|"colored") and
@@ -65,16 +86,22 @@ def louvain(adata, resolution: float = 1.0, key_added: str = "louvain", random_s
     if backend == "gpu":
         from .graph import Graph
         from .graph.louvain import louvain as _gpu
-        lab = _gpu(Graph.from_scipy(_conn(adata)), resolution=resolution, random_state=random_state,
+        lab = _gpu(Graph.from_scipy(_conn(adata, neighbors_key=neighbors_key)),
+                   resolution=resolution, random_state=random_state,
                    variant=variant, commit_prob=commit_prob)
     else:
         import igraph as ig
-        coo = _conn(adata).tocoo(); up = coo.row < coo.col
+        from .cluster import _seeded_igraph
+        coo = _conn(adata, neighbors_key=neighbors_key).tocoo(); up = coo.row < coo.col
         g = ig.Graph(n=adata.n_obs, edges=list(zip(coo.row[up].tolist(), coo.col[up].tolist())),
                      edge_attrs={"weight": coo.data[up]})
-        vc = g.community_multilevel(weights="weight", resolution=resolution)
+        # random_state was declared and only ever read on the gpu branch, so the default path
+        # was unseeded: three identical calls gave three answers (ARI 0.789).
+        with _seeded_igraph(random_state):
+            vc = g.community_multilevel(weights="weight", resolution=resolution)
         lab = np.array(vc.membership)
-    adata.obs[key_added] = pd.Categorical([str(x) for x in lab])
+    adata.obs[key_added] = _categorical(lab)
+    adata.uns[key_added] = {"params": {"resolution": resolution, "random_state": random_state}}
     return adata if copy else None
 
 
@@ -101,49 +128,125 @@ def umap(adata, min_dist: float = 0.5, spread: float = 1.0, n_components: int = 
               min_dist=min_dist, spread=spread, random_state=random_state, init=init_pos,
               learning_rate=alpha, gamma=gamma, negative_sample_rate=negative_sample_rate,
               a=a, b=b)
-    adata.obsm[key_added or "X_umap"] = Y
+    if a is None or b is None:
+        from ._vendor.mlx_vis.umap import UMAP as _MlxUMAP
+        a, b = _MlxUMAP._find_ab_params(spread, min_dist)
+    key = key_added or "umap"
+    adata.obsm["X_umap" if key_added is None else key_added] = Y
+    params = {"a": float(a), "b": float(b)}
+    if random_state != 0:
+        params["random_state"] = random_state
+    adata.uns[key] = {"params": params}
     return adata if copy else None
 
 
-def tsne(adata, use_rep: str = "X_pca", perplexity: float = 30.0, n_components: int = 2,
-         random_state: int = 0, copy: bool = False):
-    """t-SNE (``sc.tl.tsne``); writes ``adata.obsm['X_tsne']``."""
+def tsne(adata, use_rep: str | None = None, perplexity: float = 30.0, n_components: int = 2,
+         early_exaggeration: float = 12.0, learning_rate: float = 1000.0,
+         random_state: int = 0, key_added: str | None = None, copy: bool = False):
+    """t-SNE (``sc.tl.tsne``); writes ``adata.obsm['X_tsne']``.
+
+    ``use_rep`` follows scanpy's resolution rule and **raises** for a key that is not there.
+    It used to fall back to ``.X`` silently, so a typo returned an embedding of the wrong
+    thing. ``learning_rate`` defaults to scanpy's 1000, not the 200 hard-coded previously.
+    """
+    from .pp import _choose_representation
     adata = adata.copy() if copy else adata
-    rep = adata.obsm[use_rep] if use_rep in adata.obsm else adata.X
-    adata.obsm["X_tsne"] = _tl.tsne(np.asarray(rep, dtype=np.float32), n_components=n_components,
-                                    perplexity=perplexity, random_state=random_state)
+    rep, _ = _choose_representation(adata, use_rep, None, random_state)
+    key = key_added or "tsne"
+    adata.obsm["X_tsne" if key_added is None else key_added] = _tl.tsne(
+        np.asarray(rep, dtype=np.float32), n_components=n_components, perplexity=perplexity,
+        learning_rate=learning_rate, random_state=random_state)
+    adata.uns[key] = {"params": {"perplexity": perplexity,
+                                 "early_exaggeration": early_exaggeration,
+                                 "learning_rate": learning_rate, "metric": "euclidean"}}
     return adata if copy else None
 
 
-def diffmap(adata, n_comps: int = 15, copy: bool = False):
+def diffmap(adata, n_comps: int = 15, neighbors_key: str = "neighbors",
+            random_state: int = 0, copy: bool = False):
     """Diffusion map (``sc.tl.diffmap``); writes ``obsm['X_diffmap']`` + ``uns['diffmap_evals']``."""
+    if n_comps <= 2:
+        raise ValueError("Provide any value greater than 2 for `n_comps`.")
     adata = adata.copy() if copy else adata
-    res = _tl.diffmap(_conn(adata), n_comps=n_comps)
-    adata.obsm["X_diffmap"] = np.asarray(res["X_diffmap"])
-    adata.uns["diffmap_evals"] = np.asarray(res["eigenvalues"])
+    res = _tl.diffmap(_conn(adata, neighbors_key=neighbors_key), n_comps=n_comps,
+                      random_state=random_state)
+    adata.obsm["X_diffmap"] = np.asarray(res["X_diffmap"], dtype=np.float32)
+    adata.uns["diffmap_evals"] = np.asarray(res["eigenvalues"], dtype=np.float32)
     return adata if copy else None
 
 
-def draw_graph(adata, layout: str = "fa", n_iter: int = 500, random_state: int = 0, copy: bool = False):
-    """Force-directed layout (``sc.tl.draw_graph``); writes ``obsm[f'X_draw_graph_{layout}']``."""
+_IGRAPH_LAYOUTS = {"fr": "fr", "drl": "drl", "kk": "kk", "grid_fr": "grid_fr",
+                   "lgl": "lgl", "rt": "rt", "rt_circular": "rt_circular"}
+
+
+def draw_graph(adata, layout: str = "fa", n_iter: int = 500, random_state: int = 0,
+               neighbors_key: str = "neighbors", key_added_ext: str | None = None,
+               copy: bool = False):
+    """Force-directed layout (``sc.tl.draw_graph``); writes ``obsm[f'X_draw_graph_{layout}']``.
+
+    ``layout`` used to name the output key and nothing else — every layout ran the same
+    ForceAtlas2-style SGD, and an unknown name was accepted. ``"fa"`` is our GPU SGD; the
+    igraph layouts scanpy offers are dispatched to igraph.
+    """
     adata = adata.copy() if copy else adata
-    adata.obsm[f"X_draw_graph_{layout}"] = _tl.draw_graph(_conn(adata), n_iter=n_iter,
-                                                          random_state=random_state)
+    conn = _conn(adata, neighbors_key=neighbors_key)
+    if layout == "fa":
+        pos = _tl.draw_graph(conn, n_iter=n_iter, random_state=random_state)
+    elif layout in _IGRAPH_LAYOUTS:
+        import igraph as ig
+        from .cluster import _seeded_igraph
+        coo = conn.tocoo(); up = coo.row < coo.col
+        g = ig.Graph(n=adata.n_obs, edges=list(zip(coo.row[up].tolist(), coo.col[up].tolist())),
+                     edge_attrs={"weight": coo.data[up]})
+        with _seeded_igraph(random_state):
+            pos = np.asarray(g.layout(_IGRAPH_LAYOUTS[layout]).coords, dtype=np.float32)
+    else:
+        raise ValueError(f"Provide a valid layout, one of "
+                         f"{['fa', *sorted(_IGRAPH_LAYOUTS)]}, not {layout!r}.")
+    adata.obsm[f"X_draw_graph_{key_added_ext or layout}"] = pos
+    adata.uns["draw_graph"] = {"params": {"layout": layout, "random_state": random_state}}
     return adata if copy else None
+
+
+def _expression_source(adata, layer, use_raw):
+    """scanpy's ``_check_use_raw``: ``.raw`` when it exists and the caller did not say otherwise.
+
+    Getting this wrong is quiet and consequential. On the canonical tutorial object ``.X`` is
+    z-scaled to 1838 HVGs while ``.raw`` holds log-normalised counts for 13714 genes, so always
+    reading ``.X`` ran the t-tests on scaled, negative-valued data over a seventh of the genes —
+    top-10 marker overlap 0.6 against scanpy.
+    """
+    if use_raw is None:
+        use_raw = adata.raw is not None and layer is None
+    if use_raw:
+        if adata.raw is None:
+            raise ValueError("use_raw=True but adata.raw is None")
+        if layer is not None:
+            raise ValueError("cannot use both use_raw=True and layer=")
+        return adata.raw.X, np.asarray(adata.raw.var_names), True
+    X = adata.layers[layer] if layer is not None else adata.X
+    return X, np.asarray(adata.var_names), False
 
 
 def rank_genes_groups(adata, groupby, method: str = "t-test", reference: str = "rest",
-                      key_added: str = "rank_genes_groups", layer=None, copy: bool = False):
-    """Marker genes per group (``sc.tl.rank_genes_groups``); writes scanpy-format ``adata.uns[key_added]``."""
+                      key_added: str = "rank_genes_groups", layer=None,
+                      use_raw: bool | None = None, copy: bool = False):
+    """Marker genes per group (``sc.tl.rank_genes_groups``); writes scanpy-format ``adata.uns[key_added]``.
+
+    ``use_raw`` follows scanpy: ``.raw`` is used when it exists unless you pass ``False`` or a
+    ``layer``. ``reference`` names either ``"rest"`` or one of the groups; naming a group
+    compares against it and drops it from the output, as scanpy does.
+    """
     import scipy.sparse as sp
     from .pp import _reject_backed
     _reject_backed(adata, "rank_genes_groups", layer)   # densifies .X — no streaming path
     adata = adata.copy() if copy else adata
-    X = adata.layers[layer] if layer is not None else adata.X
-    X = np.asarray(X.todense() if sp.issparse(X) else X, dtype=np.float32)
+    src, var_names, used_raw = _expression_source(adata, layer, use_raw)
+    X = np.asarray(src.todense() if sp.issparse(src) else src, dtype=np.float32)
     groups = adata.obs[groupby].to_numpy()
-    rg = _tl.rank_genes_groups(X, groups, var_names=adata.var_names.to_numpy(),
-                               method=method, reference=reference)
+    base = (adata.uns.get("log1p") or {}).get("base")
+    rg = _tl.rank_genes_groups(X, groups, var_names=var_names, method=method,
+                               reference=reference, log1p_base=base)
     cats = [str(c) for c in (adata.obs[groupby].cat.categories
                              if hasattr(adata.obs[groupby], "cat")
                              else sorted(np.unique(groups)))]
@@ -162,8 +265,10 @@ def rank_genes_groups(adata, groupby, method: str = "t-test", reference: str = "
             a[c] = rg[c][field]
         return a
 
-    names_dt = f"<U{max(len(str(x)) for x in adata.var_names)}"
-    uns = {"params": {"groupby": groupby, "reference": reference, "method": method, "use_raw": False},
+    names_dt = f"<U{max(len(str(x)) for x in var_names)}"
+    uns = {"params": {"groupby": groupby, "reference": reference, "method": method,
+                      "use_raw": used_raw, "layer": layer,
+                      "corr_method": "benjamini-hochberg"},
            "names": recarray("names", names_dt), "scores": recarray("scores", "f4"),
            "pvals": recarray("pvals", "f8"), "pvals_adj": recarray("pvals_adj", "f8"),
            "logfoldchanges": recarray("logfoldchanges", "f4")}
@@ -200,12 +305,49 @@ def score_genes_cell_cycle(adata, s_genes, g2m_genes, random_state: int = 0, cop
     return adata if copy else None
 
 
-def embedding_density(adata, basis: str = "umap", groupby=None, key_added=None, copy: bool = False):
-    """Per-cell density in an embedding (``sc.tl.embedding_density``); writes ``obs[f'{basis}_density']``."""
+def embedding_density(adata, basis: str = "umap", groupby=None, key_added=None,
+                      components=None, copy: bool = False):
+    """Per-cell density in an embedding (``sc.tl.embedding_density``).
+
+    Writes ``obs[f'{basis}_density_{groupby}']`` (or ``obs[f'{basis}_density']`` with no
+    ``groupby``) plus ``uns[f'{key}_params']`` — scanpy's plotter requires both and reads the
+    params to label the axes.
+
+    The KDE runs over **two** components, as scanpy's does. Handing the estimator every column
+    of a wide basis is not a slower version of the same thing: on a 30-dimensional PCA basis
+    the output collapsed to a numerically-zero range (max 1.04e-11) that still plots as a valid
+    density, and on diffmap it anticorrelated with scanpy's because the trivial first
+    eigenvector was included.
+    """
+    import pandas as pd
     adata = adata.copy() if copy else adata
-    groups = adata.obs[groupby].to_numpy() if groupby is not None else None
-    dens = _tl.embedding_density(np.asarray(adata.obsm[f"X_{basis}"]), groups=groups)
-    adata.obs[key_added or f"{basis}_density"] = dens
+    basis = basis.lower()
+    if basis == "fa":
+        basis = "draw_graph_fa"
+    rep_key = f"X_{basis}"
+    if rep_key not in adata.obsm:
+        raise KeyError(f"no adata.obsm[{rep_key!r}] — compute the embedding first")
+
+    comps = [1, 2] if components is None else [int(c) for c in
+                                               (components.split(",") if isinstance(components, str)
+                                                else np.ravel([components]))]
+    if len(comps) != 2:
+        raise ValueError("Please specify exactly 2 components, or `None`.")
+    if basis == "diffmap":
+        comps = [c + 1 for c in comps]           # scanpy skips the trivial first eigenvector
+    X = np.asarray(adata.obsm[rep_key])[:, [c - 1 for c in comps]]
+
+    groups = None
+    if groupby is not None:
+        if not isinstance(adata.obs[groupby].dtype, pd.CategoricalDtype):
+            raise ValueError(f"Could not find categorical adata.obs[{groupby!r}]")
+        groups = adata.obs[groupby].to_numpy()
+
+    key = key_added or (f"{basis}_density_{groupby}" if groupby is not None
+                        else f"{basis}_density")
+    adata.obs[key] = _tl.embedding_density(X, groups=groups)
+    adata.uns[f"{key}_params"] = {"covariate": groupby,
+                                  "components": [c - 1 for c in comps]}
     return adata if copy else None
 
 
@@ -216,5 +358,5 @@ def kmeans(adata, n_clusters: int = 8, use_rep: str = "X_pca", key_added: str = 
     adata = adata.copy() if copy else adata
     lab = _tl.kmeans(np.asarray(adata.obsm[use_rep], dtype=np.float32),
                      n_clusters=n_clusters, random_state=random_state)
-    adata.obs[key_added] = pd.Categorical([str(x) for x in lab])
+    adata.obs[key_added] = _categorical(lab)
     return adata if copy else None

@@ -9,7 +9,28 @@ Two backends:
 
 from __future__ import annotations
 
+import contextlib
 import numpy as np
+
+
+@contextlib.contextmanager
+def _seeded_igraph(random_state):
+    """Seed igraph reproducibly without touching the process-global ``random`` stream.
+
+    ``random.seed(); ig.set_random_number_generator(random)`` makes the run reproducible and
+    also silently reseeds the stdlib generator for the rest of the session, so unrelated user
+    code that draws from ``random`` changes behaviour after a clustering call. scanpy avoids
+    exactly this with its own ``_RNGIgraph`` wrapper. Hand igraph a private instance and put
+    the default back afterwards.
+    """
+    import random as _random
+
+    import igraph as ig
+    try:
+        ig.set_random_number_generator(_random.Random(random_state))
+        yield
+    finally:
+        ig.set_random_number_generator(_random)
 
 
 def leiden(connectivities, resolution: float = 1.0, random_state: int = 0,
@@ -35,23 +56,20 @@ def leiden(connectivities, resolution: float = 1.0, random_state: int = 0,
     if backend != "igraph":
         raise ValueError(f"unknown backend {backend!r} (gpu|igraph)")
 
-    import random as _random
-
     import igraph as ig
 
     coo = connectivities.tocoo()
     upper = coo.row < coo.col  # undirected: keep each edge once
     edges = np.column_stack([coo.row[upper], coo.col[upper]])
 
-    _random.seed(random_state)
-    ig.set_random_number_generator(_random)  # igraph wants a random-module-like RNG
-    g = ig.Graph(n=connectivities.shape[0], edges=edges.tolist())
-    g.es["weight"] = coo.data[upper].tolist()
+    with _seeded_igraph(random_state):
+        g = ig.Graph(n=connectivities.shape[0], edges=edges.tolist())
+        g.es["weight"] = coo.data[upper].tolist()
 
-    part = g.community_leiden(
-        objective_function="modularity",
-        weights="weight",
-        resolution=resolution,
-        n_iterations=n_iterations,
-    )
+        part = g.community_leiden(
+            objective_function="modularity",
+            weights="weight",
+            resolution=resolution,
+            n_iterations=n_iterations,
+        )
     return np.asarray(part.membership)

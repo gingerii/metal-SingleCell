@@ -109,8 +109,30 @@ def score_genes_cell_cycle(X, s_genes, g2m_genes, var_names, **kwargs) -> dict:
     return {"S_score": s, "G2M_score": g2m, "phase": phase}
 
 
+def _log2_fold_change(mean_g, mean_r, base=None):
+    """scanpy's ``logfoldchanges``: log2 of the ratio of EXPRESSION means, not a difference.
+
+    ``X`` holds log1p values, so scanpy undoes the log before taking the ratio::
+
+        log2((expm1(mean_g) + 1e-9) / (expm1(mean_r) + 1e-9))
+
+    Reporting ``mean_g - mean_r`` instead is a difference of log-means in natural-log units:
+    correlated 0.17 with the real thing on pbmc3k, ~48x smaller in magnitude, and it silently
+    guts any downstream fold-change filter (``rank_genes_groups_df(log2fc_min=1)`` returned 17
+    genes where scanpy returned 196).
+
+    ``base`` mirrors ``uns['log1p']['base']`` — scanpy rescales when log1p used a base other
+    than e.
+    """
+    if base is not None:
+        mean_g = mean_g * np.log(base)
+        mean_r = mean_r * np.log(base)
+    return np.log2((np.expm1(mean_g) + 1e-9) / (np.expm1(mean_r) + 1e-9))
+
+
 def rank_genes_groups(X, groups, var_names=None, method: str = "t-test",
-                      reference: str = "rest", tie_correct: bool = False, **kwds) -> dict:
+                      reference: str = "rest", tie_correct: bool = False,
+                      log1p_base=None, **kwds) -> dict:
     """Rank marker genes per group (scanpy ``tl.rank_genes_groups``), group vs rest.
 
     ``method`` ∈ {``"t-test"``, ``"t-test_overestim_var"``, ``"wilcoxon"``, ``"logreg"``}.
@@ -133,6 +155,26 @@ def rank_genes_groups(X, groups, var_names=None, method: str = "t-test",
     G = len(cats)
     var_names = np.arange(n_genes) if var_names is None else np.asarray(var_names)
     out = {}
+
+    # `reference` was accepted, recorded in uns, and never read -- every call was group-vs-rest
+    # while the output claimed otherwise. It names either "rest" or one of the groups, and in
+    # the latter case that group is compared against rather than reported on.
+    ref_idx = None
+    if reference != "rest":
+        matches = np.flatnonzero(np.asarray([str(c) for c in cats]) == str(reference))
+        if not matches.size:
+            raise ValueError(f"reference = {reference} needs to be one of groupby = "
+                             f"{[str(c) for c in cats]}.")
+        ref_idx = int(matches[0])
+
+    # scanpy refuses a singleton group rather than reporting statistics for it: the variance is
+    # undefined, and clamping the denominator to 1 turns that into finite nonsense ranked as a
+    # top marker.
+    counts = np.bincount(code, minlength=G)
+    solo = [str(cats[i]) for i in np.flatnonzero(counts == 1)]
+    if solo and method != "logreg":
+        raise ValueError(f"Could not calculate statistics for groups {', '.join(solo)} since "
+                         f"they only contain one sample.")
 
     # ---- logistic regression: coefficients are the per-group scores (no p-values) ----
     if method == "logreg":
@@ -165,17 +207,34 @@ def rank_genes_groups(X, groups, var_names=None, method: str = "t-test",
 
     # ---- Wilcoxon rank-sum: rank cells per gene, sum group ranks -> normal z ----
     if method == "wilcoxon":
-        ranks = stats.rankdata(Xd, axis=0)                      # n × genes, average ties
-        rsum = np.zeros((G, n_genes), np.float64)
-        np.add.at(rsum, code, ranks)                            # exact fp64 rank sums
-        tc = _tiecorrect_cols(ranks) if tie_correct else np.ones(n_genes)
+        tc_full = None
         for gi, cat in enumerate(cats):
-            ng_, mg_ = ng[gi], n - ng[gi]
-            std = np.sqrt(tc * ng_ * mg_ * (n + 1) / 12.0) + 1e-12
-            z = (rsum[gi] - ng_ * (n + 1) / 2.0) / std
+            if gi == ref_idx:
+                continue                                        # scanpy omits the reference
+            if ref_idx is None:
+                sel = slice(None)                               # group vs everything else
+                sub_code = (code == gi).astype(np.int32)
+                n_sub = n
+            else:                                               # group vs the reference only
+                sel = np.flatnonzero((code == gi) | (code == ref_idx))
+                sub_code = (code[sel] == gi).astype(np.int32)
+                n_sub = sel.size
+            ranks = stats.rankdata(Xd[sel], axis=0)             # n_sub × genes, average ties
+            rsum = np.zeros((2, n_genes), np.float64)
+            np.add.at(rsum, sub_code, ranks)
+            if tie_correct:
+                tc = _tiecorrect_cols(ranks)
+            else:
+                tc = tc_full if tc_full is not None else np.ones(n_genes)
+            ng_ = float(sub_code.sum()); mg_ = n_sub - ng_
+            std = np.sqrt(tc * ng_ * mg_ * (n_sub + 1) / 12.0) + 1e-12
+            z = (rsum[1] - ng_ * (n_sub + 1) / 2.0) / std
             z[np.isnan(z)] = 0.0
             pval = 2 * stats.norm.sf(np.abs(z))
-            lfc = gsum[gi] / ng[gi] - (tot_sum - gsum[gi]) / (n - ng[gi])
+            mean_g = gsum[gi] / ng[gi]
+            mean_r = (gsum[ref_idx] / ng[ref_idx] if ref_idx is not None
+                      else (tot_sum - gsum[gi]) / (n - ng[gi]))
+            lfc = _log2_fold_change(mean_g, mean_r, log1p_base)
             order = np.argsort(-z)
             out[str(cat)] = {"names": var_names[order], "scores": z[order],
                              "pvals": pval[order], "logfoldchanges": lfc[order]}
@@ -183,11 +242,19 @@ def rank_genes_groups(X, groups, var_names=None, method: str = "t-test",
 
     # ---- t-test / t-test_overestim_var (Welch via scipy, exact scanpy match) ----
     for gi, cat in enumerate(cats):
-        n_g = ng[gi]; n_other = n - n_g
+        if gi == ref_idx:
+            continue                                            # scanpy omits the reference
+        n_g = ng[gi]
         mean_g = gsum[gi] / n_g
-        var_g = (gsq[gi] / n_g - mean_g ** 2) * n_g / max(n_g - 1, 1)
-        mean_r = (tot_sum - gsum[gi]) / n_other
-        var_r = ((tot_sq - gsq[gi]) / n_other - mean_r ** 2) * n_other / max(n_other - 1, 1)
+        var_g = (gsq[gi] / n_g - mean_g ** 2) * n_g / (n_g - 1)
+        if ref_idx is None:                                     # group vs rest
+            n_other = n - n_g
+            sum_r, sq_r = tot_sum - gsum[gi], tot_sq - gsq[gi]
+        else:                                                   # group vs the named reference
+            n_other = ng[ref_idx]
+            sum_r, sq_r = gsum[ref_idx], gsq[ref_idx]
+        mean_r = sum_r / n_other
+        var_r = (sq_r / n_other - mean_r ** 2) * n_other / (n_other - 1)
         n_rest = n_g if method == "t-test_overestim_var" else n_other   # scanpy's var hack
         with np.errstate(invalid="ignore"):
             t, pval = stats.ttest_ind_from_stats(
@@ -195,8 +262,8 @@ def rank_genes_groups(X, groups, var_names=None, method: str = "t-test",
                 equal_var=False)
         t = np.nan_to_num(t, nan=0.0); pval = np.nan_to_num(pval, nan=1.0)
         order = np.argsort(-t)
-        out[str(cat)] = {"names": var_names[order], "scores": t[order],
-                         "pvals": pval[order], "logfoldchanges": (mean_g - mean_r)[order]}
+        out[str(cat)] = {"names": var_names[order], "scores": t[order], "pvals": pval[order],
+                         "logfoldchanges": _log2_fold_change(mean_g, mean_r, log1p_base)[order]}
     return out
 
 
@@ -339,26 +406,40 @@ def draw_graph(connectivities, n_iter: int = 500, random_state: int = 0) -> np.n
     return np.asarray(pos)
 
 
-def diffmap(connectivities, n_comps: int = 15) -> dict:
+def diffmap(connectivities, n_comps: int = 15, random_state: int = 0) -> dict:
     """Diffusion map from a neighbor connectivity graph (scanpy ``tl.diffmap``).
 
-    Eigendecompose the symmetric normalized transition matrix
-    ``T = D^{-1/2} W D^{-1/2}`` (ARPACK, fp64 — sparse, no dense GPU eig), then map
-    back to the diffusion components ``D^{-1/2} · eigvecs``. Returns eigenvalues
-    (descending) and ``X_diffmap``.
+    Two details make this scanpy's diffusion map rather than a nearby one.
+
+    **Coifman density normalisation** (scanpy's ``density_normalize=True`` default): the graph
+    is first divided through by the degree on both sides, ``Wc = D^-1 W D^-1``, and only then
+    symmetrically normalised by ``z = sqrt(rowsum(Wc))``. Skipping it and going straight to
+    ``D^-1/2 W D^-1/2`` shifts the spectrum — measured max eigenvalue difference 0.056 on a
+    600-cell graph, and a downstream ``sc.tl.dpt`` pseudotime that correlates 0.975 with
+    scanpy's instead of matching it.
+
+    **The stored basis is the raw eigenvector matrix**, not ``D^-1/2 · eigvecs``. scanpy keeps
+    the unit-norm symmetric eigenvectors; rescaling them cost another ~0.98 correlation per
+    component and left the columns with norm ~0.37.
+
+    ARPACK is seeded so the eigenvector signs are reproducible; unseeded, repeat runs at one
+    seed flipped the sign of 4 of 5 components.
     """
     import scipy.sparse as sp
     from scipy.sparse.linalg import eigsh
 
     W = sp.csr_matrix(connectivities).astype(np.float64)
     d = np.asarray(W.sum(axis=1)).ravel()
-    dinv = sp.diags(1.0 / np.sqrt(d + 1e-12))
-    T = dinv @ W @ dinv
-    vals, vecs = eigsh(T, k=min(n_comps, W.shape[0] - 1), which="LM")
+    q = np.divide(1.0, d, out=np.zeros_like(d), where=d > 0)
+    Wc = sp.diags(q) @ W @ sp.diags(q)                       # Coifman density normalisation
+    z = np.sqrt(np.asarray(Wc.sum(axis=1)).ravel())
+    zinv = np.divide(1.0, z, out=np.zeros_like(z), where=z > 0)
+    T = sp.diags(zinv) @ Wc @ sp.diags(zinv)
+    k = min(n_comps, W.shape[0] - 1)
+    v0 = np.random.default_rng(random_state).normal(size=W.shape[0])
+    vals, vecs = eigsh(T, k=k, which="LM", v0=v0)
     order = np.argsort(-vals)
-    vals, vecs = vals[order], vecs[:, order]
-    x_diffmap = np.asarray(dinv @ vecs)
-    return {"eigenvalues": vals, "X_diffmap": x_diffmap}
+    return {"eigenvalues": vals[order], "X_diffmap": np.asarray(vecs[:, order])}
 
 
 def embedding_density(embedding, groups=None) -> np.ndarray:
