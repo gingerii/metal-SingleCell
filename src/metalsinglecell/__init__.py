@@ -5,7 +5,7 @@ Heavy backends (mlx, scanpy) are lazy-imported inside functions so this
 package imports cleanly in any environment.
 """
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 from . import config, gr, pp, tl
 

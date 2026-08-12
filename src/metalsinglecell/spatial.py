@@ -248,52 +248,142 @@ def _spmm_scatter(src, dst, w, Xc):
     return mx.zeros_like(Xc).at[src].add(w[:, None] * Xc[dst])
 
 
-def spatial_autocorr(X, connectivity, mode: str = "moran", n_perms: int = 100,
+def row_normalize(g):
+    """squidpy's ``transformation=True``: L1-normalise every row of the connectivity.
+
+    Scale-invariant for a regular graph — Moran's I divides by ``S0`` — so it changes nothing
+    on a synthetic lattice, and does change the statistic wherever degrees vary (Visium
+    boundary spots, Delaunay, k-NN after a percentile prune).
+    """
+    import scipy.sparse as sp
+    g = sp.csr_matrix(g, copy=True).astype(np.float64)
+    s = np.asarray(abs(g).sum(axis=1)).ravel()
+    inv = np.divide(1.0, s, out=np.zeros_like(s), where=s != 0)
+    return sp.diags(inv) @ g
+
+
+def graph_moments(g):
+    """``s0, s1, s2`` — pysal's weight-matrix moments, for the analytic variance."""
+    s0 = float(g.sum())
+    t = g.transpose() + g
+    s1 = float(t.multiply(t).sum()) / 2.0
+    row = np.asarray(g.sum(axis=1)).ravel()
+    col = np.asarray(g.sum(axis=0)).ravel()
+    s2 = float(((row + col) ** 2).sum())
+    return s0, s1, s2
+
+
+def analytic_pval(score, g, mode: str = "moran", two_tailed: bool = False):
+    """p-value and variance of the statistic under the normality assumption.
+
+    Moran's I and Geary's C have *different* sampling variances (Cliff & Ord 1981); squidpy
+    reused Moran's for both until 1.8.2, which left the Geary p-value miscalibrated
+    (scverse/squidpy#1183). These are the corrected forms, matching pysal/esda.
+    """
+    from scipy import stats
+    s0, s1, s2 = graph_moments(g)
+    n = g.shape[0]
+    s02 = s0 * s0
+    if mode == "geary":
+        var = ((2 * s1 + s2) * (n - 1) - 4 * s02) / (2 * (n + 1) * s02)
+        expected = 1.0
+    else:
+        var = (n * n * s1 - n * s2 + 3 * s02) / ((n - 1) * (n + 1) * s02) - (1.0 / (n - 1)) ** 2
+        expected = -1.0 / (n - 1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z = (score - expected) / np.sqrt(var)
+        p = np.where(z > 0, 1.0 - stats.norm.cdf(z), stats.norm.cdf(z))
+    return (p * 2.0 if two_tailed else p), var
+
+
+def permutation_pvals(score, sims):
+    """``pval_sim``, ``pval_z_sim`` and ``var_sim`` from the permutation null.
+
+    ``pval_sim`` folds the count to the *smaller* tail, so it detects dispersion as well as
+    clustering. A one-sided count toward clustering reports p ~ 1 for a checkerboard gene
+    where this reports p ~ 1/(n_perms+1).
+    """
+    from scipy import stats
+    n_perms = sims.shape[0]
+    large = (sims >= score).sum(axis=0)
+    large = np.where((n_perms - large) < large, n_perms - large, large)
+    p_sim = (large + 1.0) / (n_perms + 1.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z = (score - sims.mean(axis=0)) / sims.std(axis=0)
+        p_z_sim = np.where(z > 0, 1.0 - stats.norm.cdf(z), stats.norm.cdf(z))
+    return p_sim, p_z_sim, sims.var(axis=0)
+
+
+def multiple_testing(pvals, method: str = "fdr_bh"):
+    """Multiple-testing correction, matching ``statsmodels.stats.multitest.multipletests``.
+
+    Implemented here rather than imported: statsmodels is not a dependency of this package
+    (numpy/scipy/anndata/mlx are), and Benjamini-Hochberg is a sort and a running minimum.
+    Methods beyond these two raise instead of silently going uncorrected.
+    """
+    p = np.asarray(pvals, dtype=np.float64)
+    n = p.size
+    if method == "bonferroni":
+        return np.minimum(p * n, 1.0)
+    if method != "fdr_bh":
+        raise NotImplementedError(f"corr_method={method!r} is not implemented "
+                                  f"(expected 'fdr_bh', 'bonferroni' or None)")
+    order = np.argsort(p)
+    ranked = p[order] * n / np.arange(1, n + 1)
+    # step-up: an adjusted p-value can never exceed one for a larger raw p-value
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    out = np.empty(n, dtype=np.float64)
+    out[order] = np.minimum(ranked, 1.0)
+    return out
+
+
+def spatial_autocorr(X, connectivity, mode: str = "moran", n_perms: int | None = None,
                      random_state: int = 0) -> dict:
     """Per-gene spatial autocorrelation (squidpy ``gr.spatial_autocorr``).
 
-    ``X`` is (cells × genes); ``connectivity`` a symmetric scipy sparse spatial
-    graph. ``mode`` is ``"moran"`` (Moran's I) or ``"geary"`` (Geary's C). Returns
-    the statistic per gene and a one-sided permutation p-value (shuffling cells).
+    ``X`` is (cells × genes); ``connectivity`` a scipy sparse spatial graph, already
+    row-normalised by the caller if that is wanted. ``mode`` is ``"moran"`` (Moran's I) or
+    ``"geary"`` (Geary's C). Returns the observed statistic and, when ``n_perms`` is given,
+    the whole ``(n_perms, genes)`` null — the caller turns that into p-values.
+
+    The null permutes the graph's **rows**, as squidpy does, rather than the expression
+    values. On the GPU that is much the cheaper end: re-indexing the edge list costs one
+    ``take`` over ``n`` integers per draw, where re-uploading a permuted ``X`` costs a full
+    host-to-device copy of the matrix.
     """
     import mlx.core as mx
     import scipy.sparse as sp
 
     coo = sp.coo_matrix(connectivity)
-    src = mx.array(coo.row.astype(np.int32))
+    src0 = mx.array(coo.row.astype(np.int32))
     dst = mx.array(coo.col.astype(np.int32))
     w = mx.array(coo.data.astype(np.float32))
-    W_sum = float(coo.data.sum())
+    S0 = float(coo.data.sum())
     n = X.shape[0]
 
     Xg = mx.array(np.asarray(X, dtype=np.float32))
+    Xc = Xg - mx.mean(Xg, axis=0, keepdims=True)
+    denom = mx.sum(Xc * Xc, axis=0)
 
-    def stat(Xmat):
-        mean = mx.mean(Xmat, axis=0, keepdims=True)
-        Xc = Xmat - mean
-        denom = mx.sum(Xc * Xc, axis=0)
+    def stat(src):
         if mode == "moran":
             num = mx.sum(Xc * _spmm_scatter(src, dst, w, Xc), axis=0)
-            return (n / W_sum) * num / denom
+            return (n / S0) * num / denom
         # Geary's C: sum_ij w_ij (x_i - x_j)^2, summed directly over the edge list
         # (exact for any graph, no symmetry assumption).
-        de = Xmat[src] - Xmat[dst]
+        de = Xc[src] - Xc[dst]
         num = mx.sum(w[:, None] * de * de, axis=0)
-        return (n - 1) / (2.0 * W_sum) * num / denom
+        return (n - 1) / (2.0 * S0) * num / denom
 
-    obs = stat(Xg)
+    obs = stat(src0)
     mx.eval(obs)
     obs_np = np.asarray(obs)
+    if not n_perms:
+        return {mode: obs_np, "sims": None}
 
-    # permutation null: shuffle cells, recompute. Moran high => clustered;
-    # Geary low => clustered, so the one-sided tail flips by mode.
     rng = np.random.default_rng(random_state)
-    Xnp = np.asarray(X, dtype=np.float32)
-    count = np.zeros_like(obs_np)
-    for _ in range(n_perms):
-        perm = rng.permutation(n)
-        s = np.asarray(stat(mx.array(Xnp[perm])))
-        count += (s >= obs_np) if mode == "moran" else (s <= obs_np)
-    pval = (count + 1.0) / (n_perms + 1.0)
-
-    return {mode: obs_np, "pval": pval}
+    sims = np.empty((n_perms, obs_np.shape[0]), dtype=np.float64)
+    for i in range(n_perms):
+        perm = mx.array(rng.permutation(n).astype(np.int32))
+        sims[i] = np.asarray(stat(mx.take(perm, src0)))
+    return {mode: obs_np, "sims": sims}

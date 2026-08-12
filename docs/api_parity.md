@@ -96,9 +96,18 @@ choice is deliberate.
 
 | function | ours | reference | effect |
 |---|---|---|---|
-| `gr.spatial_autocorr(n_perms=)` | `100` | `None` | we compute permutation p-values by default; squidpy computes none. Extra columns, ~100× the work on a default call. |
 | `tl.leiden(n_iterations=)` | `2` | `-1` | scanpy iterates to convergence. Measured ARI between the two on the same graph: **0.958** — same cluster count, slightly different labels. |
 | `gr.calculate_niche(random_state=)` | `0` | `42` | labels differ run-to-run only. |
+
+Fixed in 0.1.3: `gr.spatial_autocorr` returned only the statistic and `pval_sim`, and that
+`pval_sim` counted one tail — the clustered one. A gene with significant *negative* spatial
+autocorrelation therefore scored p ≈ 1 where squidpy scores p ≈ 0.001, under the same column
+name. squidpy folds the permutation count to the smaller tail; we now do too. The frame also
+carries the rest of squidpy's columns (`pval_norm`, `var_norm`, and with `n_perms` also
+`pval_z_sim`, `var_sim`, plus a `*_fdr_bh` per p-value), `n_perms` now defaults to `None` as
+squidpy's does rather than `100`, and `copy=True` returns the `DataFrame` rather than the
+`AnnData`. Benjamini–Hochberg is implemented in-package rather than pulled from statsmodels,
+and is pinned against it to 1e-12.
 
 Fixed in 0.1.2: `gr.spatial_neighbors(coord_type=)` was accepted and **ignored** — every call
 returned a generic k-NN graph, so `coord_type='grid'` silently produced the wrong graph on
@@ -115,7 +124,7 @@ Where ours is a concrete value and the reference is `None` — `pp.pca(n_comps=5
 
 ## Arguments we do not implement
 
-121 in total. The ones most likely to be reached for:
+116 in total. The ones most likely to be reached for:
 
 | function | missing |
 |---|---|
@@ -126,7 +135,6 @@ Where ours is a concrete value and the reference is `None` — `pp.pca(n_comps=5
 | `pp.scale` | `mask_obs`, `obsm` |
 | `pp.log1p` | `base`, `obsm` |
 | `pp.scrublet` | most of the tuning surface (`batch_key`, `threshold`, `n_prin_comps`, …) |
-| `gr.spatial_autocorr` | `transformation`, `two_tailed`, `corr_method`, `attr`, `use_raw` |
 | `gr.ligrec` | `complex_policy`, `threshold`, `corr_method`, `use_raw`, `gene_symbols` |
 | `gr.calculate_niche` | most of squidpy 1.8's expanded surface |
 

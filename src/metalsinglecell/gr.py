@@ -386,25 +386,82 @@ def spatial_neighbors(adata, n_neighs: int = 6, coord_type: str | None = None,
     return spatial_neighbors_knn(adata, n_neighs=n_neighs, percentile=percentile, **common)
 
 
-def spatial_autocorr(adata, mode: str = "moran", genes=None, n_perms: int | None = 100,
-                     connectivity_key: str = "spatial_connectivities", layer=None,
-                     seed: int = 0, copy: bool = False):
-    """Moran's I / Geary's C per gene (``sq.gr.spatial_autocorr``); writes ``uns['moranI']``/``['gearyC']``."""
-    import pandas as pd
+def _autocorr_values(adata, attr, genes, layer, use_raw):
+    """squidpy's three extraction modes: variables, numeric ``obs`` columns, or ``obsm`` cols."""
     import scipy.sparse as sp
-    adata = adata.copy() if copy else adata
+    if attr == "obs":
+        if genes is None:
+            df = adata.obs.select_dtypes(include=np.number)
+            return np.asarray(df.to_numpy(), dtype=np.float32), df.columns.tolist()
+        genes = [genes] if isinstance(genes, str) else list(genes)
+        return np.asarray(adata.obs[genes].to_numpy(), dtype=np.float32), genes
+    if attr == "obsm":
+        if layer is None or layer not in adata.obsm:
+            raise KeyError(f"attr='obsm' needs layer= naming a key in adata.obsm, got {layer!r}")
+        M = adata.obsm[layer]
+        ixs = list(range(M.shape[1])) if genes is None else list(np.ravel([genes]))
+        return np.asarray(M[:, ixs], dtype=np.float32), ixs
+    if attr != "X":
+        raise NotImplementedError(f"extracting from adata.{attr} is not implemented "
+                                  f"(expected 'X', 'obs' or 'obsm')")
+    source = adata.raw if use_raw else adata
+    if use_raw and adata.raw is None:
+        raise AttributeError("no .raw attribute found; try use_raw=False")
     if genes is None:
         genes = (adata.var_names[adata.var["highly_variable"].to_numpy()]
-                 if "highly_variable" in adata.var else adata.var_names).tolist()
-    gi = [adata.var_names.get_loc(g) for g in genes]
-    X = adata.layers[layer] if layer is not None else adata.X
-    Xg = np.asarray(X[:, gi].todense() if sp.issparse(X) else X[:, gi], dtype=np.float32)
-    out = _gr.spatial_autocorr(Xg, adata.obsp[connectivity_key], mode=mode,
-                               n_perms=n_perms or 0, random_state=seed)
+                 if "highly_variable" in adata.var else source.var_names).tolist()
+    genes = [genes] if isinstance(genes, str) else list(genes)
+    gi = [source.var_names.get_loc(g) for g in genes]
+    X = source.X if (use_raw or layer is None) else adata.layers[layer]
+    Xg = X[:, gi]
+    return np.asarray(Xg.todense() if sp.issparse(Xg) else Xg, dtype=np.float32), genes
+
+
+def spatial_autocorr(adata, mode: str = "moran", genes=None, n_perms: int | None = None,
+                     connectivity_key: str = "spatial_connectivities", layer=None,
+                     transformation: bool = True, two_tailed: bool = False,
+                     corr_method: str | None = "fdr_bh", attr: str = "X",
+                     use_raw: bool = False, seed: int = 0, copy: bool = False):
+    """Moran's I / Geary's C per gene (``sq.gr.spatial_autocorr``).
+
+    Writes ``uns['moranI']`` / ``uns['gearyC']`` with squidpy's full column set: the statistic,
+    the normality-assumption ``pval_norm``/``var_norm``, and — only when ``n_perms`` is given —
+    ``pval_z_sim``, ``pval_sim`` and ``var_sim`` from the permutation null, plus a
+    ``*_{corr_method}`` column per p-value.
+
+    ``n_perms`` defaults to ``None`` (squidpy's default: analytic p-values only). Through 0.1.2
+    it defaulted to 100 and the frame held only the statistic and ``pval_sim`` — and that
+    ``pval_sim`` was one-sided toward clustering, so a gene with significant *negative*
+    autocorrelation scored p ~ 1 where squidpy gives p ~ 0.001. It is now squidpy's folded
+    two-tailed count.
+    """
+    import pandas as pd
+    adata = adata.copy() if copy else adata
+    Xg, index = _autocorr_values(adata, attr, genes, layer, use_raw)
+
+    g = adata.obsp[connectivity_key]
+    g = _gr.row_normalize(g) if transformation else g.astype(np.float64)
+
+    out = _gr.spatial_autocorr(Xg, g, mode=mode, n_perms=n_perms, random_state=seed)
+    score = out[mode]
     stat = "I" if mode == "moran" else "C"
-    df = pd.DataFrame({stat: out[mode], "pval_sim": out["pval"]}, index=genes).sort_values(stat, ascending=False)
+
+    p_norm, var_norm = _gr.analytic_pval(score, g, mode=mode, two_tailed=two_tailed)
+    cols = {stat: score, "pval_norm": p_norm, "var_norm": np.full(score.shape, var_norm)}
+    if out["sims"] is not None:
+        p_sim, p_z_sim, var_sim = _gr.permutation_pvals(score, out["sims"])
+        cols.update(pval_z_sim=p_z_sim, pval_sim=p_sim, var_sim=var_sim)
+
+    df = pd.DataFrame(cols, index=index)
+    if corr_method is not None:
+        for pv in [c for c in df.columns if "pval" in c]:
+            df[f"{pv}_{corr_method}"] = _gr.multiple_testing(df[pv].to_numpy(), corr_method)
+    df.sort_values(by=stat, ascending=(mode == "geary"), inplace=True)
+
+    if copy:
+        return df                       # squidpy returns the frame, not the object
     adata.uns["moranI" if mode == "moran" else "gearyC"] = df
-    return adata if copy else None
+    return None
 
 
 def co_occurrence(adata, cluster_key, interval: int = 50, copy: bool = False):
