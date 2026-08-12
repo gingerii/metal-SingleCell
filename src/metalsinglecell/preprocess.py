@@ -103,12 +103,34 @@ def filter_highly_variable(hvg_df):
     return hvg_df["highly_variable"].to_numpy().astype(bool)
 
 
+def nonzero_per_row(X) -> np.ndarray:
+    """Non-zero entries per cell — scanpy's ``axis_nnz``, i.e. ``!= 0`` and not ``> 0``.
+
+    The distinction only shows up on non-count input (residuals, scaled data), where a
+    negative entry is an observation and not an absence.
+    """
+    import scipy.sparse as sp
+    return np.asarray((sp.csr_matrix(X) != 0).sum(axis=1)).ravel().astype(np.int64)
+
+
+def nonzero_per_col(X) -> np.ndarray:
+    """Non-zero entries per gene (see :func:`nonzero_per_row`)."""
+    import scipy.sparse as sp
+    return np.asarray((sp.csr_matrix(X) != 0).sum(axis=0)).ravel().astype(np.int64)
+
+
 def regress_out(X, covariates) -> np.ndarray:
     """Regress per-gene expression on covariates, return residuals (scanpy ``pp.regress_out``).
 
     All genes share the design matrix [intercept | covariates], so we fit one OLS
     (fp64 LAPACK for the small k×k solve) and form residuals ``X - D·beta`` on the
     GPU. ``covariates`` is (cells,) or (cells × k). ``X`` is (cells × genes).
+
+    A rank-deficient design falls back to a least-norm solve. That case is not exotic — a
+    covariate that is identically zero produces it, e.g. ``pct_counts_mt`` on a panel with no
+    MT- genes — and ``mx.linalg.solve`` answers a singular system by raising a C++ exception
+    that Python cannot catch, aborting the interpreter (SIGABRT) rather than the call. scanpy
+    tests the determinant for the same reason.
     """
     import mlx.core as mx
 
@@ -118,9 +140,17 @@ def regress_out(X, covariates) -> np.ndarray:
         cov = cov[:, None]
     n = Xg.shape[0]
     D = mx.concatenate([mx.ones((n, 1), dtype=mx.float32), mx.array(cov)], axis=1)  # intercept + covs
-    # Normal equations β = (DᵀD)⁻¹DᵀX: the only host op is a tiny k×k solve; X stays
-    # on the GPU (no fp64 host lstsq, no re-upload) — ~100× faster than lstsq+upload.
-    beta = mx.linalg.solve(D.T @ D, D.T @ Xg, stream=mx.cpu)   # (k × genes)
+
+    gram = np.asarray(D.T @ D, dtype=np.float64)
+    if np.linalg.matrix_rank(gram) < gram.shape[0]:
+        # Least-norm coefficients on the host. Slower, but it only runs on the degenerate
+        # design, and the k here is the number of covariates, not the number of genes.
+        rhs = np.asarray(D.T @ Xg, dtype=np.float64)
+        beta = mx.array(np.linalg.lstsq(gram, rhs, rcond=None)[0].astype(np.float32))
+    else:
+        # Normal equations β = (DᵀD)⁻¹DᵀX: the only host op is a tiny k×k solve; X stays
+        # on the GPU (no fp64 host lstsq, no re-upload) — ~100× faster than lstsq+upload.
+        beta = mx.linalg.solve(D.T @ D, D.T @ Xg, stream=mx.cpu)   # (k × genes)
     resid = Xg - D @ beta
     mx.eval(resid)
     return np.asarray(resid)

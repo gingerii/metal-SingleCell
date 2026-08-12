@@ -37,7 +37,7 @@ _QC_KERNEL_SOURCE = """
     for (uint j = start; j < end; ++j) {
         float v = data[j];
         s += v;
-        if (v > 0.0f) { nz += 1u; }
+        if (v != 0.0f) { nz += 1u; }   // scanpy counts NON-ZERO, not positive
     }
     row_sum[row] = s;
     row_nnz[row] = (int)nz;
@@ -298,7 +298,7 @@ class CSR:
         ng = self.shape[1]
         total = mx.zeros((ng,), dtype=mx.float32).at[col].add(self.data)
         nnz = mx.zeros((ng,), dtype=mx.float32).at[col].add(
-            (self.data > 0).astype(mx.float32))
+            (self.data != 0).astype(mx.float32))   # non-zero, not positive (scanpy's axis_nnz)
         mx.eval(total, nnz)
         return np.asarray(total), np.asarray(nnz)
 
