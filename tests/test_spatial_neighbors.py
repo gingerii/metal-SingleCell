@@ -140,6 +140,114 @@ def test_unknown_transform_raises():
         msc_gr.spatial_neighbors_knn(a, transform="banana")
 
 
+# --------------------------------------------------------------------------- multi-section
+
+def two_sections(interleave=False, seed=0):
+    """Two sections sharing one coordinate frame, at different spacings.
+
+    They are placed so their point clouds abut, which is the realistic failure: a graph built
+    across both connects spots that are on different slides. The spacings differ (100 vs 250)
+    so the grid builder's median correction is wrong if it is taken globally.
+    """
+    import anndata as ad
+    import pandas as pd
+    a = np.c_[np.divmod(np.arange(400), 20)[1] * 100.0, np.divmod(np.arange(400), 20)[0] * 100.0]
+    b = np.c_[np.divmod(np.arange(400), 20)[1] * 250.0, np.divmod(np.arange(400), 20)[0] * 250.0]
+    b = b + [2100.0, 0.0]
+    xy = np.r_[a, b]
+    lib = np.r_[np.full(400, "A"), np.full(400, "B")]
+    if interleave:
+        order = np.random.default_rng(seed).permutation(800)
+        xy, lib = xy[order], lib[order]
+    adata = ad.AnnData(np.zeros((800, 2), dtype=np.float32))
+    adata.obsm["spatial"] = xy
+    adata.obs["library"] = pd.Categorical(lib)
+    return adata
+
+
+def _crosses_libraries(adata, key="spatial_connectivities"):
+    codes = adata.obs["library"].cat.codes.to_numpy()
+    A = adata.obsp[key].tocoo()
+    return int(np.count_nonzero(codes[A.row] != codes[A.col]))
+
+
+@pytest.mark.metal
+@pytest.mark.parametrize("builder,kw", [
+    (msc_gr.spatial_neighbors_knn, {"n_neighs": 6}),
+    (msc_gr.spatial_neighbors_radius, {"radius": 400.0}),
+    (msc_gr.spatial_neighbors_grid, {"n_neighs": 6}),
+    (msc_gr.spatial_neighbors_delaunay, {}),
+])
+@pytest.mark.parametrize("interleave", [False, True])
+def test_library_key_keeps_sections_apart(builder, kw, interleave):
+    a = two_sections(interleave)
+    builder(a, **kw)
+    assert _crosses_libraries(a) > 0, "fixture must produce cross-section edges without library_key"
+    builder(a, library_key="library", **kw)
+    assert _crosses_libraries(a) == 0
+    assert _crosses_libraries(a, "spatial_distances") == 0
+
+
+@pytest.mark.metal
+def test_library_key_builds_the_same_graph_as_running_each_section_alone():
+    """The block for section A must be exactly what building A on its own gives — including
+    under interleaving, where the blocks come back permuted."""
+    a = two_sections(interleave=True)
+    msc_gr.spatial_neighbors_knn(a, n_neighs=6, library_key="library")
+    for lib in ("A", "B"):
+        m = (a.obs["library"] == lib).to_numpy()
+        alone = a[m].copy()
+        msc_gr.spatial_neighbors_knn(alone, n_neighs=6)
+        block = a.obsp["spatial_connectivities"].tocsr()[m][:, m]
+        assert (abs(block - alone.obsp["spatial_connectivities"]) > 0).nnz == 0
+        Db = a.obsp["spatial_distances"].tocsr()[m][:, m]
+        assert np.allclose(np.sort(Db.data), np.sort(alone.obsp["spatial_distances"].data))
+
+
+@pytest.mark.metal
+def test_grid_median_correction_is_per_section():
+    """The 1.3x median cutoff has to come from each section's own spacing. Pooling a 100-spaced
+    and a 250-spaced section puts the global median between them, which over-connects the
+    coarse section and truncates the fine one."""
+    a = two_sections()
+    msc_gr.spatial_neighbors_grid(a, n_neighs=6, library_key="library")
+    fine = (a.obs["library"] == "A").to_numpy()
+    A = a.obsp["spatial_connectivities"].tocsr()
+    for m in (fine, ~fine):
+        alone = a[m].copy()
+        msc_gr.spatial_neighbors_grid(alone, n_neighs=6)
+        assert (abs(A[m][:, m] - alone.obsp["spatial_connectivities"]) > 0).nnz == 0
+
+
+@pytest.mark.metal
+def test_library_key_requires_a_categorical_column():
+    a = two_sections()
+    a.obs["plain"] = a.obs["library"].astype(str)
+    with pytest.raises(TypeError, match="categorical"):
+        msc_gr.spatial_neighbors_knn(a, library_key="plain")
+    with pytest.raises(KeyError, match="nope"):
+        msc_gr.spatial_neighbors_knn(a, library_key="nope")
+
+
+@needs_squidpy
+@pytest.mark.metal
+@pytest.mark.parametrize("fn,kw", [
+    ("spatial_neighbors_knn", {"n_neighs": 6}),
+    ("spatial_neighbors_radius", {"radius": 400.0}),
+    ("spatial_neighbors_grid", {"n_neighs": 6}),
+    ("spatial_neighbors_delaunay", {}),
+])
+def test_library_key_matches_squidpy(fn, kw):
+    import squidpy as sq
+    a = two_sections(interleave=True)
+    o, t = a.copy(), a.copy()
+    getattr(msc_gr, fn)(o, library_key="library", **kw)
+    getattr(sq.gr, fn)(t, library_key="library", **kw)
+    coords = np.asarray(a.obsm["spatial"], dtype=np.float64)
+    assert _tie_free_differences(o.obsp["spatial_connectivities"],
+                                 t.obsp["spatial_connectivities"], coords) == 0
+
+
 # --------------------------------------------------------------------------- the old entry point
 
 

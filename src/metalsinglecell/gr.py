@@ -70,8 +70,11 @@ def _set_diag(M):
     return M.maximum(sp.identity(M.shape[0], format="csr", dtype=M.dtype)).tocsr()
 
 
-def _write_graph(adata, adj, dst, params, key_added, transform, set_diag, percentile, copy):
-    """Shared tail of every builder: percentile prune → set_diag → transform → write slots."""
+def _finalize(adj, dst, transform, set_diag, percentile):
+    """Shared tail of every builder: percentile prune → set_diag → transform.
+
+    Runs on one library's block, not on the assembled graph — see ``_assemble``.
+    """
     import scipy.sparse as sp
     adj, dst = adj.tocsr(), dst.tocsr()
     if percentile is not None and dst.nnz:                    # squidpy prunes on the DISTANCES
@@ -83,8 +86,54 @@ def _write_graph(adata, adj, dst, params, key_added, transform, set_diag, percen
         adj = _set_diag(adj)
     dst = _drop_diag(dst)
     dst.eliminate_zeros()
-    adj = _transform_adj(adj, transform)
+    return _transform_adj(adj, transform), dst
 
+
+def _library_blocks(adata, library_key):
+    """Row indices per library, in category order — ``None`` when there is only one graph."""
+    import pandas as pd
+    if library_key is None:
+        return None
+    if library_key not in adata.obs:
+        raise KeyError(f"no adata.obs[{library_key!r}] to group libraries by")
+    col = adata.obs[library_key]
+    if not isinstance(col.dtype, pd.CategoricalDtype):
+        raise TypeError(f"adata.obs[{library_key!r}] must be categorical "
+                        f"(squidpy requires it); got {col.dtype}")
+    codes = col.cat.codes.to_numpy()
+    blocks = [np.flatnonzero(codes == c) for c in range(len(col.cat.categories))]
+    return [b for b in blocks if b.size]                      # unused categories contribute nothing
+
+
+def _assemble(adata, spatial_key, library_key, build, transform, set_diag, percentile):
+    """Build one graph per library and combine them block-diagonally.
+
+    Sections of a multi-slide object share a coordinate frame only by accident, so a graph
+    built across all of them connects spots on different slides. squidpy solves this by
+    building each library separately and concatenating — and it runs the whole tail
+    (percentile, ``set_diag``, transform) *inside* the loop, which we match. It matters: a
+    global percentile lets a dense section set the threshold for a sparse one, and the grid
+    builder's median-distance correction has to come from the section's own spacing.
+    """
+    import scipy.sparse as sp
+    coords, exact = _coords(adata, spatial_key)
+    blocks = _library_blocks(adata, library_key)
+    if blocks is None:
+        return _finalize(*build(coords, exact), transform, set_diag, percentile)
+
+    mats = [_finalize(*build(np.ascontiguousarray(coords[b]), np.ascontiguousarray(exact[b])),
+                      transform, set_diag, percentile) for b in blocks]
+    adj = sp.block_diag([m[0] for m in mats], format="csr")
+    dst = sp.block_diag([m[1] for m in mats], format="csr")
+    order = np.concatenate(blocks) if blocks else np.zeros(0, dtype=np.int64)
+    if np.any(np.diff(order) < 0):            # libraries interleaved in obs order; undo the sort
+        inv = np.argsort(order)
+        adj, dst = adj[inv][:, inv], dst[inv][:, inv]
+    return adj.tocsr(), dst.tocsr()
+
+
+def _write_graph(adata, adj, dst, params, key_added, transform, copy):
+    """Write the four slots squidpy writes."""
     ck, dk = f"{key_added}_connectivities", f"{key_added}_distances"
     adata.obsp[ck] = adj
     adata.obsp[dk] = dst
@@ -123,6 +172,7 @@ def _knn_edges(coords, n_neighs):
 
 
 def spatial_neighbors_knn(adata, *, n_neighs: int = 6, spatial_key: str = "spatial",
+                          library_key: str | None = None,
                           percentile: float | None = None, transform: str | None = None,
                           set_diag: bool = False, key_added: str = "spatial",
                           copy: bool = False):
@@ -130,22 +180,30 @@ def spatial_neighbors_knn(adata, *, n_neighs: int = 6, spatial_key: str = "spati
 
     Directed: ``n_neighs`` edges per observation, self excluded, exactly as squidpy's
     sklearn-backed builder. Connectivities are binary, distances Euclidean.
+
+    ``library_key`` names a categorical ``obs`` column identifying the section each
+    observation belongs to; the graph is then built per section and combined, so no edge
+    crosses between them.
     """
     import scipy.sparse as sp
     adata = adata.copy() if copy else adata
-    coords, exact = _coords(adata, spatial_key)
-    n = coords.shape[0]
-    rows, cols, _ = _knn_edges(coords, n_neighs)
-    dist = _edge_lengths(exact, rows, cols)
-    shape, indptr = (n, n), np.arange(n + 1, dtype=np.int64) * n_neighs
-    adj = sp.csr_matrix((np.ones(dist.size, np.float32), cols, indptr), shape=shape)
-    dst = sp.csr_matrix((dist, cols, indptr), shape=shape)
+
+    def build(coords, exact):
+        n = coords.shape[0]
+        rows, cols, _ = _knn_edges(coords, n_neighs)
+        dist = _edge_lengths(exact, rows, cols)
+        indptr = np.arange(n + 1, dtype=np.int64) * n_neighs
+        return (sp.csr_matrix((np.ones(dist.size, np.float32), cols, indptr), shape=(n, n)),
+                sp.csr_matrix((dist, cols, indptr), shape=(n, n)))
+
+    adj, dst = _assemble(adata, spatial_key, library_key, build, transform, set_diag, percentile)
     return _write_graph(adata, adj, dst,
                         {"coord_type": "generic", "n_neighbors": n_neighs},
-                        key_added, transform, set_diag, percentile, copy)
+                        key_added, transform, copy)
 
 
 def spatial_neighbors_radius(adata, *, radius, spatial_key: str = "spatial",
+                             library_key: str | None = None,
                              percentile: float | None = None, transform: str | None = None,
                              set_diag: bool = False, key_added: str = "spatial",
                              copy: bool = False):
@@ -153,25 +211,30 @@ def spatial_neighbors_radius(adata, *, radius, spatial_key: str = "spatial",
 
     ``radius`` is a maximum distance, or a ``(min, max)`` interval. Every pair within it is
     connected, so the graph is symmetric and degrees vary with local density.
+    ``library_key`` builds one graph per section (see ``spatial_neighbors_knn``).
     """
     import scipy.sparse as sp
     from .neighbors import _radius_grid
     adata = adata.copy() if copy else adata
-    coords, exact = _coords(adata, spatial_key)
-    n = coords.shape[0]
     lo, hi = (0.0, float(radius)) if np.isscalar(radius) else (float(min(radius)),
                                                                float(max(radius)))
-    indptr, cols, _ = _radius_grid(coords, hi, lo)
-    dist = _edge_lengths(exact, np.repeat(np.arange(n), np.diff(indptr)), cols)
-    adj = sp.csr_matrix((np.ones(dist.size, np.float32), cols, indptr), shape=(n, n))
-    dst = sp.csr_matrix((dist, cols, indptr), shape=(n, n))
+
+    def build(coords, exact):
+        n = coords.shape[0]
+        indptr, cols, _ = _radius_grid(coords, hi, lo)
+        dist = _edge_lengths(exact, np.repeat(np.arange(n), np.diff(indptr)), cols)
+        return (sp.csr_matrix((np.ones(dist.size, np.float32), cols, indptr), shape=(n, n)),
+                sp.csr_matrix((dist, cols, indptr), shape=(n, n)))
+
+    adj, dst = _assemble(adata, spatial_key, library_key, build, transform, set_diag, percentile)
     return _write_graph(adata, adj, dst,
                         {"coord_type": "generic", "radius": radius},
-                        key_added, transform, set_diag, percentile, copy)
+                        key_added, transform, copy)
 
 
 def spatial_neighbors_grid(adata, *, n_neighs: int = 6, n_rings: int = 1,
                            delaunay: bool = False, spatial_key: str = "spatial",
+                           library_key: str | None = None,
                            transform: str | None = None, set_diag: bool = False,
                            key_added: str = "spatial", copy: bool = False):
     """Lattice spatial graph (``sq.gr.spatial_neighbors_grid``) — the Visium/Stereo-seq mode.
@@ -180,44 +243,50 @@ def spatial_neighbors_grid(adata, *, n_neighs: int = 6, n_rings: int = 1,
     ``1.3 × median``), which is what leaves boundary spots with fewer than ``n_neighs``
     neighbours. With ``n_rings > 1`` the graph is expanded by repeated multiplication and the
     **distances hold the ring index, not a length** — squidpy's convention, kept here.
+
+    ``library_key`` builds one graph per section (see ``spatial_neighbors_knn``). The median
+    correction is then taken from each section's own spacing, which is the point: sections
+    imaged at different resolutions have different median edge lengths.
     """
     import scipy.sparse as sp
     adata = adata.copy() if copy else adata
-    coords, _exact = _coords(adata, spatial_key)
-    n = coords.shape[0]
 
-    if delaunay:
-        adj = _delaunay_adjacency(coords)
-    else:
-        rows, cols, dist = _knn_edges(coords, n_neighs)
-        keep = dist < np.median(dist) * 1.3                    # squidpy's lattice correction
-        adj = sp.csr_matrix((np.ones(int(keep.sum()), np.float32),
-                             (rows[keep], cols[keep])), shape=(n, n))
+    def build(coords, _exact):
+        n = coords.shape[0]
+        if delaunay:
+            adj = _delaunay_adjacency(coords)
+        else:
+            rows, cols, dist = _knn_edges(coords, n_neighs)
+            keep = dist < np.median(dist) * 1.3                # squidpy's lattice correction
+            adj = sp.csr_matrix((np.ones(int(keep.sum()), np.float32),
+                                 (rows[keep], cols[keep])), shape=(n, n))
 
-    if n_rings > 1:
-        base = _set_diag(adj)
-        res = walk = base
-        for i in range(n_rings - 1):
-            walk = (walk @ base).tocsr()
-            # drop entries already reached in an earlier ring; masking beats `walk[res.nonzero()]
-            # = 0` through LIL by ~20x (0.045s vs 0.90s at 500k)
-            walk = (walk - walk.multiply(res.astype(bool))).tocsr()
-            walk.eliminate_zeros()
-            walk.data[:] = i + 2.0
-            res = (res + walk).tocsr()
-        adj = _set_diag(res) if set_diag else _drop_diag(res)
-        adj.eliminate_zeros()
-        dst = adj.copy()
-        adj = adj.copy(); adj.data[:] = 1.0
-    else:
-        if set_diag:
-            adj = _set_diag(adj)
-        dst = adj.copy()
+        if n_rings > 1:
+            base = _set_diag(adj)
+            res = walk = base
+            for i in range(n_rings - 1):
+                walk = (walk @ base).tocsr()
+                # drop entries already reached in an earlier ring; masking beats
+                # `walk[res.nonzero()] = 0` through LIL by ~20x (0.045s vs 0.90s at 500k)
+                walk = (walk - walk.multiply(res.astype(bool))).tocsr()
+                walk.eliminate_zeros()
+                walk.data[:] = i + 2.0
+                res = (res + walk).tocsr()
+            adj = _set_diag(res) if set_diag else _drop_diag(res)
+            adj.eliminate_zeros()
+            dst = adj.copy()
+            adj = adj.copy(); adj.data[:] = 1.0
+        else:
+            if set_diag:
+                adj = _set_diag(adj)
+            dst = adj.copy()
+        return adj, dst
 
+    adj, dst = _assemble(adata, spatial_key, library_key, build, transform, set_diag, None)
     return _write_graph(adata, adj, dst,
                         {"coord_type": "grid", "n_neighbors": n_neighs, "n_rings": n_rings,
                          "delaunay": delaunay},
-                        key_added, transform, set_diag, None, copy)
+                        key_added, transform, copy)
 
 
 def _delaunay_adjacency(coords):
@@ -231,6 +300,7 @@ def _delaunay_adjacency(coords):
 
 
 def spatial_neighbors_delaunay(adata, *, radius=None, spatial_key: str = "spatial",
+                               library_key: str | None = None,
                                percentile: float | None = None, transform: str | None = None,
                                set_diag: bool = False, key_added: str = "spatial",
                                copy: bool = False):
@@ -238,6 +308,7 @@ def spatial_neighbors_delaunay(adata, *, radius=None, spatial_key: str = "spatia
 
     ``radius`` prunes the triangulation afterwards — a scalar ``r`` means ``(0, r)``, a tuple
     is an interval, ``None`` keeps every edge. The triangulation itself is unchanged by it.
+    ``library_key`` triangulates each section separately (see ``spatial_neighbors_knn``).
 
     Unlike the other three modes the triangulation itself is **not** GPU-accelerated here: it
     runs on Qhull (``scipy.spatial.Delaunay``), the same library squidpy uses, and only the
@@ -255,30 +326,33 @@ def spatial_neighbors_delaunay(adata, *, radius=None, spatial_key: str = "spatia
     """
     import scipy.sparse as sp
     adata = adata.copy() if copy else adata
-    coords, exact = _coords(adata, spatial_key)
-    n = coords.shape[0]
-    adj = _delaunay_adjacency(exact).tocoo()
-    dist = _edge_lengths(exact, adj.row, adj.col)
     stored_radius = radius
     if radius is not None:
         lo, hi = ((0.0, float(radius)) if np.isscalar(radius)
                   else (float(min(radius)), float(max(radius))))
         stored_radius = (lo, hi)              # squidpy normalises a scalar to an interval
-        keep = (dist >= lo) & (dist <= hi)
-        adj_row, adj_col, dist = adj.row[keep], adj.col[keep], dist[keep]
-    else:
-        adj_row, adj_col = adj.row, adj.col
-    shape = (n, n)
-    A = sp.csr_matrix((np.ones(dist.size, np.float32), (adj_row, adj_col)), shape=shape)
-    D = sp.csr_matrix((dist, (adj_row, adj_col)), shape=shape)
-    return _write_graph(adata, A, D,
+
+    def build(_coords32, exact):
+        n = exact.shape[0]
+        adj = _delaunay_adjacency(exact).tocoo()
+        dist = _edge_lengths(exact, adj.row, adj.col)
+        rows, cols = adj.row, adj.col
+        if radius is not None:
+            keep = (dist >= lo) & (dist <= hi)
+            rows, cols, dist = rows[keep], cols[keep], dist[keep]
+        return (sp.csr_matrix((np.ones(dist.size, np.float32), (rows, cols)), shape=(n, n)),
+                sp.csr_matrix((dist, (rows, cols)), shape=(n, n)))
+
+    adj, dst = _assemble(adata, spatial_key, library_key, build, transform, set_diag, percentile)
+    return _write_graph(adata, adj, dst,
                         {"coord_type": "generic", "radius": stored_radius},
-                        key_added, transform, set_diag, percentile, copy)
+                        key_added, transform, copy)
 
 
 def spatial_neighbors(adata, n_neighs: int = 6, coord_type: str | None = None,
                       n_rings: int = 1, delaunay: bool = False, radius=None,
-                      spatial_key: str = "spatial", transform: str | None = None,
+                      spatial_key: str = "spatial", library_key: str | None = None,
+                      transform: str | None = None,
                       set_diag: bool = False, percentile: float | None = None,
                       key_added: str = "spatial", copy: bool = False):
     """Deprecated (``sq.gr.spatial_neighbors``) — dispatches to the mode-specific builders.
@@ -298,8 +372,8 @@ def spatial_neighbors(adata, n_neighs: int = 6, coord_type: str | None = None,
         "spatial_neighbors_grid.", FutureWarning, stacklevel=2)
     if coord_type is None:
         coord_type = "grid" if "spatial" in adata.uns else "generic"
-    common = dict(spatial_key=spatial_key, transform=transform, set_diag=set_diag,
-                  key_added=key_added, copy=copy)
+    common = dict(spatial_key=spatial_key, library_key=library_key, transform=transform,
+                  set_diag=set_diag, key_added=key_added, copy=copy)
     if coord_type == "grid":
         return spatial_neighbors_grid(adata, n_neighs=n_neighs, n_rings=n_rings,
                                       delaunay=delaunay, **common)
