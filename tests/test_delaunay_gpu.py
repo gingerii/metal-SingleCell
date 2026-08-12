@@ -14,7 +14,9 @@ from metalsinglecell._delaunay.predicates import MAX_COORD, condition_points
 
 pytest.importorskip("mlx.core")
 
-from metalsinglecell._delaunay.gpu import flip_candidates      # noqa: E402
+from metalsinglecell._delaunay.gpu import (                    # noqa: E402
+    flip_candidates, flip_round as gpu_flip_round,
+)
 
 
 def run_to_completion(raw, compare_every_round=True):
@@ -48,8 +50,15 @@ def run_to_completion(raw, compare_every_round=True):
                 gpu = np.sort(flip_candidates(pts, mesh.tri, mesh.nbr, inf))
                 assert np.array_equal(cpu, gpu), (
                     f"round {compared}: {len(np.setxor1d(cpu, gpu))} half-edges differ")
+                # and the applied mesh, not just the selection
+                gt, gn, gk, _ = gpu_flip_round(pts, mesh.tri, mesh.nbr, inf)
                 compared += 1
-            if R._flip_round(pts, mesh, loc, active, inf) == 0:
+            k = R._flip_round(pts, mesh, loc, active, inf)
+            if compare_every_round:
+                assert np.array_equal(gt, mesh.tri), f"round {compared}: vertices differ"
+                assert np.array_equal(gn, mesh.nbr), f"round {compared}: adjacency differs"
+                assert gk == k, f"round {compared}: {gk} flips vs {k}"
+            if k == 0:
                 break
     return compared
 
@@ -81,6 +90,50 @@ def test_end_to_end_backends_agree_exactly(seed):
     pts = rng.uniform(0, 3000, (800, 2))
     assert np.array_equal(R.triangulate(pts, backend="cpu"),
                           R.triangulate(pts, backend="gpu"))
+
+
+def test_end_to_end_backends_agree_on_a_tie_heavy_lattice():
+    """Where the answer is not unique, "both valid" is not good enough.
+
+    A square lattice admits many Delaunay triangulations, so the backends can drift apart
+    while both stay correct — and they did, until the GPU path re-homed points the same
+    way the CPU path does rather than by walking. Equality here is what pins that down.
+    """
+    g = np.arange(40)
+    x, y = np.meshgrid(g * 8.0, g * 8.0)               # Visium HD 8um bin spacing
+    pts = np.column_stack([x.ravel(), y.ravel()])
+    assert np.array_equal(R.triangulate(pts, backend="cpu"),
+                          R.triangulate(pts, backend="gpu"))
+
+
+def test_end_to_end_backends_agree_on_clustered_geometry():
+    rng = np.random.default_rng(7)
+    c = rng.uniform(0, 6000, (12, 2))
+    pts = np.vstack([q + rng.normal(0, 90, (120, 2)) for q in c])
+    assert np.array_equal(R.triangulate(pts, backend="cpu"),
+                          R.triangulate(pts, backend="gpu"))
+
+
+def test_flip_apply_reports_the_pairs_it_flipped():
+    """The caller re-homes points from the flipped pairs, so the pairing has to be right."""
+    rng = np.random.default_rng(8)
+    ipts, _ = condition_points(rng.uniform(0, 2000, (300, 2)))
+    inf = len(ipts)
+    mesh, seed = R._seed(ipts, inf)
+    loc = np.zeros(len(ipts), dtype=np.int64)
+    active = np.ones(len(ipts), dtype=bool)
+    active[list(seed)] = False
+    R._walk(ipts, mesh, np.where(active)[0], loc, inf)
+    st, sp, _ = R._choose_one_per_triangle(ipts, mesh, np.where(active)[0], loc, inf)
+    R._split(ipts, mesh, st, sp, loc, active, inf)
+
+    _, _, k, (ft, fu) = gpu_flip_round(ipts, mesh.tri, mesh.nbr, inf)
+    assert k > 0, "this configuration should need flips"
+    assert len(ft) == len(fu) == k
+    assert len(np.intersect1d(ft, fu)) == 0, "a triangle is in two flips"
+    assert len(np.unique(np.concatenate([ft, fu]))) == 2 * k, "duplicate triangles"
+    # each reported pair really is adjacent
+    assert (mesh.nbr[ft].reshape(len(ft), 3) // 3 == fu[:, None]).any(axis=1).all()
 
 
 def test_gpu_backend_produces_a_valid_triangulation_on_visium_like_geometry():

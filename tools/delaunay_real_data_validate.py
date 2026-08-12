@@ -39,17 +39,40 @@ warnings.simplefilter("ignore")
 GD = ("/Users/f006z2w/Library/CloudStorage/"
       "GoogleDrive-ian.gingerich.gr@dartmouth.edu/My Drive")
 
+HD = (f"{GD}/Atlas_svd_project/manual_work/data/adata_objects/"
+      "human_ovarian_cancer_visiumHD.h5ad")
+
+#: ``(label, assay, path, source)``. ``source`` is ``"spatial"`` for ``obsm/spatial`` or a
+#: pair of ``obs`` columns holding an integer lattice.
 DATASETS = [
-    ("Visium 2.7k", "Visium", f"{GD}/Quaternion_project/data/external/V1_Adult_Mouse_Brain.h5ad"),
-    ("Stereo-seq 19k", "Stereo-seq", f"{GD}/Quaternion_project/data/external/stereoseq_olf.h5ad"),
-    ("Xenium brain 63k", "Xenium", f"{GD}/Atlas_svd_project/data/processed/xenium_brain_5k.h5ad"),
-    ("MERFISH 81k", "MERFISH", f"{GD}/Atlas_svd_project/data/processed/merfish_sagital_brain.h5ad"),
+    ("Visium 2.7k", "Visium", f"{GD}/Quaternion_project/data/external/V1_Adult_Mouse_Brain.h5ad", "spatial"),
+    ("Stereo-seq 19k", "Stereo-seq", f"{GD}/Quaternion_project/data/external/stereoseq_olf.h5ad", "spatial"),
+    ("Xenium brain 63k", "Xenium", f"{GD}/Atlas_svd_project/data/processed/xenium_brain_5k.h5ad", "spatial"),
+    ("MERFISH 81k", "MERFISH", f"{GD}/Atlas_svd_project/data/processed/merfish_sagital_brain.h5ad", "spatial"),
     ("Xenium breast 253k", "Xenium",
      f"{GD}/Quaternion_project/data/external/xenium_breast_matched/"
-     "xenium_breast_s1bot_processed.h5ad"),
+     "xenium_breast_s1bot_processed.h5ad", "spatial"),
     ("Xenium cohort 2M", "Xenium",
-     "/Users/f006z2w/Desktop/Xenium_Claude_test/data/processed/xenium/integrated_data.h5ad"),
+     "/Users/f006z2w/Desktop/Xenium_Claude_test/data/processed/xenium/integrated_data.h5ad",
+     "spatial"),
+    # Visium HD twice over, because its two coordinate systems are different problems.
+    # The registered micron coordinates are a *rotated* square lattice, so exact
+    # cocircularity is destroyed and what remains is a field of near-ties — the hardest
+    # case for a floating-point predicate and a non-event for an exact one. The bin
+    # indices are the lattice itself: exactly cocircular everywhere, tissue-masked, and
+    # the case where Qhull parity is impossible in principle.
+    ("Visium HD registered", "Visium HD", HD, "spatial"),
+    ("Visium HD bin lattice", "Visium HD", HD, ("array_row", "array_col")),
 ]
+
+
+def load_coords(path, source):
+    with h5py.File(path, "r") as f:
+        if source == "spatial":
+            return np.asarray(f["obsm/spatial"][:], dtype=np.float64)[:, :2]
+        a, b = source
+        return np.column_stack([np.asarray(f[f"obs/{a}"][:], dtype=np.float64),
+                                np.asarray(f[f"obs/{b}"][:], dtype=np.float64)])
 
 
 def area_sum(pts, tri):
@@ -119,10 +142,9 @@ def main():
     print("-" * 132)
 
     failures = missing = 0
-    for name, assay, path in DATASETS:
+    for name, assay, path, source in DATASETS:
         try:
-            with h5py.File(path, "r") as f:
-                sp = np.asarray(f["obsm/spatial"][:], dtype=np.float64)[:, :2]
+            sp = load_coords(path, source)
         except Exception as exc:
             print(f"{name:<20} {assay:<11} unavailable ({type(exc).__name__})")
             missing += 1

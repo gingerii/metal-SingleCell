@@ -542,12 +542,22 @@ def _flip_round(pts, mesh, loc, active, inf, *, backend="cpu"):
     conflict resolution as Metal kernels; the selection is identical either way, so the
     resulting mesh is bit-for-bit the same.
     """
-    m = mesh.n_tri
     if backend == "gpu":
-        from .gpu import flip_candidates
-        half = flip_candidates(pts, mesh.tri, mesh.nbr, inf)
-    else:
-        half = select_flips(pts, mesh, inf)
+        from .gpu import flip_round as gpu_flip_round
+        tri_new, nbr_new, k, (ft, fu) = gpu_flip_round(pts, mesh.tri, mesh.nbr, inf)
+        if k == 0:
+            return 0
+        mesh.tri, mesh.nbr = tri_new, nbr_new
+        # exactly the CPU path's re-homing, not merely an equivalent one. Falling back to
+        # a bare walk here instead diverges on tie-heavy input: a point sitting on the
+        # boundary between two triangles is legitimately in either, the walk and the
+        # candidate test disagree about which, and the two backends then insert in
+        # different orders and return different — both valid — triangulations.
+        _rehome(pts, mesh, (ft, fu), loc, active, inf)
+        return k
+
+    m = mesh.n_tri
+    half = select_flips(pts, mesh, inf)
     if len(half) == 0:
         return 0
     t, slot = half // 3, half % 3
