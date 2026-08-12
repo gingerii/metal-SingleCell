@@ -90,8 +90,12 @@ def ligrec(X, labels, lr_pairs, var_names, n_perms: int = 100,
     cats = np.unique(labels)
     K = len(cats)
     name_to_idx = {g: i for i, g in enumerate(np.asarray(var_names).astype(str))}
-    pairs = [(name_to_idx[l], name_to_idx[r]) for l, r in lr_pairs
-             if l in name_to_idx and r in name_to_idx]
+    # Keep the surviving pair alongside its indices. Labelling the rows positionally instead
+    # (lr_pairs[0..n_kept]) silently mislabels every row after the first dropped pair.
+    kept = [(l, r) for l, r in lr_pairs if l in name_to_idx and r in name_to_idx]
+    pairs = [(name_to_idx[l], name_to_idx[r]) for l, r in kept]
+    if not pairs:
+        raise ValueError("none of the interaction pairs are present in var_names")
     lig = np.array([p[0] for p in pairs]); rec = np.array([p[1] for p in pairs])
 
     def cluster_means(code):
@@ -113,8 +117,7 @@ def ligrec(X, labels, lr_pairs, var_names, n_perms: int = 100,
         count += score(cluster_means(rng.permutation(code))) >= obs
     pval = (count + 1.0) / (n_perms + 1.0)
 
-    return {"means": obs, "pvalues": pval, "categories": cats,
-            "lr_pairs": [(lr_pairs[i]) for i in range(len(pairs))]}
+    return {"means": obs, "pvalues": pval, "categories": cats, "lr_pairs": kept}
 
 
 # Fused co-occurrence histogram: one thread per ordered pair (i,j). Each pair finds the
@@ -179,6 +182,22 @@ def _cooccur_hist(X, sq, code, thr2, K, n, L, tile):
     return total.reshape(K, K, L)
 
 
+def _cooccur_thresholds(spatial):
+    """squidpy's ``_find_min_max`` heuristic for the distance grid.
+
+    Deliberately not the true min/max pairwise distance: squidpy anchors on the two points
+    with the smallest coordinate sums, and halves the span to the largest. Using true extremes
+    instead puts the grid ~2x wider and starts it ~2000x lower on real data, so the
+    co-occurrence curves are sampled at entirely different radii.
+    """
+    coord_sum = spatial.sum(axis=1)
+    lo_a, lo_b = np.argpartition(coord_sum, 2)[:2]
+    hi = int(np.argmax(coord_sum))
+    thres_max = float(np.linalg.norm(spatial[lo_a] - spatial[hi])) / 2.0
+    thres_min = float(np.linalg.norm(spatial[lo_a] - spatial[lo_b]))
+    return thres_min, thres_max
+
+
 def co_occurrence(coords, labels, n_intervals: int = 50, interval=None,
                   max_dist=None) -> dict:
     """Cumulative cluster co-occurrence ratio (squidpy ``gr.co_occurrence``).
@@ -190,9 +209,12 @@ def co_occurrence(coords, labels, n_intervals: int = 50, interval=None,
     rows so the full n×n distance matrix is never materialized (scales to large sections).
 
     ``interval`` may be an explicit ascending array of distance thresholds (as
-    squidpy stores in ``uns[...]['interval']``); otherwise ``n_intervals`` evenly
-    spaced thresholds are built (squidpy-style, from the min nonzero to max distance).
-    Returns ``occ`` of shape (K, K, len(thresholds)-1) and the thresholds.
+    squidpy stores in ``uns[...]['interval']``); otherwise ``n_intervals`` evenly spaced
+    thresholds are built from squidpy's coordinate-sum heuristic. Returns ``occ`` of shape
+    (K, K, len(thresholds) - 1) and the thresholds themselves.
+
+    ``n_intervals`` counts *thresholds*, not bins, which is squidpy's convention and the
+    reason its ``occ`` has one fewer entry along the last axis than you might expect.
     """
     import mlx.core as mx
 
@@ -206,19 +228,14 @@ def co_occurrence(coords, labels, n_intervals: int = 50, interval=None,
     tile = max(1, 60_000_000 // n)                                  # ~60M-elem distance tiles
 
     if interval is not None:
-        thr = np.asarray(interval, dtype=np.float64)
+        thr = np.sort(np.asarray(interval, dtype=np.float64))
     else:
-        # global min-nonzero / max distance via tiled reduction (no full n×n materialization)
-        dmin, dmax = np.inf, 0.0
-        for r0 in range(0, n, tile):
-            m = min(tile, n - r0)
-            D2t = mx.maximum(sq[r0:r0 + m, None] + sq[None, :] - 2.0 * (X[r0:r0 + m] @ X.T), 0.0)
-            D2t = np.asarray(D2t)
-            pos = D2t[D2t > 0]
-            if pos.size:
-                dmin = min(dmin, float(pos.min())); dmax = max(dmax, float(D2t.max()))
-        dmin, dmax = np.sqrt(dmin), (max_dist if max_dist is not None else np.sqrt(dmax))
-        thr = np.linspace(dmin, dmax, n_intervals + 1)
+        lo, hi = _cooccur_thresholds(np.asarray(coords, dtype=np.float64))
+        if max_dist is not None:
+            hi = float(max_dist)
+        thr = np.linspace(lo, hi, num=n_intervals)                  # THRESHOLDS, not bins
+    if len(thr) <= 1:
+        raise ValueError(f"expected interval to be of length >= 2, found {len(thr)}")
     thr2 = thr[1:] ** 2                                             # squidpy: skip first
     L = len(thr2)
 
