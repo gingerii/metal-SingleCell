@@ -60,6 +60,10 @@ import metalsinglecell as msc
    :toctree: generated
    :nosignatures:
 
+   spatial_neighbors_knn
+   spatial_neighbors_radius
+   spatial_neighbors_delaunay
+   spatial_neighbors_grid
    spatial_neighbors
    spatial_autocorr
    co_occurrence

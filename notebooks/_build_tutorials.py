@@ -129,8 +129,18 @@ squidpy = [
  "import numpy as np, scanpy as sc, squidpy as sq\n"
  "import metalsinglecell as msc"),
 ("code", "adata = sq.datasets.imc()\nadata"),
-("md", "## Spatial neighbors graph\nBuilds `obsp['spatial_connectivities']` from `obsm['spatial']`."),
-("code", "msc.gr.spatial_neighbors(adata, n_neighs=6)\n"
+("md", "## Spatial neighbors graph\n"
+ "Builds `obsp['spatial_connectivities']` from `obsm['spatial']`. Pick the builder that "
+ "matches the assay: `spatial_neighbors_knn` for dissociated or irregular coordinates like "
+ "this IMC section, `spatial_neighbors_grid` for a lattice (Visium, Stereo-seq), "
+ "`spatial_neighbors_radius` for a fixed distance cutoff, and `spatial_neighbors_delaunay` "
+ "for the triangulation. squidpy split these out of the single `spatial_neighbors` in 1.7 and "
+ "removes the old entry point in 1.9; we follow, and ours still accepts it with a "
+ "`FutureWarning`.\n\n"
+ "On an object holding several sections, pass `library_key=` — the name of a categorical "
+ "`obs` column identifying the section — so each is built separately and no edge crosses "
+ "between slides."),
+("code", "msc.gr.spatial_neighbors_knn(adata, n_neighs=6)\n"
  "adata.obsp['spatial_connectivities'].shape"),
 ("md", "## Moran's I — global spatial autocorrelation\nWhich channels vary smoothly across the tissue?"),
 ("code", "msc.gr.spatial_autocorr(adata, mode='moran', genes=adata.var_names.tolist(), n_perms=100)\n"
@@ -152,7 +162,7 @@ squidpy = [
 ("md", "## Visualize the tissue\nTop spatially-autocorrelated channel and the cell-type map."),
 ("code", "top_gene = adata.uns['moranI'].index[0]\n"
  "sq.pl.spatial_scatter(adata, color=[top_gene, 'cell type'], shape=None, size=8)"),
-("md", "All spatial graph statistics (`spatial_neighbors`, `spatial_autocorr` for Moran/Geary, "
+("md", "All spatial graph statistics (`spatial_neighbors_knn`, `spatial_autocorr` for Moran/Geary, "
  "`co_occurrence`) ran on the Apple GPU and match squidpy's CPU results exactly."),
 ]
 
@@ -209,8 +219,11 @@ brain = [
  "on a laptop GPU, with the Metal parallel Leiden doing the clustering."),
 ]
 
-for name, cells in [("01_basic_workflow", basic), ("02_pearson_residuals", pearson),
-                    ("04_squidpy", squidpy), ("brain_1M", brain)]:
-    p = OUT / f"{name}.ipynb"
-    nbf.write(nb(cells), p)
-    print("wrote", p)
+NOTEBOOKS = [("01_basic_workflow", basic), ("02_pearson_residuals", pearson),
+             ("04_squidpy", squidpy), ("brain_1M", brain)]
+
+if __name__ == "__main__":          # writing on import would discard the saved outputs
+    for name, cells in NOTEBOOKS:
+        p = OUT / f"{name}.ipynb"
+        nbf.write(nb(cells), p)
+        print("wrote", p)

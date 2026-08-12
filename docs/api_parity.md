@@ -25,8 +25,60 @@ correctness hazards.
 | ours | status |
 |---|---|
 | `pp.pca(use_highly_variable=)` | deprecated in scanpy 1.10 → use `mask_var`. Still accepted, emits `FutureWarning`. Passing both raises. |
+| `gr.spatial_neighbors()` | deprecated in squidpy 1.7, **removed in 1.9** → use the four mode-specific builders below. Still accepted, emits `FutureWarning`, and now dispatches for real. |
 
-Nothing else in the public API uses an argument scanpy has deprecated or removed.
+Nothing else in the public API mirrors a function or argument the reference has retired. The
+audit checks both: a deprecated *parameter*, and a deprecated *function* that keeps its name
+and signature (which is how `spatial_neighbors` went unnoticed until a user reported it).
+
+### Spatial neighbour graphs
+
+`gr.spatial_neighbors_knn`, `_radius`, `_delaunay` and `_grid` mirror squidpy's replacements.
+Validated against squidpy 1.8.2 on real Visium across 15 option combinations: 11 match
+element-wise, and the other 4 differ **only where two candidates are exactly equidistant**
+(0 differences from any other cause). On a lattice those ties are unavoidable — every Visium
+spot has six equidistant neighbours — and squidpy's pick falls out of its tree traversal
+rather than a rule. Ours is deterministic: lowest index wins.
+
+Speed against squidpy on a jittered hex lattice (M3 Max, warm-up + best-of-N):
+
+| n | knn(6) | radius(150) | grid(rings=2) | delaunay |
+|---|---|---|---|---|
+| 10k | 1.7× | 9.8× | 1.3× | 0.9× |
+| 50k | 1.9× | 13.2× | 1.4× | 1.1× |
+| 200k | 2.1× | 13.6× | 1.4× | 1.0× |
+| 500k | 2.0× | 13.9× | 1.3× | 1.0× |
+
+**Delaunay is not accelerated yet.** The triangulation runs on Qhull — the same library
+squidpy uses — so it lands at parity; only the edge lengths and radius pruning around it are
+ours. Qhull is 79-82% of that builder's runtime (8.6 s of 10.9 s at 2M points), so it is the
+thing worth attacking next.
+
+A GPU formulation exists and is well studied: GPU-DT and gDel2D build a digital Voronoi
+diagram by jump flooding, dualise it, and repair the result by parallel flipping, reporting
+~10x over Triangle and ~6x over CGAL. Two things keep it out of this release. Jump flooding
+alone does **not** give a valid triangulation — a digital Voronoi region can be disconnected,
+so its dual can contain duplicated and intersecting triangles — and the flipping repair that
+fixes that is the bulk of the algorithm. It also needs adaptive-exact orientation/incircle
+predicates, which bite harder here than in graphics: a Visium slide is a regular lattice, so
+cocircular points are the common case, not a corner case. Getting that subtly wrong would
+produce a plausible-looking but invalid graph, which is the failure mode this project has
+already shipped twice.
+
+All four take `library_key=`: the name of a categorical `obs` column identifying the section
+each observation belongs to. The graph is then built per section and combined block-diagonally,
+so no edge crosses between slides -- sections of a multi-slide object share a coordinate frame
+only by accident. squidpy runs the whole tail (percentile prune, `set_diag`, transform) inside
+that per-library loop and so do we, which matters most for `_grid`: its 1.3x-median cutoff has
+to come from each section's own spacing. On a fixture pairing a 100-spaced and a 250-spaced
+section, a pooled median puts the threshold between the two and the fine section keeps every
+k-NN edge (mean degree 6.00 against a correct 3.80).
+
+`spatial_neighbors_from_builder` is **not implemented**: it takes a squidpy `GraphBuilder`
+instance, and squidpy is an optional (`oracle`) dependency here, not a runtime one. The only
+other arguments the four builders lack are `elements_to_coordinate_systems` and `table_key`,
+which address a `SpatialData` object rather than an `AnnData`; `n_jobs` is a CPU-threading knob
+with no meaning on the GPU path.
 
 `pp.pca(mask_var=)` follows scanpy's three-state default exactly, which is easy to get wrong:
 
@@ -45,10 +97,12 @@ choice is deliberate.
 | function | ours | reference | effect |
 |---|---|---|---|
 | `gr.spatial_autocorr(n_perms=)` | `100` | `None` | we compute permutation p-values by default; squidpy computes none. Extra columns, ~100× the work on a default call. |
-| `gr.spatial_neighbors(coord_type=)` | `'generic'` | `None` | squidpy infers `'grid'` for Visium from `uns['spatial']`; we always treat coordinates as generic, giving a different graph on grid platforms. |
-| `gr.spatial_neighbors(n_neighs=)` | `6` | `None` | squidpy's effective default depends on `coord_type`. |
 | `tl.leiden(n_iterations=)` | `2` | `-1` | scanpy iterates to convergence. Measured ARI between the two on the same graph: **0.958** — same cluster count, slightly different labels. |
 | `gr.calculate_niche(random_state=)` | `0` | `42` | labels differ run-to-run only. |
+
+Fixed in 0.1.2: `gr.spatial_neighbors(coord_type=)` was accepted and **ignored** — every call
+returned a generic k-NN graph, so `coord_type='grid'` silently produced the wrong graph on
+Visium. It now dispatches, and infers `'grid'` from `uns['spatial']` as squidpy does.
 
 Fixed in 0.1.1: `pp.calculate_qc_metrics(percent_top=)` defaulted to `None`, silently producing
 none of scanpy's `pct_counts_in_top_*` columns; it is now scanpy's `(50, 100, 200, 500)`. On a
@@ -61,7 +115,7 @@ Where ours is a concrete value and the reference is `None` — `pp.pca(n_comps=5
 
 ## Arguments we do not implement
 
-129 in total. The ones most likely to be reached for:
+121 in total. The ones most likely to be reached for:
 
 | function | missing |
 |---|---|
@@ -72,7 +126,6 @@ Where ours is a concrete value and the reference is `None` — `pp.pca(n_comps=5
 | `pp.scale` | `mask_obs`, `obsm` |
 | `pp.log1p` | `base`, `obsm` |
 | `pp.scrublet` | most of the tuning surface (`batch_key`, `threshold`, `n_prin_comps`, …) |
-| `gr.spatial_neighbors` | `radius`, `delaunay`, `n_rings`, `percentile`, `set_diag`, `library_key` |
 | `gr.spatial_autocorr` | `transformation`, `two_tailed`, `corr_method`, `attr`, `use_raw` |
 | `gr.ligrec` | `complex_policy`, `threshold`, `corr_method`, `use_raw`, `gene_symbols` |
 | `gr.calculate_niche` | most of squidpy 1.8's expanded surface |

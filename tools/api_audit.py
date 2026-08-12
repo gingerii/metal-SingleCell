@@ -1,12 +1,18 @@
 """Audit every public msc function against the current scanpy / squidpy signature.
 
 Reports, per function:
+  RETIRED      the reference FUNCTION itself is deprecated upstream (we mirror a dead API)
   DEPRECATED   a parameter the reference has deprecated or removed (we are stale)
   MISSING      a reference parameter we do not expose at all
   DEFAULT      a parameter we both have, with a different default (silent behaviour drift)
   EXTRA        ours only (fine when intentional, listed so it can be judged)
+
+RETIRED exists because comparing parameter lists cannot catch it: `sq.gr.spatial_neighbors`
+kept its name and signature while being deprecated wholesale in squidpy 1.7 for removal in
+1.9 (github issue #4). A user reported that before this audit did.
 """
 import inspect
+import re
 import warnings
 
 warnings.simplefilter("ignore")
@@ -53,7 +59,32 @@ def show(v):
     return r if len(r) <= 22 else r[:19] + "..."
 
 
-findings = {"DEPRECATED": [], "MISSING": [], "DEFAULT": [], "EXTRA": [], "NO-REF": []}
+_DEPRECATED_MARKER = re.compile(r"\.\.\s*deprecated::\s*([\d.]+)")
+
+
+def retired(ref_fn):
+    """Is the reference FUNCTION deprecated (not merely one of its parameters)?
+
+    Both cases put a `.. deprecated::` directive in the same docstring, so position is what
+    separates them: a function-level notice sits in the summary, above the Parameters block,
+    while a parameter-level one (scanpy marking `method='rapids'`, say) sits inside it.
+    """
+    doc = inspect.getdoc(ref_fn) or ""
+    m = _DEPRECATED_MARKER.search(doc)
+    if not m:
+        return None
+    params_at = re.search(r"^\s*Parameters\s*$", doc, re.M)
+    if params_at and m.start() > params_at.start():
+        return None                                   # inside Parameters -> a parameter, not the fn
+    body = doc[m.start():m.start() + 700]
+    removal = re.search(r"removed in \S*\s*v?([\d.]+)", body)
+    repl = sorted({a or b for a, b in re.findall(r":func:`[~.\w]*?(\w+)`|``(\w+)``", body)}
+                  - {ref_fn.__name__})
+    return m.group(1), (removal.group(1).rstrip(".") if removal else "?"), repl
+
+
+findings = {"RETIRED": [], "DEPRECATED": [], "MISSING": [], "DEFAULT": [], "EXTRA": [],
+            "NO-REF": []}
 
 for ns, ours_mod, ref_mod in PAIRS:
     names = [n for n in dir(ours_mod) if not n.startswith("_")
@@ -65,6 +96,12 @@ for ns, ours_mod, ref_mod in PAIRS:
         if ref_fn is None:
             findings["NO-REF"].append(f"{ns}.{name}")
             continue
+        gone = retired(ref_fn)
+        if gone:
+            since, removal, repl = gone
+            findings["RETIRED"].append(
+                f"{ns}.{name} — deprecated upstream in {since}, removal {removal}"
+                + (f"; use {', '.join(repl)}" if repl else ""))
         ref = params(ref_fn)
         if ours is None or ref is None:
             continue
@@ -89,7 +126,7 @@ for ns, ours_mod, ref_mod in PAIRS:
                     f"{ns}.{name}({p}=): ours {show(d)} vs scanpy {show(ref[p])}")
 
 print(f"scanpy {sc.__version__}" + (f", squidpy {sq.__version__}" if sq else ", squidpy MISSING"))
-for k in ("DEPRECATED", "DEFAULT", "MISSING", "NO-REF", "EXTRA"):
+for k in ("RETIRED", "DEPRECATED", "DEFAULT", "MISSING", "NO-REF", "EXTRA"):
     v = findings[k]
     print(f"\n=== {k} ({len(v)}) ===")
     for line in v:
