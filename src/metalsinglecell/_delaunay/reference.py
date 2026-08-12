@@ -227,32 +227,95 @@ def check_mesh(mesh, pts, inf, where=""):
                              + "; ".join(problems))
 
 
-def _seed(pts, inf):
-    """Initial mesh: one finite triangle and the three ghosts that close the plane."""
-    n = len(pts)
-    a = 0
-    b = next(i for i in range(1, n) if (pts[i] != pts[a]).any())
-    c = next((i for i in range(b + 1, n)
-              if orient2d(pts, [a], [b], [i])[0] != 0), None)
-    if c is None:
-        raise ValueError("all points are collinear; no triangulation exists")
-    if orient2d(pts, [a], [b], [c])[0] < 0:
-        a, c = c, a
+#: Directions whose extreme points form the seed polygon. More directions means a seed
+#: that already contains almost every point; the cost is one dot product per direction.
+_SEED_DIRECTIONS = 16
 
-    tri = np.array([[a, b, c],          # 0: the finite seed, counter-clockwise
-                    [c, b, inf],        # 1: ghost across edge (b, c)
-                    [a, c, inf],        # 2: ghost across edge (c, a)
-                    [b, a, inf]],       # 3: ghost across edge (a, b)
-                   dtype=np.int64)
-    nbr = np.full((4, 3), -1, dtype=np.int64)
-    m = _Mesh(tri, nbr)
-    m.link(0 * 3 + 0, 1 * 3 + 2)        # seed's (b,c) edge <-> ghost 1
-    m.link(0 * 3 + 1, 2 * 3 + 2)
-    m.link(0 * 3 + 2, 3 * 3 + 2)
-    m.link(1 * 3 + 0, 3 * 3 + 1)        # ghost ring: (b,INF)
-    m.link(1 * 3 + 1, 2 * 3 + 0)        # (INF,c)
-    m.link(2 * 3 + 1, 3 * 3 + 0)        # (INF,a)
-    return m, (a, b, c)
+
+def _seed_polygon(pts, k=_SEED_DIRECTIONS):
+    """Indices of a coarse convex polygon: the extreme point in each of ``k`` directions.
+
+    Every extreme point is on the convex hull, so sorting them by angle puts them in
+    convex position, and any collinear straggler can simply be dropped.
+    """
+    p = pts.astype(np.float64)
+    ang = np.arange(k) * (2 * np.pi / k)
+    ext = np.unique(np.argmax(p @ np.stack([np.cos(ang), np.sin(ang)]), axis=0))
+    if len(ext) < 3:
+        return np.zeros(0, dtype=np.int64)
+
+    centre = p[ext].mean(axis=0)
+    ext = ext[np.argsort(np.arctan2(p[ext, 1] - centre[1], p[ext, 0] - centre[0]))]
+
+    # drop any vertex that is not a strict left turn, repeatedly — two extreme directions
+    # can pick the same hull edge and leave a collinear vertex between them
+    ring = [int(v) for v in ext]
+    changed = True
+    while changed and len(ring) >= 3:
+        changed = False
+        for i in range(len(ring)):
+            a, b, c = ring[i - 1], ring[i], ring[(i + 1) % len(ring)]
+            if orient2d(pts, [a], [b], [c])[0] <= 0:
+                ring.pop(i)
+                changed = True
+                break
+    return np.array(ring, dtype=np.int64) if len(ring) >= 3 else np.zeros(0, dtype=np.int64)
+
+
+def _seed(pts, inf):
+    """Initial mesh: a fan triangulation of a coarse hull, closed by a ring of ghosts.
+
+    Seeding from the first three points is the obvious choice and it is quietly
+    catastrophic. They are adjacent in Hilbert order, so the seed is a sliver, nearly every
+    point starts *outside* the hull in one of three ghosts, and insertion becomes
+    hull-expansion-limited — a ghost can absorb only one point per round. At 20k points
+    that left ~30 occupied triangles at round 25 and took 305 rounds instead of the dozen
+    the batch scheme should need.
+
+    Starting from the largest single triangle fixes the growth phase but not the tail: the
+    points between that triangle and the true hull are still outside, and by round 90 they
+    were 100% of what remained. A coarse hull of extreme points removes both problems at
+    once, for the price of ``k`` dot products.
+    """
+    n = len(pts)
+    poly = _seed_polygon(pts)
+    if len(poly) == 0:                            # degenerate; fall back to any triangle
+        a = 0
+        b = next((i for i in range(n) if (pts[i] != pts[a]).any()), None)
+        c = None if b is None else next(
+            (i for i in range(n) if orient2d(pts, [a], [b], [i])[0] != 0), None)
+        if c is None:
+            raise ValueError("all points are collinear; no triangulation exists")
+        poly = np.array([a, b, c] if orient2d(pts, [a], [b], [c])[0] > 0 else [c, b, a])
+
+    k = len(poly)
+    n_fan = k - 2
+    tri = np.empty((n_fan + k, 3), dtype=np.int64)
+    for i in range(1, k - 1):                     # fan from poly[0]
+        tri[i - 1] = [poly[0], poly[i], poly[i + 1]]
+    for i in range(k):                            # ghost across hull edge (v_i, v_i+1)
+        tri[n_fan + i] = [poly[(i + 1) % k], poly[i], inf]
+
+    mesh = _Mesh(tri, np.full((n_fan + k, 3), -1, dtype=np.int64))
+    ghost = lambda i: n_fan + i                                        # noqa: E731
+    finite_of_edge = {0: 0, k - 1: n_fan - 1}     # hull edges (v0,v1) and (v_k-1,v0)
+    for i in range(1, k - 1):
+        finite_of_edge[i] = i - 1
+
+    for i in range(1, k - 1):
+        t = i - 1
+        mesh.nbr[t, 0] = ghost(i) * 3 + 2                              # edge (v_i, v_i+1)
+        mesh.nbr[t, 1] = (ghost(k - 1) * 3 + 2) if i == k - 2 else (t + 1) * 3 + 2
+        mesh.nbr[t, 2] = (ghost(0) * 3 + 2) if i == 1 else (t - 1) * 3 + 1
+    for i in range(k):
+        g = ghost(i)
+        mesh.nbr[g, 2] = finite_of_edge[i] * 3 + (0 if 1 <= i <= k - 2 else
+                                                  (2 if i == 0 else 1))
+        mesh.nbr[g, 0] = ghost((i - 1) % k) * 3 + 1                    # ring: (v_i, INF)
+        mesh.nbr[g, 1] = ghost((i + 1) % k) * 3 + 0
+    # both sides of every link are written above; nothing patches them up afterwards, so
+    # an error in the index arithmetic shows up in check_mesh rather than being papered over
+    return mesh, tuple(int(v) for v in poly)
 
 
 def _circumcentres(pts, tv, inf):
