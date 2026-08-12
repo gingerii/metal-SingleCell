@@ -28,17 +28,46 @@ except Exception:
 # Parameters that are ours by design, or reference-only knobs we deliberately don't mirror.
 OURS_BY_DESIGN = {"backend", "variant", "commit_prob", "exact_max_n", "approx", "solver",
                   "block_rows", "n_oversamples", "n_iter", "correction", "block_proportion"}
+# Genuinely cosmetic: plotting knobs and parallelism switches with no meaning on the GPU path.
+# `inplace`, `key_added` and `copy` are deliberately NOT here -- they are functional (they change
+# what is written and what comes back), and `copy` in particular hides a live upstream
+# deprecation on filter_cells/filter_genes. Suppressing them undercounted the gap by 17.
 REF_NOISE = {"kwargs", "args", "show", "save", "ax", "return_fig", "palette", "title",
-             "copy", "inplace", "chunked", "chunk_size", "key_added", "return_info",
-             "dtype", "backend", "n_jobs", "show_progress_bar", "seed", "sort",
+             "chunked", "chunk_size", "return_info",
+             "dtype", "backend", "n_jobs", "show_progress_bar", "sort",
              "return_df", "figsize", "dpi"}
 
-# Reference parameters scanpy/squidpy have deprecated — flagging OUR use of them.
+# Reference parameters scanpy/squidpy have deprecated — flagging OUR use of them. An entry may
+# be a bare parameter name (deprecated wherever it appears) or "function.parameter" when the
+# deprecation is specific: `copy` is deprecated on filter_cells/filter_genes only, and reporting
+# it everywhere would bury the real ones.
 KNOWN_DEPRECATED = {"use_highly_variable", "use_rep_neighbors", "n_dcs", "layers",
-                    "layer_norm", "flavor_key", "use_raw_layer"}
+                    "layer_norm", "flavor_key", "use_raw_layer",
+                    "filter_cells.copy", "filter_genes.copy"}
+
+class _Namespace:
+    """A reference namespace assembled from several scanpy modules.
+
+    `normalize_pearson_residuals` lives in `sc.experimental.pp`, not `sc.pp`, so pairing
+    `msc.pp` against `sc.pp` alone left it unaudited -- and it was missing `check_values`,
+    `inplace` and `layer`, and validated nothing.
+    """
+
+    def __init__(self, *mods):
+        self._mods = mods
+
+    def __getattr__(self, name):
+        for m in self._mods:
+            if hasattr(m, name):
+                return getattr(m, name)
+        raise AttributeError(name)
+
+
+_sc_pp = _Namespace(sc.pp, getattr(getattr(sc, "experimental", None), "pp", object()),
+                    getattr(getattr(sc, "external", None), "pp", object()))
 
 PAIRS = [
-    ("pp", msc.pp, sc.pp),
+    ("pp", msc.pp, _sc_pp),
     ("tl", msc.tl, sc.tl),
 ]
 if sq is not None:
@@ -106,10 +135,10 @@ for ns, ours_mod, ref_mod in PAIRS:
         if ours is None or ref is None:
             continue
         for p in ours:
-            if p in KNOWN_DEPRECATED and p not in ref:
-                findings["DEPRECATED"].append(f"{ns}.{name}({p}=) — gone from the reference")
-            elif p in KNOWN_DEPRECATED:
-                findings["DEPRECATED"].append(f"{ns}.{name}({p}=) — deprecated upstream")
+            if not (p in KNOWN_DEPRECATED or f"{name}.{p}" in KNOWN_DEPRECATED):
+                continue
+            why = "gone from the reference" if p not in ref else "deprecated upstream"
+            findings["DEPRECATED"].append(f"{ns}.{name}({p}=) — {why}")
         for p, d in ref.items():
             if p in REF_NOISE or p.startswith("_"):
                 continue

@@ -44,8 +44,8 @@ def _incore_lognorm(a):
 def test_streaming_qc_bit_exact(backed_pbmc):
     from metalsinglecell import pp as msc_pp, validation
     a, make_backed, _ = backed_pbmc
-    incore = a.copy(); msc_pp.calculate_qc_metrics(incore)
-    b = make_backed(); msc_pp.calculate_qc_metrics(b)
+    incore = a.copy(); msc_pp.calculate_qc_metrics(incore, inplace=True)
+    b = make_backed(); msc_pp.calculate_qc_metrics(b, inplace=True)
     for col in ("total_counts", "n_genes_by_counts"):
         r = validation.compare(f"stream_qc:{col}", b.obs[col].to_numpy(),
                                incore.obs[col].to_numpy(), rtol=0, atol=0)
@@ -57,7 +57,7 @@ def test_streaming_normalize_log1p_bit_exact(backed_pbmc):
     from metalsinglecell.backed import open_backed
     a, make_backed, zp = backed_pbmc
     b = make_backed()
-    msc_pp.calculate_qc_metrics(b); msc_pp.normalize_total(b); msc_pp.log1p(b)
+    msc_pp.calculate_qc_metrics(b, inplace=True); msc_pp.normalize_total(b); msc_pp.log1p(b)
     tf = msc_pp._build_transform(b)
     rdr = open_backed(zp, default_block_rows=500)
     stream = sp.vstack([tf.apply(csr).to_scipy() for _, _, csr in rdr.iter_row_blocks()]).tocsr()
@@ -72,7 +72,7 @@ def test_streaming_pca_subspace_matches_incore(backed_pbmc):
     from metalsinglecell.sparse import CSR
     a, make_backed, _ = backed_pbmc
     b = make_backed()
-    msc_pp.calculate_qc_metrics(b); msc_pp.normalize_total(b); msc_pp.log1p(b)
+    msc_pp.calculate_qc_metrics(b, inplace=True); msc_pp.normalize_total(b); msc_pp.log1p(b)
     msc_pp.highly_variable_genes(b, n_top_genes=1000, flavor="seurat")
     msc_pp.scale(b, max_value=10.0)
     msc_pp.pca(b, n_comps=50, mask_var="highly_variable")
@@ -91,7 +91,7 @@ def test_materialize_roundtrip_and_guard(backed_pbmc, tmp_path):
     from metalsinglecell.backed import open_backed
     a, make_backed, _ = backed_pbmc
     b = make_backed()
-    msc_pp.calculate_qc_metrics(b); msc_pp.normalize_total(b); msc_pp.log1p(b)
+    msc_pp.calculate_qc_metrics(b, inplace=True); msc_pp.normalize_total(b); msc_pp.log1p(b)
     ckpt = tmp_path / "ckpt.zarr"
     msc_pp.materialize(b, ckpt)
     stream = sp.vstack([csr.to_scipy() for _, _, csr in open_backed(str(ckpt)).iter_row_blocks()]).tocsr()
@@ -100,6 +100,6 @@ def test_materialize_roundtrip_and_guard(backed_pbmc, tmp_path):
     assert r["passed"] and r["exact_match"], r
     # guard: materialize past the log1p boundary (scale recorded) must raise
     c = make_backed()
-    msc_pp.calculate_qc_metrics(c); msc_pp.normalize_total(c); msc_pp.log1p(c); msc_pp.scale(c)
+    msc_pp.calculate_qc_metrics(c, inplace=True); msc_pp.normalize_total(c); msc_pp.log1p(c); msc_pp.scale(c)
     with pytest.raises(ValueError):
         msc_pp.materialize(c, tmp_path / "nope.zarr")

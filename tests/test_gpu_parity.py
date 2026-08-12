@@ -24,7 +24,7 @@ def test_qc_metrics_counts_exact(pbmc_counts):
     import scanpy as sc
     from metalsinglecell import pp as msc_pp, validation
     a = pbmc_counts.copy(); b = pbmc_counts.copy()
-    msc_pp.calculate_qc_metrics(a)
+    msc_pp.calculate_qc_metrics(a, inplace=True)
     sc.pp.calculate_qc_metrics(b, inplace=True, percent_top=None, log1p=False)
     for col in ("total_counts", "n_genes_by_counts"):
         r = validation.compare(f"qc:{col}", a.obs[col].to_numpy(), b.obs[col].to_numpy(),

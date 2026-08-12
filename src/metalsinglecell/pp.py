@@ -19,6 +19,17 @@ from .sparse import CSR
 _EMPTY = type("_Empty", (), {"__repr__": lambda self: "_empty", "__bool__": lambda self: False})()
 
 
+def _require(module, extra):
+    """Import an optional backend, or say which extra provides it."""
+    import importlib
+    try:
+        return importlib.import_module(module)
+    except ImportError as exc:                          # pragma: no cover - environment-specific
+        raise ImportError(
+            f"{module} is required for this path; install it with "
+            f"`pip install 'metalsinglecell[{extra}]'`.") from exc
+
+
 def _csr(adata, layer=None):
     """Our GPU CSR — for funcs that take a CSR (normalize/log1p/hvg/scale)."""
     import scipy.sparse as sp
@@ -67,18 +78,41 @@ def _reject_backed(adata, fn_name, layer=None):
             "scale / pca) which take the out-of-core path automatically.")
 
 
+def _copy_or_reject(adata, copy, fn_name, layer=None):
+    """Honour ``copy=`` without tripping over a backed ``.X``.
+
+    ``AnnData.copy()`` reaches into the on-disk store and fails with
+    ``AttributeError: '_CSRDataset' object has no attribute 'copy'`` — an unhelpful error for
+    something that cannot work anyway, since duplicating a backed matrix in memory defeats the
+    point of it being backed. Say so instead.
+    """
+    if copy and _backed_reader(adata, layer) is not None:
+        raise NotImplementedError(
+            f"{fn_name}(copy=True) is not supported on a backed (on-disk) adata.X — the store "
+            "cannot be duplicated in memory. Use copy=False (the streaming path writes in "
+            "place), or load first with `adata = adata.to_memory()`.")
+    return adata.copy() if copy else adata
+
+
 # The backed store holds raw counts only (no intermediate write-back this milestone), so
-# streaming normalize_total/log1p/scale record a DEFERRED transform prefix in
-# adata.uns["_stream_transforms"] that the terminal consumers (HVG/PCA) re-apply per block.
+# streaming normalize_total/log1p/scale record a DEFERRED transform prefix that the terminal
+# consumers (HVG/PCA) re-apply per block. It lives in a module-level registry rather than in
+# `uns`: the scale stage carries per-gene arrays of differing shapes, and anndata cannot write
+# that -- parking it in `uns` made the object silently unwritable to h5ad.
+_STREAM_TRANSFORMS: dict[int, list] = {}
+
+
+def _stream_stages(adata):
+    return _STREAM_TRANSFORMS.get(id(adata), [])
+
+
 def _record_transform(adata, *stage):
-    t = list(adata.uns.get("_stream_transforms", []))
-    t.append(tuple(stage))
-    adata.uns["_stream_transforms"] = t
+    _STREAM_TRANSFORMS.setdefault(id(adata), []).append(tuple(stage))
 
 
 def _build_transform(adata):
     from .backed import BlockTransform
-    return BlockTransform(list(adata.uns.get("_stream_transforms", [])))
+    return BlockTransform(list(_stream_stages(adata)))
 
 
 def _build_pca_transform(adata, mask):
@@ -87,7 +121,7 @@ def _build_pca_transform(adata, mask):
     densify. ``mask=None`` keeps the full gene set (no-HVG / full-panel PCA)."""
     from .backed import BlockTransform
     stages, subset_done = [], False
-    for st in adata.uns.get("_stream_transforms", []):
+    for st in _stream_stages(adata):
         if st[0] == "scale":
             mean, std, mx_, zc = st[1]
             if mask is not None:
@@ -116,15 +150,16 @@ def materialize(adata, path, block_rows: int | None = None):
     belong to the deferred consumers). Raises otherwise.
     """
     import anndata
-    import zarr
     from anndata.io import sparse_dataset
+
+    zarr = _require("zarr", "backed")
 
     from .backed import open_backed, write_transformed_zarr
 
     reader = _backed_reader(adata)
     if reader is None:
         raise ValueError("materialize requires a backed (on-disk CSR) adata.X")
-    stages = list(adata.uns.get("_stream_transforms", []))
+    stages = list(_stream_stages(adata))
     allowed = {"normalize_total", "log1p"}
     bad = [s[0] for s in stages if s[0] not in allowed]
     if bad:
@@ -135,24 +170,44 @@ def materialize(adata, path, block_rows: int | None = None):
     write_transformed_zarr(reader, tf, path, obs=adata.obs.copy(), var=adata.var.copy(),
                            block_rows=block_rows)
     adata.X = sparse_dataset(zarr.open(str(path), mode="r")["X"])   # rebind to the checkpoint
-    adata.uns["_stream_transforms"] = []                            # prefix now baked in → identity
+    _STREAM_TRANSFORMS.pop(id(adata), None)                         # prefix now baked in → identity
     return adata
 
 
 def write_obsm(adata, key: str, path):
     """Persist an ``obsm`` array (e.g. ``X_pca``) to a ``.npy`` on disk so the in-memory-fitting
     downstream (neighbors/UMAP/clustering) can start from it with no recompute."""
-    np.save(str(path), np.asarray(adata.obsm[key]))
-    return str(path)
+    path = str(path)
+    np.save(path, np.asarray(adata.obsm[key]))
+    return path if path.endswith(".npy") else path + ".npy"    # np.save appends the suffix
+
+
+def _like_input(out, original):
+    """Return ``out`` in the container the caller handed us.
+
+    Our CSR kernels always produce a scipy CSR. Writing that back over a dense ``.X`` changes
+    the type of the user's matrix behind their back -- ``.mean(0)`` starts returning
+    ``np.matrix``, indexing semantics shift, and a dense-by-design object silently acquires
+    CSR overhead. scanpy preserves the container.
+    """
+    import scipy.sparse as sp
+    if sp.issparse(original):
+        return out
+    return out.toarray() if sp.issparse(out) else np.asarray(out)
 
 
 def normalize_total(adata, target_sum: float | None = None, layer=None,
-                    exclude_highly_expressed: bool = False, copy: bool = False):
-    """Normalize counts per cell (``sc.pp.normalize_total``). ``target_sum=None`` → median."""
+                    exclude_highly_expressed: bool = False, key_added: str | None = None,
+                    inplace: bool = True, copy: bool = False):
+    """Normalize counts per cell (``sc.pp.normalize_total``). ``target_sum=None`` → median.
+
+    ``key_added`` stores the per-cell size factors used, in ``obs``. ``inplace=False`` returns
+    ``{"X": ..., "norm_factor": ...}`` instead of writing, as scanpy does.
+    """
     if exclude_highly_expressed:
         raise NotImplementedError("normalize_total(exclude_highly_expressed=True) needs a "
                                   "second global pass; not supported (scoped out).")
-    adata = adata.copy() if copy else adata
+    adata = _copy_or_reject(adata, copy, "normalize_total")
     reader = _backed_reader(adata, layer)
     if reader is not None:                       # out-of-core: record a deferred transform
         if target_sum is not None:
@@ -167,7 +222,13 @@ def normalize_total(adata, target_sum: float | None = None, layer=None,
     import scipy.sparse as sp
     X = sp.csr_matrix(adata.layers[layer] if layer is not None else adata.X)
     ts = float(target_sum) if target_sum is not None else float(np.median(np.asarray(X.sum(1)).ravel()))
-    out = CSR.from_scipy(X).normalize_total(ts).to_scipy()
+    src = adata.layers[layer] if layer is not None else adata.X
+    counts = np.asarray(X.sum(1)).ravel()
+    out = _like_input(CSR.from_scipy(X).normalize_total(ts).to_scipy(), src)
+    if not inplace:
+        return {"X": out, "norm_factor": counts / ts}
+    if key_added is not None:
+        adata.obs[key_added] = counts / ts
     if layer is not None:
         adata.layers[layer] = out
     else:
@@ -177,13 +238,14 @@ def normalize_total(adata, target_sum: float | None = None, layer=None,
 
 def log1p(adata, layer=None, copy: bool = False):
     """``log(1 + x)`` (``sc.pp.log1p``); records ``adata.uns['log1p']``."""
-    adata = adata.copy() if copy else adata
+    adata = _copy_or_reject(adata, copy, "log1p")
     reader = _backed_reader(adata, layer)
     if reader is not None:                       # out-of-core: record a deferred transform
         _record_transform(adata, "log1p")
         adata.uns["log1p"] = {"base": None}
         return adata if copy else None
-    out = _csr(adata, layer).log1p().to_scipy()
+    src = adata.layers[layer] if layer is not None else adata.X
+    out = _like_input(_csr(adata, layer).log1p().to_scipy(), src)
     if layer is not None:
         adata.layers[layer] = out
     else:
@@ -194,13 +256,18 @@ def log1p(adata, layer=None, copy: bool = False):
 
 def highly_variable_genes(adata, n_top_genes=None, n_bins: int = 20, flavor: str = "seurat",
                           min_mean: float = 0.0125, max_mean: float = 3.0, min_disp: float = 0.5,
-                          max_disp: float = np.inf, layer=None, copy: bool = False):
+                          max_disp: float = np.inf, layer=None, inplace: bool = True,
+                          copy: bool = False):
     """Highly variable genes (``sc.pp.highly_variable_genes``); writes ``adata.var`` columns.
 
     ``n_top_genes=None`` (scanpy's default) selects seurat/cell_ranger genes by the
     ``min_mean``/``max_mean``/``min_disp``/``max_disp`` cutoffs; an integer takes the top-N.
+    ``seurat_v3`` and ``pearson_residuals`` rank rather than threshold, so they require
+    ``n_top_genes`` — scanpy raises there too, where we used to default it to 2000 silently.
     """
-    adata = adata.copy() if copy else adata
+    if flavor in ("seurat_v3", "seurat_v3_paper", "pearson_residuals") and n_top_genes is None:
+        raise ValueError(f"`n_top_genes` is required for flavor={flavor!r}")
+    adata = _copy_or_reject(adata, copy, "highly_variable_genes")
     reader = _backed_reader(adata, layer)
     if reader is not None:                       # out-of-core: stream per-gene moments
         if flavor not in ("seurat", "cell_ranger"):
@@ -214,30 +281,60 @@ def highly_variable_genes(adata, n_top_genes=None, n_bins: int = 20, flavor: str
         df = _pp.highly_variable_genes(_csr(adata, layer), n_top_genes=n_top_genes, n_bins=n_bins,
                                        flavor=flavor, min_mean=min_mean, max_mean=max_mean,
                                        min_disp=min_disp, max_disp=max_disp)
+    if not inplace:
+        return df                                   # scanpy returns the frame
     for col in df.columns:
         adata.var[col] = df[col].to_numpy()
     adata.uns["hvg"] = {"flavor": flavor}
+    if flavor == "pearson_residuals":
+        adata.uns["hvg"]["computed_on"] = "adata.X"
     return adata if copy else None
 
 
 def filter_cells(adata, min_counts=None, max_counts=None, min_genes=None,
-                 max_genes=None, copy: bool = False):
-    """Filter cells (``sc.pp.filter_cells``); subsets ``adata`` in place."""
+                 max_genes=None, inplace: bool = True, copy: bool = False):
+    """Filter cells (``sc.pp.filter_cells``); subsets ``adata`` in place.
+
+    ``inplace=False`` returns ``(mask, counts)`` and leaves the object alone, as scanpy does.
+    """
     _reject_backed(adata, "filter_cells")
     adata = adata.copy() if copy else adata
-    keep = _pp.filter_cells(_sci(adata), min_counts=min_counts, max_counts=max_counts,
+    X = _sci(adata)
+    keep = _pp.filter_cells(X, min_counts=min_counts, max_counts=max_counts,
                             min_genes=min_genes, max_genes=max_genes)
+    # scanpy records the quantity it filtered on, so the threshold stays inspectable after the
+    # subset: obs['n_genes'] for the gene thresholds, obs['n_counts'] for the count ones.
+    if min_genes is not None or max_genes is not None:
+        adata.obs["n_genes"] = _pp.nonzero_per_row(X)
+    per_cell = (_pp.nonzero_per_row(X) if (min_genes is not None or max_genes is not None)
+                else np.asarray(X.sum(axis=1)).ravel())
+    if min_counts is not None or max_counts is not None:
+        adata.obs["n_counts"] = np.asarray(X.sum(axis=1)).ravel()
+    if not inplace:
+        return keep, per_cell
     adata._inplace_subset_obs(keep)
     return adata if copy else None
 
 
 def filter_genes(adata, min_counts=None, max_counts=None, min_cells=None,
-                 max_cells=None, copy: bool = False):
-    """Filter genes (``sc.pp.filter_genes``); subsets ``adata`` in place."""
+                 max_cells=None, inplace: bool = True, copy: bool = False):
+    """Filter genes (``sc.pp.filter_genes``); subsets ``adata`` in place.
+
+    ``inplace=False`` returns ``(mask, counts)`` and leaves the object alone, as scanpy does.
+    """
     _reject_backed(adata, "filter_genes")
     adata = adata.copy() if copy else adata
-    keep = _pp.filter_genes(_sci(adata), min_counts=min_counts, max_counts=max_counts,
+    X = _sci(adata)
+    keep = _pp.filter_genes(X, min_counts=min_counts, max_counts=max_counts,
                             min_cells=min_cells, max_cells=max_cells)
+    if min_cells is not None or max_cells is not None:
+        adata.var["n_cells"] = _pp.nonzero_per_col(X)
+    per_gene = (_pp.nonzero_per_col(X) if (min_cells is not None or max_cells is not None)
+                else np.asarray(X.sum(axis=0)).ravel())
+    if min_counts is not None or max_counts is not None:
+        adata.var["n_counts"] = np.asarray(X.sum(axis=0)).ravel()
+    if not inplace:
+        return keep, per_gene
     adata._inplace_subset_var(keep)
     return adata if copy else None
 
@@ -249,14 +346,68 @@ def scale(adata, max_value: float | None = None, zero_center: bool = True,
     ``max_value`` defaults to ``None`` (no clip), matching scanpy/rapids-singlecell — pass a
     value (e.g. 10) to clip z-scores, as the atlas/streaming demos do explicitly.
     """
-    adata = adata.copy() if copy else adata
+    adata = _copy_or_reject(adata, copy, "scale")
     reader = _backed_reader(adata, layer)
     if reader is not None:                       # out-of-core: pass-1 stats, defer the apply
         from .backed import stream_scale_stats
         mean, std = stream_scale_stats(reader, _build_transform(adata))
         _record_transform(adata, "scale", (mean, std, max_value, zero_center))
+        adata.var["mean"], adata.var["std"] = mean, std
         return adata if copy else None
+    import scipy.sparse as sp
+    X = sp.csr_matrix(adata.layers[layer] if layer is not None else adata.X)
+    # scanpy records the fitted per-gene statistics; they are what lets a second object be put
+    # on the same scale later, and they are cheap next to the scaling itself.
+    mean = np.asarray(X.mean(axis=0)).ravel()
+    sq_mean = np.asarray(X.multiply(X).mean(axis=0)).ravel()
+    std = np.sqrt(np.maximum(sq_mean - mean * mean, 0.0))
+    std[std == 0] = 1.0
     out = _pp.scale(_csr(adata, layer), max_value=max_value, zero_center=zero_center)
+    if layer is not None:
+        adata.layers[layer] = out
+    else:
+        adata.X = out
+    adata.var["mean"], adata.var["std"] = mean, std
+    return adata if copy else None
+
+
+def _design_matrix(adata, keys):
+    """Covariate columns, expanding categoricals the way scanpy does.
+
+    scanpy detects a ``CategoricalDtype`` and regresses on **group indicators**, so each
+    category gets its own level and the residual mean within every group is zero. Coercing the
+    column to float instead fits a single ordinal slope through the category codes — a
+    different model that runs without complaint on numeric categories (measured max residual
+    difference 0.257) and raises `could not convert string to float` on string ones.
+    """
+    import pandas as pd
+    cols = []
+    for k in keys:
+        s = adata.obs[k]
+        if isinstance(s.dtype, pd.CategoricalDtype) or s.dtype == object:
+            s = s.astype("category")
+            # drop the first level: the intercept already carries it, and keeping all of them
+            # makes the design rank-deficient
+            d = pd.get_dummies(s, drop_first=True).to_numpy(dtype=np.float32)
+            if d.size:
+                cols.append(d)
+        else:
+            cols.append(np.asarray(s, dtype=np.float32)[:, None])
+    if not cols:
+        raise ValueError(f"no usable covariates in {keys!r}")
+    return np.column_stack(cols)
+
+
+def regress_out(adata, keys, layer=None, copy: bool = False):
+    """Regress out covariates in ``adata.obs[keys]`` (``sc.pp.regress_out``).
+
+    Categorical covariates are expanded into group indicators, as scanpy does.
+    """
+    _reject_backed(adata, "regress_out")
+    adata = adata.copy() if copy else adata
+    keys = [keys] if isinstance(keys, str) else list(keys)
+    src = adata.layers[layer] if layer is not None else adata.X
+    out = _pp.regress_out(src, _design_matrix(adata, keys))
     if layer is not None:
         adata.layers[layer] = out
     else:
@@ -264,23 +415,19 @@ def scale(adata, max_value: float | None = None, zero_center: bool = True,
     return adata if copy else None
 
 
-def regress_out(adata, keys, copy: bool = False):
-    """Regress out covariates in ``adata.obs[keys]`` (``sc.pp.regress_out``)."""
-    _reject_backed(adata, "regress_out")
-    adata = adata.copy() if copy else adata
-    keys = [keys] if isinstance(keys, str) else list(keys)
-    cov = np.column_stack([np.asarray(adata.obs[k], dtype=np.float32) for k in keys])
-    adata.X = _pp.regress_out(adata.X, cov)
-    return adata if copy else None
-
-
 def normalize_pearson_residuals(adata, theta: float = 100.0, clip: float | None = None,
                                 copy: bool = False):
     """Analytic Pearson residuals (``sc.experimental.pp.normalize_pearson_residuals``)."""
     _reject_backed(adata, "normalize_pearson_residuals")
+    if theta <= 0:
+        raise ValueError("Pearson residuals require theta > 0")
+    if clip is not None and clip < 0:
+        raise ValueError("Pearson residuals require clip >= 0")
     adata = adata.copy() if copy else adata
     import scipy.sparse as sp
     adata.X = _pp.normalize_pearson_residuals(sp.csr_matrix(adata.X), theta=theta, clip=clip)
+    adata.uns["pearson_residuals_normalization"] = {
+        "theta": theta, "clip": clip, "computed_on": "adata.X"}
     return adata if copy else None
 
 
@@ -296,16 +443,28 @@ def scrublet(adata, sim_doublet_ratio: float = 2.0, expected_doublet_rate: float
                        n_pcs=n_pcs, random_state=random_state)
     adata.obs["doublet_score"] = res["doublet_scores"]
     adata.obs["predicted_doublet"] = res["predicted_doublets"]
-    adata.uns["scrublet"] = {"threshold": res["threshold"]}
+    adata.uns["scrublet"] = {
+        "threshold": res["threshold"],
+        "doublet_scores_sim": res["doublet_scores_sim"],
+        "doublet_parents": res["doublet_parents"],
+        "parameters": {"expected_doublet_rate": expected_doublet_rate,
+                       "sim_doublet_ratio": sim_doublet_ratio,
+                       "n_neighbors": res["n_neighbors"], "random_state": random_state}}
     return adata if copy else None
 
 
 _PERCENT_TOP_DEFAULT = (50, 100, 200, 500)   # scanpy's default
 _QC_VAR_RENAME = {"gene_total_counts": "total_counts"}   # per-gene total → scanpy's var slot name
+# Which axis each metric belongs to. Dispatching on len(v) instead looks equivalent and is not:
+# on a SQUARE object (2000 cells subset to 2000 HVGs is enough) every per-gene array also has
+# len == n_obs, so all six land in .obs and gene_total_counts overwrites the per-cell total.
+_QC_PER_CELL = ("total_counts", "n_genes_by_counts")
+_QC_PER_GENE = ("gene_total_counts", "n_cells_by_counts", "mean_counts",
+                "pct_dropout_by_counts")
 
 
 def calculate_qc_metrics(adata, qc_vars=(), percent_top=_EMPTY, log1p: bool = True,
-                         layer=None, copy: bool = False):
+                         layer=None, inplace: bool = False, copy: bool = False):
     """Per-cell/per-gene QC metrics (``sc.pp.calculate_qc_metrics``).
 
     ``qc_vars`` (e.g. ``['mt']``) adds ``total_counts_<v>``/``pct_counts_<v>`` for each boolean
@@ -313,20 +472,26 @@ def calculate_qc_metrics(adata, qc_vars=(), percent_top=_EMPTY, log1p: bool = Tr
     ``pct_counts_in_top_N_genes`` per N. The per-gene total lands in ``var['total_counts']``
     (scanpy's name), matching ``sc.pp.calculate_qc_metrics``.
 
+    ``inplace`` follows scanpy and defaults to **False**: the metrics come back as an
+    ``(obs_df, var_df)`` pair and the object is left untouched. Pass ``inplace=True`` to write
+    them into ``adata.obs``/``adata.var``.
+
     ``percent_top`` defaults to scanpy's ``(50, 100, 200, 500)``; it used to default to
     ``None``, which silently produced none of those columns for anyone swapping ``sc.pp`` →
     ``msc.pp``. As in scanpy, an N larger than ``n_vars`` is an error — pass a smaller tuple
     (or ``None``) for a panel with fewer genes than that.
     """
-    adata = adata.copy() if copy else adata
+    import pandas as pd
+    adata = _copy_or_reject(adata, copy, "calculate_qc_metrics")
     # Distinguish "the user asked for these" from "this is just the default": the streaming
     # path cannot produce them, and a default must not turn a working backed call into an error.
     asked_for_top = percent_top is not _EMPTY
     if not asked_for_top:
         percent_top = _PERCENT_TOP_DEFAULT
+    qc_vars = [qc_vars] if isinstance(qc_vars, str) else list(qc_vars)
+
     reader = _backed_reader(adata, layer)
     if reader is not None:                       # out-of-core: stream row-blocks (base metrics)
-        qc_vars = [qc_vars] if isinstance(qc_vars, str) else list(qc_vars)
         if qc_vars or (percent_top and asked_for_top):
             raise NotImplementedError(
                 "qc_vars/percent_top are not supported on a backed .X (they need a per-cell "
@@ -336,21 +501,28 @@ def calculate_qc_metrics(adata, qc_vars=(), percent_top=_EMPTY, log1p: bool = Tr
         m = stream_qc(reader)
     else:
         m = _pp.calculate_qc_metrics(_sci(adata, layer))
-    for k, v in m.items():
-        col = _QC_VAR_RENAME.get(k, k)
-        (adata.obs if len(v) == adata.n_obs else adata.var)[col] = np.asarray(v)
 
-    qc_vars = [qc_vars] if isinstance(qc_vars, str) else list(qc_vars)
+    # Accumulate rather than write as we go: scanpy's default leaves the object alone, so the
+    # columns cannot be parked in adata.obs/.var until we know inplace is set.
+    obs_out, var_out = {}, {}
+    for k, v in m.items():
+        if k in _QC_PER_CELL:
+            obs_out[_QC_VAR_RENAME.get(k, k)] = np.asarray(v)
+        elif k in _QC_PER_GENE:
+            var_out[_QC_VAR_RENAME.get(k, k)] = np.asarray(v)
+        else:
+            raise AssertionError(f"unclassified QC metric {k!r}")
+
     if qc_vars or percent_top:
         import scipy.sparse as sp
         X = sp.csr_matrix(adata.layers[layer] if layer is not None else adata.X)
-        total = np.asarray(adata.obs["total_counts"], dtype=np.float64)
+        total = np.asarray(obs_out["total_counts"], dtype=np.float64)
         for v in qc_vars:
             mask = np.asarray(adata.var[v]).astype(bool)
             sub = np.asarray(X[:, mask].sum(1)).ravel().astype(np.float64)
-            adata.obs[f"total_counts_{v}"] = sub
+            obs_out[f"total_counts_{v}"] = sub
             with np.errstate(invalid="ignore", divide="ignore"):
-                adata.obs[f"pct_counts_{v}"] = np.where(total > 0, 100.0 * sub / total, 0.0)
+                obs_out[f"pct_counts_{v}"] = 100.0 * sub / total   # NaN on an empty cell, as scanpy
         tops = sorted(percent_top or [])
         if tops and max(tops) > adata.n_vars:    # scanpy raises IndexError here; say why
             raise IndexError(
@@ -359,14 +531,24 @@ def calculate_qc_metrics(adata, qc_vars=(), percent_top=_EMPTY, log1p: bool = Tr
                 f"columns."
             )
         for n_top, vals in zip(tops, _percent_top(X, tops)):
-            adata.obs[f"pct_counts_in_top_{n_top}_genes"] = vals
+            obs_out[f"pct_counts_in_top_{n_top}_genes"] = vals
     if log1p:
-        for base in ("total_counts", "n_genes_by_counts"):
-            if base in adata.obs:
-                adata.obs[f"log1p_{base}"] = np.log1p(np.asarray(adata.obs[base], np.float64))
-        for base in ("total_counts", "mean_counts", "n_cells_by_counts"):
-            if base in adata.var:
-                adata.var[f"log1p_{base}"] = np.log1p(np.asarray(adata.var[base], np.float64))
+        # scanpy log1p-transforms exactly these: the two per-cell totals plus one per qc_var in
+        # obs, and total/mean counts in var. It does NOT transform n_cells_by_counts.
+        for base in ("total_counts", "n_genes_by_counts", *(f"total_counts_{v}" for v in qc_vars)):
+            if base in obs_out:
+                obs_out[f"log1p_{base}"] = np.log1p(np.asarray(obs_out[base], np.float64))
+        for base in ("total_counts", "mean_counts"):
+            if base in var_out:
+                var_out[f"log1p_{base}"] = np.log1p(np.asarray(var_out[base], np.float64))
+
+    if not inplace:
+        return (pd.DataFrame(obs_out, index=adata.obs_names),
+                pd.DataFrame(var_out, index=adata.var_names))
+    for k, v in obs_out.items():
+        adata.obs[k] = v
+    for k, v in var_out.items():
+        adata.var[k] = v
     return adata if copy else None
 
 
@@ -431,8 +613,40 @@ def _resolve_mask_var(adata, mask_var, use_highly_variable):
     return arr, arr
 
 
-def pca(adata, n_comps: int = 50, layer=None, use_highly_variable: bool | None = None,
-        zero_center: bool = True, svd_solver: str = "randomized", random_state: int = 0,
+def _explained_variance(x_pca, zero_center=True):
+    """scanpy's ``uns['pca']['variance']`` — the eigenvalues, not the ratio.
+
+    Equal to ``S**2 / (n - 1)``, which is exactly the column variance of the scores, so it can
+    be recovered without threading another return value out of every solver. Anything that
+    reconstructs loadings or draws an elbow on absolute variance reads this key.
+    """
+    return np.var(np.asarray(x_pca), axis=0, ddof=1 if zero_center else 0).astype(np.float64)
+
+
+def _resolve_svd_solver(svd_solver, adata, layer, zero_center, n_comps, n_sel):
+    """scanpy resolves ``svd_solver=None`` to ``arpack``, dense or sparse.
+
+    We defaulted to ``randomized``, which is a different answer rather than a slower one: on
+    pbmc3k the two agree to |corr| >= 0.99 only through PC15 and reach |corr| = 0.012 by PC50.
+    The exact solvers need a dense matrix, so a sparse zero-centred input still takes the
+    randomized path -- but with enough power iterations to converge (measured |corr| 0.998
+    against arpack at n_iter=15/n_oversamples=40, against 0.012 at the sklearn defaults).
+    """
+    import scipy.sparse as sp
+    explicit = svd_solver not in (None, "auto")
+    if not explicit:
+        X = adata.layers[layer] if layer is not None else adata.X
+        svd_solver = "randomized" if (sp.issparse(X) and zero_center) else "arpack"
+    # ARPACK needs k < min(n_obs, n_features); a narrow panel or a small HVG mask can ask for
+    # as many components as it has columns. The dense exact solver gives the same answer, and
+    # a matrix that small costs nothing to decompose outright.
+    if svd_solver == "arpack" and n_comps >= min(adata.n_obs, n_sel):
+        return "full"
+    return svd_solver
+
+
+def pca(adata, n_comps: int | None = None, layer=None, use_highly_variable: bool | None = None,
+        zero_center: bool = True, svd_solver: str | None = None, random_state: int = 0,
         copy: bool = False, *, mask_var=_EMPTY):
     """PCA (``sc.pp.pca``); writes ``obsm['X_pca']``, ``varm['PCs']``, ``uns['pca']``.
 
@@ -450,13 +664,21 @@ def pca(adata, n_comps: int = 50, layer=None, use_highly_variable: bool | None =
     import scipy.sparse as sp
 
     from .decomposition import pca as _pca
-    adata = adata.copy() if copy else adata
-    if svd_solver in (None, "auto"):                 # scanpy's default/'auto' → our randomized
-        svd_solver = "randomized"
+    adata = _copy_or_reject(adata, copy, "pca")
     mask_param, mask = _resolve_mask_var(adata, mask_var, use_highly_variable)
+    n_sel = int(mask.sum()) if mask is not None else adata.n_vars
+    if n_comps is None:
+        # scanpy: settings.N_PCS, or min_dim - 1 on a panel narrower than that. Hard-coding 50
+        # returned one component too many for any object with fewer than 51 features.
+        min_dim = min(adata.n_obs, n_sel)
+        n_comps = min_dim - 1 if min_dim <= _N_PCS_DEFAULT else _N_PCS_DEFAULT
+    svd_solver = _resolve_svd_solver(svd_solver, adata, layer, zero_center,
+                                     n_comps, n_sel)
     params = {"zero_center": bool(zero_center),
               "use_highly_variable": mask_param is not None,
               "mask_var": mask_param}
+    if layer is not None:
+        params["layer"] = layer
 
     reader = _backed_reader(adata, layer)
     if reader is not None:                       # out-of-core: fused streaming covariance-eigh
@@ -470,7 +692,8 @@ def pca(adata, n_comps: int = 50, layer=None, use_highly_variable: bool | None =
         pcs = np.zeros((adata.n_vars, np.asarray(comps).shape[0]), dtype=np.float32)
         pcs[mask if mask is not None else slice(None)] = np.asarray(comps).T
         adata.varm["PCs"] = pcs
-        adata.uns["pca"] = {"params": params, "variance_ratio": np.asarray(vr)}
+        adata.uns["pca"] = {"params": params, "variance_ratio": np.asarray(vr),
+                            "variance": _explained_variance(X_pca, zero_center)}
         return adata if copy else None
 
     X = adata.layers[layer] if layer is not None else adata.X
@@ -478,62 +701,133 @@ def pca(adata, n_comps: int = 50, layer=None, use_highly_variable: bool | None =
     Xsub = X[:, sel]
     inp = CSR.from_scipy(sp.csr_matrix(Xsub).astype(np.float32)) if sp.issparse(Xsub) and zero_center \
         else np.asarray(Xsub.todense() if sp.issparse(Xsub) else Xsub, dtype=np.float32)
+    # A sparse zero-centred input cannot take an exact solver, so give the randomized one
+    # enough power iterations to land on the same subspace instead of a nearby one.
+    extra = ({"n_iter": 15, "n_oversamples": 40}
+             if svd_solver == "randomized" and isinstance(inp, CSR) else {})
     X_pca, comps, vr = _pca(inp, n_comps=n_comps, solver=svd_solver, random_state=random_state,
-                            zero_center=zero_center)
+                            zero_center=zero_center, **extra)
     adata.obsm["X_pca"] = np.asarray(X_pca)
     pcs = np.zeros((adata.n_vars, np.asarray(comps).shape[0]), dtype=np.float32)
     pcs[sel] = np.asarray(comps).T
     adata.varm["PCs"] = pcs
-    adata.uns["pca"] = {"params": params, "variance_ratio": np.asarray(vr)}
+    adata.uns["pca"] = {"params": params, "variance_ratio": np.asarray(vr),
+                        "variance": _explained_variance(X_pca, zero_center)}
     return adata if copy else None
 
 
+_N_PCS_DEFAULT = 50            # scanpy's settings.N_PCS
+
+
+def _choose_representation(adata, use_rep, n_pcs, random_state):
+    """scanpy's ``_choose_representation``, including the PCA it computes for you.
+
+    The part that is easy to miss: with ``use_rep=None`` and no ``X_pca`` present, scanpy does
+    **not** fall back to raw ``.X`` unless the object is narrow — it runs a 50-component PCA
+    first. Falling back to ``.X`` builds the graph in gene space, which on 2000 HVGs gave a
+    neighbour-set overlap of 0.188 against scanpy, and on a sparse ``.X`` did not even fail
+    cleanly (``np.asarray(csr, dtype=...)`` raises about a ragged sequence).
+    """
+    if use_rep is None and n_pcs == 0:
+        return np.asarray(_dense(adata.X), dtype=np.float32), None
+    if use_rep is None:
+        if adata.n_vars > _N_PCS_DEFAULT:
+            if "X_pca" not in adata.obsm or adata.obsm["X_pca"].shape[1] < (
+                    n_pcs or _N_PCS_DEFAULT):
+                pca(adata, n_comps=n_pcs or _N_PCS_DEFAULT, random_state=random_state)
+            return np.asarray(adata.obsm["X_pca"], dtype=np.float32), "X_pca"
+        return np.asarray(_dense(adata.X), dtype=np.float32), None
+    if use_rep == "X":
+        return np.asarray(_dense(adata.X), dtype=np.float32), "X"
+    if use_rep not in adata.obsm:
+        raise ValueError(f"Did not find {use_rep} in .obsm.keys(). "
+                         f"You need to compute it first.")
+    return np.asarray(adata.obsm[use_rep], dtype=np.float32), use_rep
+
+
+def _dense(X):
+    import scipy.sparse as sp
+    return X.toarray() if sp.issparse(X) else np.asarray(X)
+
+
 def neighbors(adata, n_neighbors: int = 15, n_pcs: int | None = None, *, use_rep: str | None = None,
+              metric: str = "euclidean", key_added: str | None = None,
               random_state: int = 0, copy: bool = False):
     """kNN graph (``sc.pp.neighbors``); writes ``obsp['distances']``/``['connectivities']``, ``uns['neighbors']``.
 
     Signature mirrors scanpy: ``n_pcs`` is positional after ``n_neighbors`` and ``use_rep`` is
     keyword-only, so ``sc.pp.neighbors(adata, 15, 40)`` truncates the representation to 40 PCs
-    (previously that 40 bound ``use_rep`` and silently ran on raw ``.X``). ``use_rep=None``
-    resolves to ``X_pca`` when present, else ``.X``.
+    (previously that 40 bound ``use_rep`` and silently ran on raw ``.X``).
+
+    With ``use_rep=None`` the representation follows scanpy's rule: ``X_pca`` if present,
+    otherwise a freshly computed 50-component PCA when the object has more than 50 variables,
+    otherwise ``.X``. ``key_added`` redirects all three output slots, and the consumers in
+    ``msc.tl`` resolve it through ``neighbors_key=``.
     """
     from .neighbors import neighbors as _nb
+    if metric != "euclidean":
+        raise NotImplementedError(f"metric={metric!r} is not implemented (Euclidean only)")
     adata = adata.copy() if copy else adata
-    rep_key = use_rep if use_rep is not None else ("X_pca" if "X_pca" in adata.obsm else None)
-    rep = adata.obsm[rep_key] if (rep_key is not None and rep_key in adata.obsm) else adata.X
-    rep = np.asarray(rep, dtype=np.float32)
+    rep, rep_key = _choose_representation(adata, use_rep, n_pcs, random_state)
     if n_pcs is not None:                            # scanpy truncates the rep to the first n_pcs
         rep = rep[:, :n_pcs]
     dist, conn = _nb(rep, n_neighbors=n_neighbors, random_state=random_state)
-    adata.obsp["distances"] = dist
-    adata.obsp["connectivities"] = conn
-    adata.uns["neighbors"] = {"connectivities_key": "connectivities",
-                              "distances_key": "distances",
-                              "params": {"n_neighbors": n_neighbors, "method": "umap",
-                                         "use_rep": rep_key, "n_pcs": n_pcs}}
+
+    ck = "connectivities" if key_added is None else f"{key_added}_connectivities"
+    dk = "distances" if key_added is None else f"{key_added}_distances"
+    adata.obsp[dk] = dist
+    adata.obsp[ck] = conn
+    params = {"n_neighbors": n_neighbors, "method": "umap",
+              "random_state": random_state, "metric": metric}
+    if use_rep is not None:            # scanpy records only what the caller asked for
+        params["use_rep"] = use_rep
+    if n_pcs is not None:
+        params["n_pcs"] = n_pcs
+    adata.uns["neighbors" if key_added is None else key_added] = {
+        "connectivities_key": ck, "distances_key": dk, "params": params}
     return adata if copy else None
 
 
 def harmony_integrate(adata, key, basis: str = "X_pca", adjusted_basis: str = "X_pca_harmony",
                       random_state: int = 0, copy: bool = False):
-    """Harmony batch integration (``sc.external.pp.harmony_integrate``); writes ``obsm[adjusted_basis]``."""
+    """Harmony batch integration (``sc.external.pp.harmony_integrate``); writes ``obsm[adjusted_basis]``.
+
+    ``key`` is a column in ``adata.obs`` or a list of them; several columns are combined into
+    one compound covariate, which is what scanpy documents.
+    """
     from .integration import harmonize
     adata = adata.copy() if copy else adata
-    batch = adata.obs[key].to_numpy()
+    if not isinstance(key, str):
+        cols = [adata.obs[k].astype(str).to_numpy() for k in key]
+        batch = np.array(["|".join(v) for v in zip(*cols)])
+    else:
+        batch = adata.obs[key].to_numpy()
     adata.obsm[adjusted_basis] = np.asarray(harmonize(adata.obsm[basis], batch, random_state=random_state))
     return adata if copy else None
 
 
-def bbknn(adata, batch_key, use_rep: str = "X_pca", neighbors_within_batch: int = 3,
+def bbknn(adata, batch_key: str = "batch", *, use_rep: str = "X_pca",
+          neighbors_within_batch: int = 3, n_pcs: int | None = 50, trim: int | None = None,
           random_state: int = 0, copy: bool = False):
-    """Batch-balanced kNN (``sc.external.pp.bbknn``); writes ``obsp`` + ``uns['neighbors']``."""
+    """Batch-balanced kNN (``sc.external.pp.bbknn``); writes ``obsp`` + ``uns['neighbors']``.
+
+    ``n_neighbors`` in the recorded params is ``neighbors_within_batch x n_batches`` — the
+    width of the combined neighbour set — which is what scanpy's ``Neighbors`` (and so dpt and
+    paga) reads. Recording ``neighbors_within_batch`` there instead understated it by the batch
+    count.
+    """
     from .neighbors import bbknn as _bbknn
     adata = adata.copy() if copy else adata
-    dist, conn = _bbknn(np.asarray(adata.obsm[use_rep], dtype=np.float32),
-                        adata.obs[batch_key].to_numpy(),
-                        neighbors_within_batch=neighbors_within_batch, random_state=random_state)
+    dist, conn, n_neighbors = _bbknn(np.asarray(adata.obsm[use_rep], dtype=np.float32),
+                                     adata.obs[batch_key].to_numpy(),
+                                     neighbors_within_batch=neighbors_within_batch,
+                                     n_pcs=n_pcs, trim=trim, random_state=random_state)
     adata.obsp["distances"] = dist
     adata.obsp["connectivities"] = conn
-    adata.uns["neighbors"] = {"connectivities_key": "connectivities", "distances_key": "distances",
-                              "params": {"n_neighbors": neighbors_within_batch, "method": "umap"}}
+    adata.uns["neighbors"] = {
+        "connectivities_key": "connectivities", "distances_key": "distances",
+        "params": {"n_neighbors": n_neighbors, "method": "umap", "metric": "euclidean",
+                   "random_state": random_state, "use_rep": use_rep, "n_pcs": n_pcs,
+                   "bbknn": {"trim": 10 * n_neighbors if trim is None else trim,
+                             "computation": "metal"}}}
     return adata if copy else None

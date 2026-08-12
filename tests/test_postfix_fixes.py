@@ -67,7 +67,7 @@ def test_qc_slot_names_and_qc_vars_match_scanpy():
     import scanpy as sc
     from metalsinglecell import pp as msc_pp
     a = _pbmc(); b = a.copy()
-    msc_pp.calculate_qc_metrics(a, qc_vars=["mt"], percent_top=[50], log1p=True)
+    msc_pp.calculate_qc_metrics(a, inplace=True, qc_vars=["mt"], percent_top=[50], log1p=True)
     sc.pp.calculate_qc_metrics(b, qc_vars=["mt"], percent_top=[50], log1p=True, inplace=True)
     slots_obs = {"total_counts", "n_genes_by_counts", "pct_counts_mt", "log1p_total_counts",
                  "pct_counts_in_top_50_genes"}
@@ -88,7 +88,7 @@ def test_qc_var_rename_incore_vs_streaming_slotnames():
     from metalsinglecell import config, pp as msc_pp
     from metalsinglecell.backed import write_backed_zarr
     a = _pbmc()
-    incore = a.copy(); msc_pp.calculate_qc_metrics(incore)
+    incore = a.copy(); msc_pp.calculate_qc_metrics(incore, inplace=True)
     zp = config.PROCESSED_DIR / "backed" / "pbmc_postfix_qc.zarr"
     import shutil
     if zp.exists():
@@ -96,7 +96,7 @@ def test_qc_var_rename_incore_vs_streaming_slotnames():
     write_backed_zarr(a.copy(), zp, block_rows=1000)
     backed = ad.AnnData(X=sparse_dataset(zarr.open(str(zp))["X"]))
     backed.var_names = a.var_names
-    msc_pp.calculate_qc_metrics(backed)
+    msc_pp.calculate_qc_metrics(backed, inplace=True)
     same = ("total_counts" in incore.var.columns and "total_counts" in backed.var.columns
             and "gene_total_counts" not in incore.var.columns
             and "gene_total_counts" not in backed.var.columns)
@@ -188,7 +188,7 @@ def test_bbknn_tiny_batch_no_crash():
     rng = np.random.default_rng(0)
     X = rng.standard_normal((60, 10)).astype(np.float32)
     batch = np.array(["a"] * 40 + ["b"] * 2 + ["c"] * 18)   # batch 'b' (2) < k=3
-    _, conn = bbknn(X, batch, neighbors_within_batch=3)
+    _, conn, _ = bbknn(X, batch, neighbors_within_batch=3)
     ok = conn.shape == (60, 60) and conn.nnz > 0
     _row("6", "bbknn_tiny_batch", "conn_nnz", int(conn.nnz), ok)
     assert ok

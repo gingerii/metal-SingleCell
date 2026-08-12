@@ -9,6 +9,8 @@ So ``sq.gr`` pipelines work by swapping ``sq.gr`` → ``msc.gr``.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import numpy as np
 
 from . import spatial as _gr
@@ -38,7 +40,13 @@ def _transform_adj(adj, transform):
     if transform in (None, "none"):
         return adj
     if transform == "spectral":
-        deg = np.asarray(adj.sum(axis=1)).ravel()
+        # Column degree, not row degree: squidpy sums over axis=0 (gr/neighbors.py). The two
+        # agree on a symmetric graph and disagree on the directed k-NN graph, which is the
+        # default builder -- measured max difference 0.187 on the connectivity values.
+        deg = np.asarray(adj.sum(axis=0)).ravel()
+        # squidpy has no zero guard and emits `inf` at a zero-in-degree node; we leave those
+        # rows at zero instead. That is the one deliberate difference here: an `inf` weight
+        # poisons every downstream reduction, and an unreachable node has no spectral weight.
         inv = np.divide(1.0, np.sqrt(deg), out=np.zeros_like(deg), where=deg > 0)
         D = sp.diags(inv)
         return (D @ adj @ D).tocsr()
@@ -79,8 +87,15 @@ def _finalize(adj, dst, transform, set_diag, percentile):
     adj, dst = adj.tocsr(), dst.tocsr()
     if percentile is not None and dst.nnz:                    # squidpy prunes on the DISTANCES
         keep = dst.data <= np.percentile(dst.data, percentile)
-        adj = sp.csr_matrix((adj.data * keep, adj.indices, adj.indptr), shape=adj.shape)
-        dst = sp.csr_matrix((dst.data * keep, dst.indices, dst.indptr), shape=dst.shape)
+        # The index arrays MUST be copied. A builder normally hands us two matrices built from
+        # one `cols` array, and scipy stores `indices`/`indptr` by reference when the dtype
+        # already matches -- so without these copies the two eliminate_zeros() calls below
+        # compact a single shared buffer and each scrambles the other matrix's columns. That
+        # shipped in 0.1.2 and put 33904 of 41926 radius-graph distances on the wrong edge.
+        adj = sp.csr_matrix((adj.data * keep, adj.indices.copy(), adj.indptr.copy()),
+                            shape=adj.shape)
+        dst = sp.csr_matrix((dst.data * keep, dst.indices.copy(), dst.indptr.copy()),
+                            shape=dst.shape)
         adj.eliminate_zeros(); dst.eliminate_zeros()
     if set_diag:
         adj = _set_diag(adj)
@@ -132,8 +147,17 @@ def _assemble(adata, spatial_key, library_key, build, transform, set_diag, perce
     return adj.tocsr(), dst.tocsr()
 
 
+class SpatialNeighborsResult(NamedTuple):
+    """What the builders return under ``copy=True`` — squidpy's contract, not an ``AnnData``."""
+
+    connectivities: object
+    distances: object
+
+
 def _write_graph(adata, adj, dst, params, key_added, transform, copy):
-    """Write the four slots squidpy writes."""
+    """Write the slots squidpy writes, or return the result under ``copy``."""
+    if copy:
+        return SpatialNeighborsResult(adj, dst)
     ck, dk = f"{key_added}_connectivities", f"{key_added}_distances"
     adata.obsp[ck] = adj
     adata.obsp[dk] = dst
@@ -141,7 +165,7 @@ def _write_graph(adata, adj, dst, params, key_added, transform, copy):
         "connectivities_key": ck, "distances_key": dk,
         "params": {**params, "transform": transform},
     }
-    return adata if copy else None
+    return None
 
 
 _TIE_PAD = 4        # extra candidates fetched so ties resolve by index, not by arrival order
@@ -186,7 +210,6 @@ def spatial_neighbors_knn(adata, *, n_neighs: int = 6, spatial_key: str = "spati
     crosses between them.
     """
     import scipy.sparse as sp
-    adata = adata.copy() if copy else adata
 
     def build(coords, exact):
         n = coords.shape[0]
@@ -215,7 +238,6 @@ def spatial_neighbors_radius(adata, *, radius, spatial_key: str = "spatial",
     """
     import scipy.sparse as sp
     from .neighbors import _radius_grid
-    adata = adata.copy() if copy else adata
     lo, hi = (0.0, float(radius)) if np.isscalar(radius) else (float(min(radius)),
                                                                float(max(radius)))
 
@@ -249,7 +271,6 @@ def spatial_neighbors_grid(adata, *, n_neighs: int = 6, n_rings: int = 1,
     imaged at different resolutions have different median edge lengths.
     """
     import scipy.sparse as sp
-    adata = adata.copy() if copy else adata
 
     def build(coords, _exact):
         n = coords.shape[0]
@@ -325,7 +346,6 @@ def spatial_neighbors_delaunay(adata, *, radius=None, spatial_key: str = "spatia
     points are the common case rather than a corner case.
     """
     import scipy.sparse as sp
-    adata = adata.copy() if copy else adata
     stored_radius = radius
     if radius is not None:
         lo, hi = ((0.0, float(radius)) if np.isscalar(radius)
@@ -364,6 +384,11 @@ def spatial_neighbors(adata, n_neighs: int = 6, coord_type: str | None = None,
     graph — so ``coord_type='grid'`` silently produced the wrong graph on Visium. It now
     dispatches for real, and, like squidpy, infers ``'grid'`` when ``uns['spatial']`` is
     present and ``'generic'`` otherwise.
+
+    Two legacy quirks are reproduced deliberately, because squidpy documents them and code
+    written against the old entry point depends on them: ``percentile`` is rejected for grid
+    coordinates, and a *scalar* ``radius`` combined with ``delaunay=True`` is ignored rather
+    than applied (a tuple ``radius`` is applied).
     """
     import warnings
     warnings.warn(
@@ -375,45 +400,134 @@ def spatial_neighbors(adata, n_neighs: int = 6, coord_type: str | None = None,
     common = dict(spatial_key=spatial_key, library_key=library_key, transform=transform,
                   set_diag=set_diag, key_added=key_added, copy=copy)
     if coord_type == "grid":
+        if percentile is not None:
+            raise ValueError("'percentile' is not supported for grid coordinates")
         return spatial_neighbors_grid(adata, n_neighs=n_neighs, n_rings=n_rings,
                                       delaunay=delaunay, **common)
     if coord_type != "generic":
         raise ValueError(f"coord_type must be 'grid', 'generic' or None, got {coord_type!r}")
     if delaunay:
-        return spatial_neighbors_delaunay(adata, radius=radius, percentile=percentile, **common)
+        legacy_radius = radius if isinstance(radius, tuple) else None
+        return spatial_neighbors_delaunay(adata, radius=legacy_radius, percentile=percentile,
+                                          **common)
     if radius is not None:
         return spatial_neighbors_radius(adata, radius=radius, percentile=percentile, **common)
     return spatial_neighbors_knn(adata, n_neighs=n_neighs, percentile=percentile, **common)
 
 
-def spatial_autocorr(adata, mode: str = "moran", genes=None, n_perms: int | None = 100,
-                     connectivity_key: str = "spatial_connectivities", layer=None,
-                     seed: int = 0, copy: bool = False):
-    """Moran's I / Geary's C per gene (``sq.gr.spatial_autocorr``); writes ``uns['moranI']``/``['gearyC']``."""
-    import pandas as pd
+def _autocorr_values(adata, attr, genes, layer, use_raw):
+    """squidpy's three extraction modes: variables, numeric ``obs`` columns, or ``obsm`` cols."""
     import scipy.sparse as sp
-    adata = adata.copy() if copy else adata
+    if attr == "obs":
+        if genes is None:
+            df = adata.obs.select_dtypes(include=np.number)
+            return np.asarray(df.to_numpy(), dtype=np.float32), df.columns.tolist()
+        genes = [genes] if isinstance(genes, str) else list(genes)
+        return np.asarray(adata.obs[genes].to_numpy(), dtype=np.float32), genes
+    if attr == "obsm":
+        if layer is None or layer not in adata.obsm:
+            raise KeyError(f"attr='obsm' needs layer= naming a key in adata.obsm, got {layer!r}")
+        M = adata.obsm[layer]
+        ixs = list(range(M.shape[1])) if genes is None else list(np.ravel([genes]))
+        return np.asarray(M[:, ixs], dtype=np.float32), ixs
+    if attr != "X":
+        raise NotImplementedError(f"extracting from adata.{attr} is not implemented "
+                                  f"(expected 'X', 'obs' or 'obsm')")
+    if use_raw and adata.raw is None:
+        raise AttributeError("no .raw attribute found; try use_raw=False")
+    source = adata.raw if use_raw else adata
     if genes is None:
         genes = (adata.var_names[adata.var["highly_variable"].to_numpy()]
                  if "highly_variable" in adata.var else adata.var_names).tolist()
-    gi = [adata.var_names.get_loc(g) for g in genes]
-    X = adata.layers[layer] if layer is not None else adata.X
-    Xg = np.asarray(X[:, gi].todense() if sp.issparse(X) else X[:, gi], dtype=np.float32)
-    out = _gr.spatial_autocorr(Xg, adata.obsp[connectivity_key], mode=mode,
-                               n_perms=n_perms or 0, random_state=seed)
+    genes = [genes] if isinstance(genes, str) else list(genes)
+    if use_raw:
+        # squidpy intersects with adata.var_names rather than taking all of .raw. It matters
+        # beyond the row count: corr_method divides by the number of rows, so scoring the
+        # extra genes shifts every FDR-corrected p-value.
+        keep = set(source.var_names)
+        genes = [g for g in genes if g in keep]
+    gi = [source.var_names.get_loc(g) for g in genes]
+    X = source.X if (use_raw or layer is None) else adata.layers[layer]
+    Xg = X[:, gi]
+    return np.asarray(Xg.todense() if sp.issparse(Xg) else Xg, dtype=np.float32), genes
+
+
+def spatial_autocorr(adata, mode: str = "moran", genes=None, n_perms: int | None = None,
+                     connectivity_key: str = "spatial_connectivities", layer=None,
+                     transformation: bool = True, two_tailed: bool = False,
+                     corr_method: str | None = "fdr_bh", attr: str = "X",
+                     use_raw: bool = False, seed: int = 0, copy: bool = False):
+    """Moran's I / Geary's C per gene (``sq.gr.spatial_autocorr``).
+
+    Writes ``uns['moranI']`` / ``uns['gearyC']`` with squidpy's full column set: the statistic,
+    the normality-assumption ``pval_norm``/``var_norm``, and — only when ``n_perms`` is given —
+    ``pval_z_sim``, ``pval_sim`` and ``var_sim`` from the permutation null, plus a
+    ``*_{corr_method}`` column per p-value.
+
+    ``n_perms`` defaults to ``None`` (squidpy's default: analytic p-values only). Through 0.1.2
+    it defaulted to 100 and the frame held only the statistic and ``pval_sim`` — and that
+    ``pval_sim`` was one-sided toward clustering, so a gene with significant *negative*
+    autocorrelation scored p ~ 1 where squidpy gives p ~ 0.001. It is now squidpy's folded
+    two-tailed count.
+    """
+    import pandas as pd
+    if mode not in ("moran", "geary"):
+        # Unvalidated, this was a silent wrong answer rather than an error: anything that is
+        # not exactly "moran" computed Geary's C, scored it against MORAN's analytic null, and
+        # wrote it to uns['gearyC'] -- so mode="Moran" gave pval_norm = 0.0 for every gene.
+        raise ValueError(f"mode must be 'moran' or 'geary', got {mode!r}")
+    Xg, index = _autocorr_values(adata, attr, genes, layer, use_raw)
+
+    g = adata.obsp[connectivity_key]
+    g = _gr.row_normalize(g) if transformation else g.astype(np.float64)
+
+    out = _gr.spatial_autocorr(Xg, g, mode=mode, n_perms=n_perms, random_state=seed)
+    score = out[mode]
     stat = "I" if mode == "moran" else "C"
-    df = pd.DataFrame({stat: out[mode], "pval_sim": out["pval"]}, index=genes).sort_values(stat, ascending=False)
+
+    p_norm, var_norm = _gr.analytic_pval(score, g, mode=mode, two_tailed=two_tailed)
+    cols = {stat: score, "pval_norm": p_norm, "var_norm": np.full(score.shape, var_norm)}
+    if out["sims"] is not None:
+        p_sim, p_z_sim, var_sim = _gr.permutation_pvals(score, out["sims"])
+        cols.update(pval_z_sim=p_z_sim, pval_sim=p_sim, var_sim=var_sim)
+
+    df = pd.DataFrame(cols, index=index)
+    if corr_method is not None:
+        for pv in [c for c in df.columns if "pval" in c]:
+            df[f"{pv}_{corr_method}"] = _gr.multiple_testing(df[pv].to_numpy(), corr_method)
+    df.sort_values(by=stat, ascending=(mode == "geary"), inplace=True)
+
+    if copy:
+        return df                       # squidpy returns the frame, not the object
     adata.uns["moranI" if mode == "moran" else "gearyC"] = df
-    return adata if copy else None
+    return None
 
 
-def co_occurrence(adata, cluster_key, interval: int = 50, copy: bool = False):
-    """Cluster co-occurrence vs distance (``sq.gr.co_occurrence``); writes ``uns[f'{cluster_key}_co_occurrence']``."""
-    adata = adata.copy() if copy else adata
-    res = _gr.co_occurrence(np.asarray(adata.obsm["spatial"], dtype=np.float32),
-                            adata.obs[cluster_key].to_numpy(), n_intervals=interval)
-    adata.uns[f"{cluster_key}_co_occurrence"] = {"occ": res["occ"], "interval": res["interval"]}
-    return adata if copy else None
+def _require_categorical(adata, key):
+    import pandas as pd
+    if key not in adata.obs:
+        raise KeyError(f"no adata.obs[{key!r}]")
+    if not isinstance(adata.obs[key].dtype, pd.CategoricalDtype):
+        raise TypeError(f"expected adata.obs[{key!r}] to be categorical, got {adata.obs[key].dtype}")
+
+
+def co_occurrence(adata, cluster_key, interval=50, spatial_key: str = "spatial",
+                  copy: bool = False):
+    """Cluster co-occurrence vs distance (``sq.gr.co_occurrence``); writes ``uns[f'{cluster_key}_co_occurrence']``.
+
+    ``interval`` is either the *number of distance thresholds* or an explicit ascending array
+    of them, as in squidpy — so ``occ`` has ``len(interval) - 1`` entries along its last axis.
+    """
+    _require_categorical(adata, cluster_key)
+    kw = ({"interval": np.asarray(interval, dtype=np.float64)}
+          if np.ndim(interval) else {"n_intervals": int(interval)})
+    res = _gr.co_occurrence(np.asarray(adata.obsm[spatial_key], dtype=np.float32),
+                            adata.obs[cluster_key].to_numpy(), **kw)
+    out = {"occ": res["occ"], "interval": res["interval"]}
+    if copy:
+        return out["occ"], out["interval"]      # squidpy returns the tuple, not the object
+    adata.uns[f"{cluster_key}_co_occurrence"] = out
+    return None
 
 
 def ligrec(adata, cluster_key, interactions, n_perms: int = 100, seed: int = 0,
@@ -422,13 +536,27 @@ def ligrec(adata, cluster_key, interactions, n_perms: int = 100, seed: int = 0,
 
     ``interactions`` is a list of ``(ligand, receptor)`` gene-symbol pairs.
     """
-    adata = adata.copy() if copy else adata
+    import pandas as pd
+    _require_categorical(adata, cluster_key)
     res = _gr.ligrec(adata.X, adata.obs[cluster_key].to_numpy(), list(interactions),
                      adata.var_names.to_numpy(), n_perms=n_perms, random_state=seed)
-    adata.uns[key_added or f"{cluster_key}_ligrec"] = {
-        "means": res["means"], "pvalues": res["pvalues"],
-        "categories": res["categories"], "interactions": res["lr_pairs"]}
-    return adata if copy else None
+
+    # squidpy's payload shape: a dict of DataFrames indexed by (source, target) with a
+    # (cluster_1, cluster_2) column MultiIndex, plus an empty `metadata` frame. Returning bare
+    # (n_pairs, K, K) ndarrays instead is what stops sq.pl.ligrec from reading our output.
+    rows = pd.MultiIndex.from_tuples([tuple(p) for p in res["lr_pairs"]],
+                                     names=["source", "target"])
+    cats = [str(c) for c in res["categories"]]
+    cols = pd.MultiIndex.from_tuples([(a, b) for a in cats for b in cats],
+                                     names=["cluster_1", "cluster_2"])
+    flat = lambda M: np.asarray(M).reshape(len(rows), -1)      # noqa: E731
+    out = {"means": pd.DataFrame(flat(res["means"]), index=rows, columns=cols),
+           "pvalues": pd.DataFrame(flat(res["pvalues"]), index=rows, columns=cols),
+           "metadata": pd.DataFrame(index=rows)}
+    if copy:
+        return out                          # squidpy returns the dict, not the object
+    adata.uns[key_added or f"{cluster_key}_ligrec"] = out
+    return None
 
 
 def calculate_niche(adata, cluster_key, n_niches: int = 10,

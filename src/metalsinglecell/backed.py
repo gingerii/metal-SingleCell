@@ -43,7 +43,8 @@ def _open_x_dataset(source):
         return source.X, tuple(source.X.shape)
 
     # Otherwise treat as a .zarr store path (or an open zarr group).
-    import zarr
+    from .pp import _require
+    zarr = _require("zarr", "backed")
 
     grp = source if hasattr(source, "attrs") else zarr.open(str(source), mode="r")
     xgrp = grp["X"] if "X" in getattr(grp, "keys", lambda: [])() else grp
@@ -271,7 +272,8 @@ def write_transformed_zarr(reader, transform, out_path, obs=None, var=None,
     Round-trips the first block before returning. Returns ``out_path``.
     """
     import pandas as pd
-    import zarr
+    from .pp import _require
+    zarr = _require("zarr", "backed")
     from anndata.io import sparse_dataset, write_elem
 
     bad = [s[0] for s in transform.stages if s[0] in _DENSE_STAGES]

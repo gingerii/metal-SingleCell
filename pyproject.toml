@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "metalsinglecell"
-version = "0.1.2"
+version = "0.1.3"
 description = "GPU-accelerated single-cell analysis on Apple Silicon (Metal/MLX) — a drop-in for rapids-singlecell."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,10 +21,20 @@ classifiers = [
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
+    "pandas>=2.0",
     "anndata>=0.10",
+    # Reached on DEFAULT code paths, so they are dependencies rather than extras:
+    #   igraph        -- tl.leiden / tl.louvain default backend, tl.draw_graph layouts
+    #   scikit-learn  -- rank_genes_groups(method="logreg"), the "cosine" graph transform,
+    #                    and the t-SNE CPU fallback above the exact-solver crossover
+    # These were previously only in the `oracle` extra, which made a default clustering call
+    # fail on a clean install.
+    "igraph>=0.10",
+    "scikit-learn>=1.3",
     # The Metal backend. Marker-gated to Apple Silicon so the package still installs (and stays
     # importable via lazy imports) on Linux/Intel, where the GPU paths are unavailable anyway.
     "mlx>=0.20; platform_system == 'Darwin' and platform_machine == 'arm64'",
+    "umap-learn>=0.5",
 ]
 
 [project.urls]
@@ -36,8 +46,13 @@ Issues = "https://github.com/gingerii/metal-SingleCell/issues"
 # scanpy/squidpy (CPU oracle) stay optional. `metal` is retained as an alias extra for anyone
 # pinning the backend explicitly, though mlx is now a marker-gated core dep on Apple Silicon.
 [project.optional-dependencies]
-oracle = ["scanpy", "squidpy", "leidenalg", "igraph", "umap-learn", "scikit-learn"]
+oracle = ["scanpy", "squidpy", "leidenalg", "scikit-image", "statsmodels"]
 metal = ["mlx>=0.20"]
+# Out-of-core: the backed/streaming path and pp.materialize read and write zarr stores.
+backed = ["zarr>=2.16"]
+# highly_variable_genes(flavor="seurat_v3") fits a lowess curve the way scanpy does.
+hvg = ["scikit-misc>=0.3"]
+all = ["metalsinglecell[backed,hvg]"]
 dev = ["pytest", "jupyter", "matplotlib"]
 
 [tool.setuptools.packages.find]

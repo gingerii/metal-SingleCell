@@ -142,7 +142,12 @@ squidpy = [
  "between slides."),
 ("code", "msc.gr.spatial_neighbors_knn(adata, n_neighs=6)\n"
  "adata.obsp['spatial_connectivities'].shape"),
-("md", "## Moran's I — global spatial autocorrelation\nWhich channels vary smoothly across the tissue?"),
+("md", "## Moran's I — global spatial autocorrelation\nWhich channels vary smoothly across the "
+ "tissue?\n\nThe frame carries squidpy's full column set: the statistic, the normality-assumption "
+ "`pval_norm`/`var_norm`, and — because we pass `n_perms` here — the permutation statistics "
+ "`pval_z_sim`, `pval_sim` and `var_sim`, each with a Benjamini–Hochberg column beside it. "
+ "`n_perms` defaults to `None`, in which case only the analytic p-values are computed. Note "
+ "`pval_sim` is two-tailed, so it flags dispersed channels as well as clustered ones."),
 ("code", "msc.gr.spatial_autocorr(adata, mode='moran', genes=adata.var_names.tolist(), n_perms=100)\n"
  "adata.uns['moranI'].head(8)"),
 ("md", "## Geary's C — a complementary autocorrelation statistic"),

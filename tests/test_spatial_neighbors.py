@@ -140,6 +140,81 @@ def test_unknown_transform_raises():
         msc_gr.spatial_neighbors_knn(a, transform="banana")
 
 
+# --------------------------------------------------------------------------- percentile / transform
+
+
+def cloud(n=400, seed=0):
+    """Two blobs — irregular degrees, and unlike a lattice it has no exact ties."""
+    import anndata as ad
+    rng = np.random.default_rng(seed)
+    xy = np.r_[rng.normal([0, 0], 60, (n // 2, 2)), rng.normal([300, 200], 90, (n - n // 2, 2))]
+    a = ad.AnnData(np.zeros((n, 2), dtype=np.float32))
+    a.obsm["spatial"] = xy
+    return a
+
+
+@pytest.mark.metal
+@pytest.mark.parametrize("builder,kw", [
+    (msc_gr.spatial_neighbors_knn, {"n_neighs": 6}),
+    (msc_gr.spatial_neighbors_radius, {"radius": 150.0}),
+    (msc_gr.spatial_neighbors_delaunay, {}),
+])
+def test_percentile_keeps_every_distance_on_its_own_edge(builder, kw):
+    """Regression, shipped in 0.1.2 and radius-only: the connectivity and distance matrices
+    were built from one shared `cols` buffer, and the two eliminate_zeros() calls compacted it
+    in place, so each scrambled the other's column indices. Only radius tripped it — knn's
+    int64 indices forced scipy to copy, and delaunay builds through COO."""
+    a = cloud()
+    builder(a, percentile=80, **kw)
+    xy = np.asarray(a.obsm["spatial"], dtype=np.float64)
+    D = a.obsp["spatial_distances"].tocsr()
+    rows = np.repeat(np.arange(D.shape[0]), np.diff(D.indptr))
+    true = np.linalg.norm(xy[rows] - xy[D.indices], axis=1)
+    assert D.nnz > 0
+    assert np.allclose(true, D.data, atol=1e-6), f"{np.count_nonzero(true != D.data)} misplaced"
+    assert (a.obsp["spatial_connectivities"].diagonal() != 0).sum() == 0
+
+    A = a.obsp["spatial_connectivities"]
+    if builder is not msc_gr.spatial_neighbors_knn:            # knn is directed by design
+        assert (abs(A - A.T) > 1e-9).nnz == 0
+
+
+@pytest.mark.metal
+def test_spectral_transform_normalises_by_column_degree():
+    """squidpy sums the degree over axis=0. On the directed k-NN graph — the default builder —
+    row and column degree differ, so the axis is not cosmetic."""
+    a = cloud(300)
+    msc_gr.spatial_neighbors_knn(a, n_neighs=6, transform="spectral")
+    O = a.obsp["spatial_connectivities"].toarray()
+
+    raw = cloud(300)
+    msc_gr.spatial_neighbors_knn(raw, n_neighs=6)
+    Adj = raw.obsp["spatial_connectivities"].toarray()
+
+    def normalise(axis):
+        d = Adj.sum(axis=axis)
+        inv = np.divide(1.0, np.sqrt(d), out=np.zeros_like(d), where=d > 0)
+        return inv[:, None] * Adj * inv[None, :]
+
+    assert np.allclose(O, normalise(0), atol=1e-6)
+    assert not np.allclose(O, normalise(1), atol=1e-6)
+    assert np.isfinite(O).all()                                # squidpy emits inf here; we do not
+
+
+@needs_squidpy
+@pytest.mark.metal
+def test_spectral_matches_squidpy_where_squidpy_is_finite():
+    import squidpy as sq
+    o, t = cloud(300), cloud(300)
+    msc_gr.spatial_neighbors_knn(o, n_neighs=6, transform="spectral")
+    sq.gr.spatial_neighbors_knn(t, n_neighs=6, transform="spectral")
+    O = o.obsp["spatial_connectivities"].toarray()
+    T = t.obsp["spatial_connectivities"].toarray()
+    finite = np.isfinite(T)
+    assert finite.sum() > 0.9 * T.size
+    assert np.allclose(O[finite], T[finite], atol=1e-6)
+
+
 # --------------------------------------------------------------------------- multi-section
 
 def two_sections(interleave=False, seed=0):

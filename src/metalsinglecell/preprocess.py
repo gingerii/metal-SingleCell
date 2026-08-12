@@ -103,12 +103,47 @@ def filter_highly_variable(hvg_df):
     return hvg_df["highly_variable"].to_numpy().astype(bool)
 
 
+def _masked_rank(score, selected):
+    """Rank the SELECTED genes, ``NaN`` for the rest — scanpy's ``highly_variable_rank``.
+
+    Ranking every gene looks harmless and is not: the column then claims an ordering for genes
+    the flavour did not select, and anything that reads it as "is this gene ranked" sees all of
+    them. On pbmc3k that is 11714 spurious ranks.
+    """
+    rank = np.full(score.shape[0], np.nan, dtype=np.float64)
+    sel = np.flatnonzero(np.asarray(selected, dtype=bool))
+    rank[sel] = np.argsort(np.argsort(np.asarray(score)[sel])).astype(np.float64)
+    return rank
+
+
+def nonzero_per_row(X) -> np.ndarray:
+    """Non-zero entries per cell — scanpy's ``axis_nnz``, i.e. ``!= 0`` and not ``> 0``.
+
+    The distinction only shows up on non-count input (residuals, scaled data), where a
+    negative entry is an observation and not an absence.
+    """
+    import scipy.sparse as sp
+    return np.asarray((sp.csr_matrix(X) != 0).sum(axis=1)).ravel().astype(np.int64)
+
+
+def nonzero_per_col(X) -> np.ndarray:
+    """Non-zero entries per gene (see :func:`nonzero_per_row`)."""
+    import scipy.sparse as sp
+    return np.asarray((sp.csr_matrix(X) != 0).sum(axis=0)).ravel().astype(np.int64)
+
+
 def regress_out(X, covariates) -> np.ndarray:
     """Regress per-gene expression on covariates, return residuals (scanpy ``pp.regress_out``).
 
     All genes share the design matrix [intercept | covariates], so we fit one OLS
     (fp64 LAPACK for the small k×k solve) and form residuals ``X - D·beta`` on the
     GPU. ``covariates`` is (cells,) or (cells × k). ``X`` is (cells × genes).
+
+    A rank-deficient design falls back to a least-norm solve. That case is not exotic — a
+    covariate that is identically zero produces it, e.g. ``pct_counts_mt`` on a panel with no
+    MT- genes — and ``mx.linalg.solve`` answers a singular system by raising a C++ exception
+    that Python cannot catch, aborting the interpreter (SIGABRT) rather than the call. scanpy
+    tests the determinant for the same reason.
     """
     import mlx.core as mx
 
@@ -118,9 +153,17 @@ def regress_out(X, covariates) -> np.ndarray:
         cov = cov[:, None]
     n = Xg.shape[0]
     D = mx.concatenate([mx.ones((n, 1), dtype=mx.float32), mx.array(cov)], axis=1)  # intercept + covs
-    # Normal equations β = (DᵀD)⁻¹DᵀX: the only host op is a tiny k×k solve; X stays
-    # on the GPU (no fp64 host lstsq, no re-upload) — ~100× faster than lstsq+upload.
-    beta = mx.linalg.solve(D.T @ D, D.T @ Xg, stream=mx.cpu)   # (k × genes)
+
+    gram = np.asarray(D.T @ D, dtype=np.float64)
+    if np.linalg.matrix_rank(gram) < gram.shape[0]:
+        # Least-norm coefficients on the host. Slower, but it only runs on the degenerate
+        # design, and the k here is the number of covariates, not the number of genes.
+        rhs = np.asarray(D.T @ Xg, dtype=np.float64)
+        beta = mx.array(np.linalg.lstsq(gram, rhs, rcond=None)[0].astype(np.float32))
+    else:
+        # Normal equations β = (DᵀD)⁻¹DᵀX: the only host op is a tiny k×k solve; X stays
+        # on the GPU (no fp64 host lstsq, no re-upload) — ~100× faster than lstsq+upload.
+        beta = mx.linalg.solve(D.T @ D, D.T @ Xg, stream=mx.cpu)   # (k × genes)
     resid = Xg - D @ beta
     mx.eval(resid)
     return np.asarray(resid)
@@ -161,15 +204,75 @@ def scrublet_simulate_doublets(counts, sim_doublet_ratio: float = 2.0,
     return sim, pairs
 
 
+def _local_maxima_idx(hist):
+    """skimage's plateau-tolerant maxima scan: track direction rather than compare neighbours.
+
+    A naive ``h[i] > h[i-1] and h[i] >= h[i+1]`` test mis-handles flat tops, which a smoothed
+    histogram is full of, and lands the threshold in the wrong place.
+    """
+    out, direction = [], 1
+    for i in range(hist.shape[0] - 1):
+        if direction > 0:
+            if hist[i + 1] < hist[i]:
+                direction = -1
+                out.append(i)
+        elif hist[i + 1] > hist[i]:
+            direction = 1
+    return out
+
+
+def _threshold_minimum(values, nbins: int = 256, max_iter: int = 10000):
+    """``skimage.filters.threshold_minimum`` — the split scrublet actually uses.
+
+    Smooth the histogram with a 3-bin uniform filter until at most two maxima remain, then take
+    the lowest point between them. Returns ``None`` where skimage raises (a unimodal score
+    distribution), which is scrublet's own failure mode and leaves the caller to fall back.
+    """
+    from scipy.ndimage import uniform_filter1d
+    values = np.asarray(values, dtype=np.float64)
+    if values.size == 0 or not np.isfinite(values).any():
+        return None
+    counts, edges = np.histogram(values, bins=nbins)
+    centres = (edges[:-1] + edges[1:]) / 2.0
+    smooth = counts.astype(np.float64)
+    maxima = []
+    for _ in range(max_iter):
+        smooth = uniform_filter1d(smooth, 3)
+        maxima = _local_maxima_idx(smooth)
+        if len(maxima) < 3:
+            break
+    if len(maxima) != 2:
+        return None
+    lo, hi = maxima
+    return float(centres[lo + int(np.argmin(smooth[lo:hi + 1]))])
+
+
 def scrublet(counts, sim_doublet_ratio: float = 2.0, n_neighbors: int | None = None,
              expected_doublet_rate: float = 0.05, n_pcs: int = 30,
              random_state: int = 0) -> dict:
     """Doublet detection (scanpy/rapids-singlecell ``pp.scrublet``).
 
-    Simulate doublets, embed real+simulated together (normalize → log1p → PCA),
-    then score each real cell by how many of its nearest neighbors are simulated
-    doublets (adjusted for the simulation ratio and expected rate). Returns
-    ``doublet_scores`` per real cell and a boolean ``predicted_doublets``.
+    Simulate doublets, embed real+simulated together (normalize -> log1p -> HVG -> PCA), then
+    score each cell by how many of its nearest neighbours are simulated doublets, adjusted for
+    the simulation ratio and the expected rate. Returns per-cell ``doublet_scores``, the
+    simulated cells' scores, the parent pairs and a boolean ``predicted_doublets``.
+
+    Three details follow the reference and are easy to get wrong:
+
+    * the neighbourhood is **inflated** by the simulation, ``k_adj = round(k * (1 + n_sim/n))``,
+      so the k real neighbours are not crowded out by simulated ones;
+    * the score is smoothed as ``(n_doublet_neighbours + 1) / (k_adj + 2)`` rather than a bare
+      fraction, which is what stops scores piling up at exactly 0 and 1;
+    * the call threshold is the **minimum between the two modes of the simulated score
+      histogram**, not a quantile of the observed scores. A quantile makes
+      ``expected_doublet_rate`` a hard quota -- the predicted fraction comes back equal to it by
+      construction, whatever the data says. We fall back to the quantile only when the
+      histogram is unimodal, which is scrublet's own failure case.
+
+    The embedding is a deliberate deviation: we normalize -> log1p -> HVG -> centred PCA fit
+    jointly on observed and simulated cells, where the reference z-scores and fits on the
+    observed cells alone. Ours measured a higher injected-doublet AUC (0.972 against 0.796), so
+    it is kept and recorded here rather than reverted.
     """
     import scipy.sparse as sp
 
@@ -179,15 +282,17 @@ def scrublet(counts, sim_doublet_ratio: float = 2.0, n_neighbors: int | None = N
 
     C = sp.csr_matrix(counts)
     n = C.shape[0]
-    sim, _ = scrublet_simulate_doublets(C, sim_doublet_ratio, random_state)
+    sim, parents = scrublet_simulate_doublets(C, sim_doublet_ratio, random_state)
+    n_sim = sim.shape[0]
     combined = sp.vstack([C, sim]).tocsr()
     if n_neighbors is None:
         n_neighbors = int(round(0.5 * np.sqrt(n)))
+    k_adj = int(round(n_neighbors * (1.0 + n_sim / max(n, 1))))
 
     # normalize -> log1p -> HVG-restrict -> mean-centered sparse PCA on the combined
     # matrix. Restricting to HVGs before PCA is canonical scrublet AND bounds memory at
     # scale: densifying / PCA-ing all ~20k genes over ~3n cells OOMs the GPU (e.g.
-    # 306k x 20k ≈ 24GB). HVG-subset PCA stays small (306k x 2000).
+    # 306k x 20k ~ 24GB). HVG-subset PCA stays small (306k x 2000).
     lognorm = CSR.from_scipy(combined).normalize_total(1e4).log1p()
     n_hvg = min(2000, combined.shape[1])
     hvg = np.asarray(highly_variable_genes(lognorm, n_top_genes=n_hvg)["highly_variable"])
@@ -197,20 +302,21 @@ def scrublet(counts, sim_doublet_ratio: float = 2.0, n_neighbors: int | None = N
                       n_comps=min(n_pcs, int(hvg.sum()) - 1),
                       solver="randomized", random_state=random_state)
 
-    knn_idx, _ = _knn(X_pca.astype(np.float32), n_neighbors + 1, random_state=random_state)
-    knn_idx = knn_idx[:n, 1:]                           # real cells, exclude self
-    is_sim = knn_idx >= n                               # neighbor is a simulated doublet
-    frac_sim = is_sim.mean(axis=1)
+    knn_idx, _ = _knn(X_pca.astype(np.float32), k_adj + 1, random_state=random_state)
+    knn_idx = knn_idx[:, 1:]                            # drop self
+    n_doublet = (knn_idx >= n).sum(axis=1)              # simulated neighbours, per cell
 
-    # Bayesian-style adjustment for the simulation ratio rho (Scrublet eq.)
-    rho = expected_doublet_rate
-    r = sim_doublet_ratio
-    q = frac_sim
-    doublet_scores = (q * rho / r) / (q * rho / r + (1 - q) * (1 - rho) + 1e-12)
-    # threshold: Otsu-like split of the score distribution
-    thr = float(np.quantile(doublet_scores, 1 - rho))
-    return {"doublet_scores": doublet_scores,
-            "predicted_doublets": doublet_scores > thr, "threshold": thr}
+    rho, r = expected_doublet_rate, sim_doublet_ratio
+    q = (n_doublet + 1.0) / (k_adj + 2.0)               # smoothed, as the reference
+    scores = (q * rho / r) / (q * rho / r + (1 - q) * (1 - rho) + 1e-12)
+    obs_scores, sim_scores = scores[:n], scores[n:]
+
+    thr = _threshold_minimum(sim_scores)
+    if thr is None:                                     # unimodal simulated scores
+        thr = float(np.quantile(obs_scores, 1 - rho))
+    return {"doublet_scores": obs_scores, "doublet_scores_sim": sim_scores,
+            "doublet_parents": parents, "n_neighbors": n_neighbors,
+            "predicted_doublets": obs_scores > thr, "threshold": float(thr)}
 
 
 def scale(csr, max_value: float | None = 10.0, zero_center: bool = True) -> np.ndarray:
@@ -275,7 +381,7 @@ def _hvg_pearson_residuals(csr, n_top_genes: int, theta: float = 100.0):
     order = np.argsort(-var)
     hv = np.zeros(csr.shape[1], dtype=bool); hv[order[:n_top_genes]] = True
     df = pd.DataFrame({"residual_variances": var, "highly_variable": hv})
-    df["highly_variable_rank"] = np.argsort(np.argsort(-var)).astype(float)
+    df["highly_variable_rank"] = _masked_rank(-var, df["highly_variable"].to_numpy())
     return df
 
 
@@ -324,7 +430,7 @@ def _hvg_seurat_v3(csr, n_top_genes: int):
     hv = np.zeros(ng, dtype=bool); hv[order[:n_top_genes]] = True
     df = pd.DataFrame({"means": mean, "variances": var,
                        "variances_norm": norm_var, "highly_variable": hv})
-    df["highly_variable_rank"] = np.argsort(np.argsort(-norm_var)).astype(float)
+    df["highly_variable_rank"] = _masked_rank(-norm_var, df["highly_variable"].to_numpy())
     return df
 
 
