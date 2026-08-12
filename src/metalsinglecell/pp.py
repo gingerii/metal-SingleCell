@@ -19,6 +19,17 @@ from .sparse import CSR
 _EMPTY = type("_Empty", (), {"__repr__": lambda self: "_empty", "__bool__": lambda self: False})()
 
 
+def _require(module, extra):
+    """Import an optional backend, or say which extra provides it."""
+    import importlib
+    try:
+        return importlib.import_module(module)
+    except ImportError as exc:                          # pragma: no cover - environment-specific
+        raise ImportError(
+            f"{module} is required for this path; install it with "
+            f"`pip install 'metalsinglecell[{extra}]'`.") from exc
+
+
 def _csr(adata, layer=None):
     """Our GPU CSR — for funcs that take a CSR (normalize/log1p/hvg/scale)."""
     import scipy.sparse as sp
@@ -139,8 +150,9 @@ def materialize(adata, path, block_rows: int | None = None):
     belong to the deferred consumers). Raises otherwise.
     """
     import anndata
-    import zarr
     from anndata.io import sparse_dataset
+
+    zarr = _require("zarr", "backed")
 
     from .backed import open_backed, write_transformed_zarr
 
@@ -185,8 +197,13 @@ def _like_input(out, original):
 
 
 def normalize_total(adata, target_sum: float | None = None, layer=None,
-                    exclude_highly_expressed: bool = False, copy: bool = False):
-    """Normalize counts per cell (``sc.pp.normalize_total``). ``target_sum=None`` → median."""
+                    exclude_highly_expressed: bool = False, key_added: str | None = None,
+                    inplace: bool = True, copy: bool = False):
+    """Normalize counts per cell (``sc.pp.normalize_total``). ``target_sum=None`` → median.
+
+    ``key_added`` stores the per-cell size factors used, in ``obs``. ``inplace=False`` returns
+    ``{"X": ..., "norm_factor": ...}`` instead of writing, as scanpy does.
+    """
     if exclude_highly_expressed:
         raise NotImplementedError("normalize_total(exclude_highly_expressed=True) needs a "
                                   "second global pass; not supported (scoped out).")
@@ -206,7 +223,12 @@ def normalize_total(adata, target_sum: float | None = None, layer=None,
     X = sp.csr_matrix(adata.layers[layer] if layer is not None else adata.X)
     ts = float(target_sum) if target_sum is not None else float(np.median(np.asarray(X.sum(1)).ravel()))
     src = adata.layers[layer] if layer is not None else adata.X
+    counts = np.asarray(X.sum(1)).ravel()
     out = _like_input(CSR.from_scipy(X).normalize_total(ts).to_scipy(), src)
+    if not inplace:
+        return {"X": out, "norm_factor": counts / ts}
+    if key_added is not None:
+        adata.obs[key_added] = counts / ts
     if layer is not None:
         adata.layers[layer] = out
     else:
@@ -234,7 +256,8 @@ def log1p(adata, layer=None, copy: bool = False):
 
 def highly_variable_genes(adata, n_top_genes=None, n_bins: int = 20, flavor: str = "seurat",
                           min_mean: float = 0.0125, max_mean: float = 3.0, min_disp: float = 0.5,
-                          max_disp: float = np.inf, layer=None, copy: bool = False):
+                          max_disp: float = np.inf, layer=None, inplace: bool = True,
+                          copy: bool = False):
     """Highly variable genes (``sc.pp.highly_variable_genes``); writes ``adata.var`` columns.
 
     ``n_top_genes=None`` (scanpy's default) selects seurat/cell_ranger genes by the
@@ -258,6 +281,8 @@ def highly_variable_genes(adata, n_top_genes=None, n_bins: int = 20, flavor: str
         df = _pp.highly_variable_genes(_csr(adata, layer), n_top_genes=n_top_genes, n_bins=n_bins,
                                        flavor=flavor, min_mean=min_mean, max_mean=max_mean,
                                        min_disp=min_disp, max_disp=max_disp)
+    if not inplace:
+        return df                                   # scanpy returns the frame
     for col in df.columns:
         adata.var[col] = df[col].to_numpy()
     adata.uns["hvg"] = {"flavor": flavor}
@@ -267,8 +292,11 @@ def highly_variable_genes(adata, n_top_genes=None, n_bins: int = 20, flavor: str
 
 
 def filter_cells(adata, min_counts=None, max_counts=None, min_genes=None,
-                 max_genes=None, copy: bool = False):
-    """Filter cells (``sc.pp.filter_cells``); subsets ``adata`` in place."""
+                 max_genes=None, inplace: bool = True, copy: bool = False):
+    """Filter cells (``sc.pp.filter_cells``); subsets ``adata`` in place.
+
+    ``inplace=False`` returns ``(mask, counts)`` and leaves the object alone, as scanpy does.
+    """
     _reject_backed(adata, "filter_cells")
     adata = adata.copy() if copy else adata
     X = _sci(adata)
@@ -278,15 +306,22 @@ def filter_cells(adata, min_counts=None, max_counts=None, min_genes=None,
     # subset: obs['n_genes'] for the gene thresholds, obs['n_counts'] for the count ones.
     if min_genes is not None or max_genes is not None:
         adata.obs["n_genes"] = _pp.nonzero_per_row(X)
+    per_cell = (_pp.nonzero_per_row(X) if (min_genes is not None or max_genes is not None)
+                else np.asarray(X.sum(axis=1)).ravel())
     if min_counts is not None or max_counts is not None:
         adata.obs["n_counts"] = np.asarray(X.sum(axis=1)).ravel()
+    if not inplace:
+        return keep, per_cell
     adata._inplace_subset_obs(keep)
     return adata if copy else None
 
 
 def filter_genes(adata, min_counts=None, max_counts=None, min_cells=None,
-                 max_cells=None, copy: bool = False):
-    """Filter genes (``sc.pp.filter_genes``); subsets ``adata`` in place."""
+                 max_cells=None, inplace: bool = True, copy: bool = False):
+    """Filter genes (``sc.pp.filter_genes``); subsets ``adata`` in place.
+
+    ``inplace=False`` returns ``(mask, counts)`` and leaves the object alone, as scanpy does.
+    """
     _reject_backed(adata, "filter_genes")
     adata = adata.copy() if copy else adata
     X = _sci(adata)
@@ -294,8 +329,12 @@ def filter_genes(adata, min_counts=None, max_counts=None, min_cells=None,
                             min_cells=min_cells, max_cells=max_cells)
     if min_cells is not None or max_cells is not None:
         adata.var["n_cells"] = _pp.nonzero_per_col(X)
+    per_gene = (_pp.nonzero_per_col(X) if (min_cells is not None or max_cells is not None)
+                else np.asarray(X.sum(axis=0)).ravel())
     if min_counts is not None or max_counts is not None:
         adata.var["n_counts"] = np.asarray(X.sum(axis=0)).ravel()
+    if not inplace:
+        return keep, per_gene
     adata._inplace_subset_var(keep)
     return adata if copy else None
 
@@ -359,7 +398,7 @@ def _design_matrix(adata, keys):
     return np.column_stack(cols)
 
 
-def regress_out(adata, keys, copy: bool = False):
+def regress_out(adata, keys, layer=None, copy: bool = False):
     """Regress out covariates in ``adata.obs[keys]`` (``sc.pp.regress_out``).
 
     Categorical covariates are expanded into group indicators, as scanpy does.
@@ -367,7 +406,12 @@ def regress_out(adata, keys, copy: bool = False):
     _reject_backed(adata, "regress_out")
     adata = adata.copy() if copy else adata
     keys = [keys] if isinstance(keys, str) else list(keys)
-    adata.X = _pp.regress_out(adata.X, _design_matrix(adata, keys))
+    src = adata.layers[layer] if layer is not None else adata.X
+    out = _pp.regress_out(src, _design_matrix(adata, keys))
+    if layer is not None:
+        adata.layers[layer] = out
+    else:
+        adata.X = out
     return adata if copy else None
 
 
