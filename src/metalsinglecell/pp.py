@@ -541,8 +541,40 @@ def _resolve_mask_var(adata, mask_var, use_highly_variable):
     return arr, arr
 
 
-def pca(adata, n_comps: int = 50, layer=None, use_highly_variable: bool | None = None,
-        zero_center: bool = True, svd_solver: str = "randomized", random_state: int = 0,
+def _explained_variance(x_pca, zero_center=True):
+    """scanpy's ``uns['pca']['variance']`` — the eigenvalues, not the ratio.
+
+    Equal to ``S**2 / (n - 1)``, which is exactly the column variance of the scores, so it can
+    be recovered without threading another return value out of every solver. Anything that
+    reconstructs loadings or draws an elbow on absolute variance reads this key.
+    """
+    return np.var(np.asarray(x_pca), axis=0, ddof=1 if zero_center else 0).astype(np.float64)
+
+
+def _resolve_svd_solver(svd_solver, adata, layer, zero_center, n_comps, n_sel):
+    """scanpy resolves ``svd_solver=None`` to ``arpack``, dense or sparse.
+
+    We defaulted to ``randomized``, which is a different answer rather than a slower one: on
+    pbmc3k the two agree to |corr| >= 0.99 only through PC15 and reach |corr| = 0.012 by PC50.
+    The exact solvers need a dense matrix, so a sparse zero-centred input still takes the
+    randomized path -- but with enough power iterations to converge (measured |corr| 0.998
+    against arpack at n_iter=15/n_oversamples=40, against 0.012 at the sklearn defaults).
+    """
+    import scipy.sparse as sp
+    explicit = svd_solver not in (None, "auto")
+    if not explicit:
+        X = adata.layers[layer] if layer is not None else adata.X
+        svd_solver = "randomized" if (sp.issparse(X) and zero_center) else "arpack"
+    # ARPACK needs k < min(n_obs, n_features); a narrow panel or a small HVG mask can ask for
+    # as many components as it has columns. The dense exact solver gives the same answer, and
+    # a matrix that small costs nothing to decompose outright.
+    if svd_solver == "arpack" and n_comps >= min(adata.n_obs, n_sel):
+        return "full"
+    return svd_solver
+
+
+def pca(adata, n_comps: int | None = None, layer=None, use_highly_variable: bool | None = None,
+        zero_center: bool = True, svd_solver: str | None = None, random_state: int = 0,
         copy: bool = False, *, mask_var=_EMPTY):
     """PCA (``sc.pp.pca``); writes ``obsm['X_pca']``, ``varm['PCs']``, ``uns['pca']``.
 
@@ -561,12 +593,20 @@ def pca(adata, n_comps: int = 50, layer=None, use_highly_variable: bool | None =
 
     from .decomposition import pca as _pca
     adata = _copy_or_reject(adata, copy, "pca")
-    if svd_solver in (None, "auto"):                 # scanpy's default/'auto' → our randomized
-        svd_solver = "randomized"
     mask_param, mask = _resolve_mask_var(adata, mask_var, use_highly_variable)
+    n_sel = int(mask.sum()) if mask is not None else adata.n_vars
+    if n_comps is None:
+        # scanpy: settings.N_PCS, or min_dim - 1 on a panel narrower than that. Hard-coding 50
+        # returned one component too many for any object with fewer than 51 features.
+        min_dim = min(adata.n_obs, n_sel)
+        n_comps = min_dim - 1 if min_dim <= _N_PCS_DEFAULT else _N_PCS_DEFAULT
+    svd_solver = _resolve_svd_solver(svd_solver, adata, layer, zero_center,
+                                     n_comps, n_sel)
     params = {"zero_center": bool(zero_center),
               "use_highly_variable": mask_param is not None,
               "mask_var": mask_param}
+    if layer is not None:
+        params["layer"] = layer
 
     reader = _backed_reader(adata, layer)
     if reader is not None:                       # out-of-core: fused streaming covariance-eigh
@@ -580,7 +620,8 @@ def pca(adata, n_comps: int = 50, layer=None, use_highly_variable: bool | None =
         pcs = np.zeros((adata.n_vars, np.asarray(comps).shape[0]), dtype=np.float32)
         pcs[mask if mask is not None else slice(None)] = np.asarray(comps).T
         adata.varm["PCs"] = pcs
-        adata.uns["pca"] = {"params": params, "variance_ratio": np.asarray(vr)}
+        adata.uns["pca"] = {"params": params, "variance_ratio": np.asarray(vr),
+                            "variance": _explained_variance(X_pca, zero_center)}
         return adata if copy else None
 
     X = adata.layers[layer] if layer is not None else adata.X
@@ -588,39 +629,90 @@ def pca(adata, n_comps: int = 50, layer=None, use_highly_variable: bool | None =
     Xsub = X[:, sel]
     inp = CSR.from_scipy(sp.csr_matrix(Xsub).astype(np.float32)) if sp.issparse(Xsub) and zero_center \
         else np.asarray(Xsub.todense() if sp.issparse(Xsub) else Xsub, dtype=np.float32)
+    # A sparse zero-centred input cannot take an exact solver, so give the randomized one
+    # enough power iterations to land on the same subspace instead of a nearby one.
+    extra = ({"n_iter": 15, "n_oversamples": 40}
+             if svd_solver == "randomized" and isinstance(inp, CSR) else {})
     X_pca, comps, vr = _pca(inp, n_comps=n_comps, solver=svd_solver, random_state=random_state,
-                            zero_center=zero_center)
+                            zero_center=zero_center, **extra)
     adata.obsm["X_pca"] = np.asarray(X_pca)
     pcs = np.zeros((adata.n_vars, np.asarray(comps).shape[0]), dtype=np.float32)
     pcs[sel] = np.asarray(comps).T
     adata.varm["PCs"] = pcs
-    adata.uns["pca"] = {"params": params, "variance_ratio": np.asarray(vr)}
+    adata.uns["pca"] = {"params": params, "variance_ratio": np.asarray(vr),
+                        "variance": _explained_variance(X_pca, zero_center)}
     return adata if copy else None
 
 
+_N_PCS_DEFAULT = 50            # scanpy's settings.N_PCS
+
+
+def _choose_representation(adata, use_rep, n_pcs, random_state):
+    """scanpy's ``_choose_representation``, including the PCA it computes for you.
+
+    The part that is easy to miss: with ``use_rep=None`` and no ``X_pca`` present, scanpy does
+    **not** fall back to raw ``.X`` unless the object is narrow — it runs a 50-component PCA
+    first. Falling back to ``.X`` builds the graph in gene space, which on 2000 HVGs gave a
+    neighbour-set overlap of 0.188 against scanpy, and on a sparse ``.X`` did not even fail
+    cleanly (``np.asarray(csr, dtype=...)`` raises about a ragged sequence).
+    """
+    if use_rep is None and n_pcs == 0:
+        return np.asarray(_dense(adata.X), dtype=np.float32), None
+    if use_rep is None:
+        if adata.n_vars > _N_PCS_DEFAULT:
+            if "X_pca" not in adata.obsm or adata.obsm["X_pca"].shape[1] < (
+                    n_pcs or _N_PCS_DEFAULT):
+                pca(adata, n_comps=n_pcs or _N_PCS_DEFAULT, random_state=random_state)
+            return np.asarray(adata.obsm["X_pca"], dtype=np.float32), "X_pca"
+        return np.asarray(_dense(adata.X), dtype=np.float32), None
+    if use_rep == "X":
+        return np.asarray(_dense(adata.X), dtype=np.float32), "X"
+    if use_rep not in adata.obsm:
+        raise ValueError(f"Did not find {use_rep} in .obsm.keys(). "
+                         f"You need to compute it first.")
+    return np.asarray(adata.obsm[use_rep], dtype=np.float32), use_rep
+
+
+def _dense(X):
+    import scipy.sparse as sp
+    return X.toarray() if sp.issparse(X) else np.asarray(X)
+
+
 def neighbors(adata, n_neighbors: int = 15, n_pcs: int | None = None, *, use_rep: str | None = None,
+              metric: str = "euclidean", key_added: str | None = None,
               random_state: int = 0, copy: bool = False):
     """kNN graph (``sc.pp.neighbors``); writes ``obsp['distances']``/``['connectivities']``, ``uns['neighbors']``.
 
     Signature mirrors scanpy: ``n_pcs`` is positional after ``n_neighbors`` and ``use_rep`` is
     keyword-only, so ``sc.pp.neighbors(adata, 15, 40)`` truncates the representation to 40 PCs
-    (previously that 40 bound ``use_rep`` and silently ran on raw ``.X``). ``use_rep=None``
-    resolves to ``X_pca`` when present, else ``.X``.
+    (previously that 40 bound ``use_rep`` and silently ran on raw ``.X``).
+
+    With ``use_rep=None`` the representation follows scanpy's rule: ``X_pca`` if present,
+    otherwise a freshly computed 50-component PCA when the object has more than 50 variables,
+    otherwise ``.X``. ``key_added`` redirects all three output slots, and the consumers in
+    ``msc.tl`` resolve it through ``neighbors_key=``.
     """
     from .neighbors import neighbors as _nb
+    if metric != "euclidean":
+        raise NotImplementedError(f"metric={metric!r} is not implemented (Euclidean only)")
     adata = adata.copy() if copy else adata
-    rep_key = use_rep if use_rep is not None else ("X_pca" if "X_pca" in adata.obsm else None)
-    rep = adata.obsm[rep_key] if (rep_key is not None and rep_key in adata.obsm) else adata.X
-    rep = np.asarray(rep, dtype=np.float32)
+    rep, rep_key = _choose_representation(adata, use_rep, n_pcs, random_state)
     if n_pcs is not None:                            # scanpy truncates the rep to the first n_pcs
         rep = rep[:, :n_pcs]
     dist, conn = _nb(rep, n_neighbors=n_neighbors, random_state=random_state)
-    adata.obsp["distances"] = dist
-    adata.obsp["connectivities"] = conn
-    adata.uns["neighbors"] = {"connectivities_key": "connectivities",
-                              "distances_key": "distances",
-                              "params": {"n_neighbors": n_neighbors, "method": "umap",
-                                         "use_rep": rep_key, "n_pcs": n_pcs}}
+
+    ck = "connectivities" if key_added is None else f"{key_added}_connectivities"
+    dk = "distances" if key_added is None else f"{key_added}_distances"
+    adata.obsp[dk] = dist
+    adata.obsp[ck] = conn
+    params = {"n_neighbors": n_neighbors, "method": "umap",
+              "random_state": random_state, "metric": metric}
+    if use_rep is not None:            # scanpy records only what the caller asked for
+        params["use_rep"] = use_rep
+    if n_pcs is not None:
+        params["n_pcs"] = n_pcs
+    adata.uns["neighbors" if key_added is None else key_added] = {
+        "connectivities_key": ck, "distances_key": dk, "params": params}
     return adata if copy else None
 
 
