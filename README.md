@@ -180,15 +180,22 @@ references run for minutes-to-hours or OOM).
 | co_occurrence | 13.0× | 18.8× | 17.0× | 16.6× | (82 s) | correlation 1.000 |
 | calculate_niche | 11.9× | 110× | 89× | **123×** | (0.14 s) | composition-matched |
 | ligrec | 15.3× | 5.6× | 4.6× | 7.0× | (0.65 s) | 10 pairs, `n_perms=100` |
-| spatial_neighbors ◆ | 1.5× | 3.9× | 2.1× | 3.2× | 1.1× | exact, Jaccard ≥0.997 ◆ |
+| spatial_neighbors_knn ◆ | 1.5× | 3.9× | 2.1× | 3.2× | 1.1× | exact, Jaccard ≥0.997 ◆ |
 
 All five win and hold with scale, and keep running at 253k where squidpy's permutation/pairwise references
 become impractical. `co_occurrence` also scales past the n² memory wall via a tiled device-atomic-histogram
 kernel.
 
-◆ **spatial_neighbors** was formerly the one loss (brute-force O(n²), OOM past ~120k); a uniform-grid
+◆ **spatial_neighbors_knn** was formerly the one loss (brute-force O(n²), OOM past ~120k); a uniform-grid
 spatial index (see *What was solved*) made it exact and O(n), clearing the wall (**2M cells in 1.27 s**).
 NNDescent is *not* applicable here — on 2-D coordinates its recall collapses to ~6%.
+
+**The four graph builders.** squidpy split `spatial_neighbors` into `spatial_neighbors_{knn,radius,grid,
+delaunay}` in 1.7 and removes the old name in 1.9; we mirror all four, and still accept the old one with a
+`FutureWarning`. Against squidpy at 500k points: **knn 2.0×, radius 13.9×, grid 1.3×**. `delaunay` is the
+exception — the triangulation itself runs on Qhull, the same library squidpy uses, so expect parity and no
+speedup there; a Metal triangulation is the next piece of work. All four take `library_key=` to build each
+section of a multi-slide object separately.
 
 Clustering crosses over with cell count: **Louvain wins from ~50k up (58.6× on the real 986k-neuron
 graph)**, and **Leiden — after an O(degree) SIMD-group kernel rewrite + vertex pruning — went from a
@@ -222,11 +229,13 @@ run in CI (a CPU lane + a self-hosted Metal-GPU lane).
 - **A fused co-occurrence kernel** — a tiled device-atomic histogram that matches squidpy exactly,
   runs **13–19× faster** across real Visium/Stereo-seq/Xenium/MERFISH data (measured), and scales past
   the n² memory wall to 250k+ cells where squidpy is impractical.
-- **A GPU uniform-grid spatial index for `spatial_neighbors`** — a cell-list kNN (custom Metal kernel,
+- **A GPU uniform-grid spatial index for the spatial graph builders** — a cell-list kNN (custom Metal kernel,
   one thread/query scanning its 3×3 / 3×3×3 cell block) that replaced the brute-force O(n²) path: exact
   (grid-completeness guarantee + fp32 fallback) and O(n), **beating squidpy's KD-tree at every scale**
   (1.1–3.9×) and doing **2M cells in 1.27 s** where brute OOM'd past ~120k. It also fixed a latent
-  fp16-ranking bug that corrupted neighbors on large-magnitude coordinates.
+  fp16-ranking bug that corrupted neighbors on large-magnitude coordinates. The same cell list now backs a
+  **two-pass count-then-fill radius kernel** (`spatial_neighbors_radius`, **13.9× at 500k**, exact vs
+  sklearn).
 - **GPU-native kNN, t-SNE, and Harmony** — the neighbor graph (>30k) now builds on a GPU **NN-descent**
   (vendored from [mlx-vis](https://github.com/hanxiao/mlx-vis)), retiring the CPU-pynndescent fallback
   (recall-matched at ~0.97, **4.7–6.6× faster** across 50k–1M, reproducible wall time); **t-SNE** runs
@@ -291,7 +300,7 @@ implementation (scanpy / squidpy / `backend="igraph"`) when:**
   launch-latency-bound and CPU harmonypy is sub-second there anyway. Mixing quality matches/beats
   harmonypy at every scale.
 
-(kNN, t-SNE, and `spatial_neighbors` were formerly CPU-favored and no longer are — see the tables and
+(kNN, t-SNE, and the spatial graph builders were formerly CPU-favored and no longer are — see the tables and
 *What was solved*.)
 
 Rule of thumb: the M3 GPU wins on **parallel-arithmetic, bandwidth-bound** work (and on clustering /

@@ -65,8 +65,20 @@ cocircular points are the common case, not a corner case. Getting that subtly wr
 produce a plausible-looking but invalid graph, which is the failure mode this project has
 already shipped twice.
 
+All four take `library_key=`: the name of a categorical `obs` column identifying the section
+each observation belongs to. The graph is then built per section and combined block-diagonally,
+so no edge crosses between slides -- sections of a multi-slide object share a coordinate frame
+only by accident. squidpy runs the whole tail (percentile prune, `set_diag`, transform) inside
+that per-library loop and so do we, which matters most for `_grid`: its 1.3x-median cutoff has
+to come from each section's own spacing. On a fixture pairing a 100-spaced and a 250-spaced
+section, a pooled median puts the threshold between the two and the fine section keeps every
+k-NN edge (mean degree 6.00 against a correct 3.80).
+
 `spatial_neighbors_from_builder` is **not implemented**: it takes a squidpy `GraphBuilder`
-instance, and squidpy is an optional (`oracle`) dependency here, not a runtime one.
+instance, and squidpy is an optional (`oracle`) dependency here, not a runtime one. The only
+other arguments the four builders lack are `elements_to_coordinate_systems` and `table_key`,
+which address a `SpatialData` object rather than an `AnnData`; `n_jobs` is a CPU-threading knob
+with no meaning on the GPU path.
 
 `pp.pca(mask_var=)` follows scanpy's three-state default exactly, which is easy to get wrong:
 
@@ -103,7 +115,7 @@ Where ours is a concrete value and the reference is `None` — `pp.pca(n_comps=5
 
 ## Arguments we do not implement
 
-129 in total. The ones most likely to be reached for:
+121 in total. The ones most likely to be reached for:
 
 | function | missing |
 |---|---|
@@ -114,7 +126,6 @@ Where ours is a concrete value and the reference is `None` — `pp.pca(n_comps=5
 | `pp.scale` | `mask_obs`, `obsm` |
 | `pp.log1p` | `base`, `obsm` |
 | `pp.scrublet` | most of the tuning surface (`batch_key`, `threshold`, `n_prin_comps`, …) |
-| `gr.spatial_neighbors` | `radius`, `delaunay`, `n_rings`, `percentile`, `set_diag`, `library_key` |
 | `gr.spatial_autocorr` | `transformation`, `two_tailed`, `corr_method`, `attr`, `use_raw` |
 | `gr.ligrec` | `complex_policy`, `threshold`, `corr_method`, `use_raw`, `gene_symbols` |
 | `gr.calculate_niche` | most of squidpy 1.8's expanded surface |
