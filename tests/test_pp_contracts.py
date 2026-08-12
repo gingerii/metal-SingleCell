@@ -171,6 +171,60 @@ def test_regress_out_accepts_string_categories():
     assert np.isfinite(a.X).all()
 
 
+# --------------------------------------------------------------------------- scrublet
+
+
+@pytest.mark.metal
+def test_scrublet_threshold_is_not_a_quota():
+    """The call threshold used to be a quantile of the OBSERVED scores at
+    1 - expected_doublet_rate, which makes the predicted fraction equal that rate by
+    construction. It now comes from the two modes of the SIMULATED score histogram."""
+    a = counts(n=800, g=400)
+    fracs = []
+    for edr in (0.05, 0.20):
+        b = a.copy()
+        msc_pp.scrublet(b, expected_doublet_rate=edr, random_state=0)
+        fracs.append(float(b.obs["predicted_doublet"].mean()))
+        assert abs(fracs[-1] - edr) > 1e-6, f"predicted fraction pinned to {edr}"
+    assert fracs[0] != fracs[1]
+
+
+@pytest.mark.metal
+def test_scrublet_records_what_the_plotter_needs():
+    """sc.pl.scrublet_score_distribution reads doublet_scores_sim."""
+    a = counts(n=400, g=200)
+    msc_pp.scrublet(a, random_state=0)
+    rec = a.uns["scrublet"]
+    assert set(rec) >= {"threshold", "doublet_scores_sim", "doublet_parents", "parameters"}
+    assert len(rec["doublet_scores_sim"]) == 2 * a.n_obs         # sim_doublet_ratio default
+    assert rec["doublet_parents"].shape == (2 * a.n_obs, 2)
+    assert rec["parameters"]["n_neighbors"] == round(0.5 * np.sqrt(a.n_obs))
+
+
+def test_threshold_minimum_matches_skimage():
+    """Our port of skimage.filters.threshold_minimum, pinned against it. CPU-only.
+
+    skimage is not a dependency of this package (scrublet reaches for it only here), so the
+    algorithm is ported: a 3-bin uniform smoothing loop plus a plateau-tolerant maxima scan.
+    Both details matter — a naive neighbour comparison for the maxima put the threshold 0.07
+    off on the bimodal case.
+    """
+    skf = pytest.importorskip("skimage.filters")
+    from metalsinglecell.preprocess import _threshold_minimum
+    rng = np.random.default_rng(0)
+    cases = {
+        "bimodal": np.r_[rng.normal(0.2, 0.05, 4000), rng.normal(0.8, 0.05, 1500)],
+        "near-unimodal": rng.normal(0.5, 0.05, 3000),
+        "skewed": rng.exponential(0.1, 5000),
+        "tight minority mode": np.r_[rng.normal(0.1, 0.02, 5000), rng.normal(0.9, 0.02, 200)],
+    }
+    for name, v in cases.items():
+        ours, theirs = _threshold_minimum(v), skf.threshold_minimum(v)
+        assert ours == pytest.approx(theirs, rel=1e-9), name
+
+    assert _threshold_minimum(np.array([])) is None      # caller falls back to the quantile
+
+
 # --------------------------------------------------------------------------- output slots
 
 

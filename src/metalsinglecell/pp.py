@@ -170,6 +170,20 @@ def write_obsm(adata, key: str, path):
     return path if path.endswith(".npy") else path + ".npy"    # np.save appends the suffix
 
 
+def _like_input(out, original):
+    """Return ``out`` in the container the caller handed us.
+
+    Our CSR kernels always produce a scipy CSR. Writing that back over a dense ``.X`` changes
+    the type of the user's matrix behind their back -- ``.mean(0)`` starts returning
+    ``np.matrix``, indexing semantics shift, and a dense-by-design object silently acquires
+    CSR overhead. scanpy preserves the container.
+    """
+    import scipy.sparse as sp
+    if sp.issparse(original):
+        return out
+    return out.toarray() if sp.issparse(out) else np.asarray(out)
+
+
 def normalize_total(adata, target_sum: float | None = None, layer=None,
                     exclude_highly_expressed: bool = False, copy: bool = False):
     """Normalize counts per cell (``sc.pp.normalize_total``). ``target_sum=None`` → median."""
@@ -191,7 +205,8 @@ def normalize_total(adata, target_sum: float | None = None, layer=None,
     import scipy.sparse as sp
     X = sp.csr_matrix(adata.layers[layer] if layer is not None else adata.X)
     ts = float(target_sum) if target_sum is not None else float(np.median(np.asarray(X.sum(1)).ravel()))
-    out = CSR.from_scipy(X).normalize_total(ts).to_scipy()
+    src = adata.layers[layer] if layer is not None else adata.X
+    out = _like_input(CSR.from_scipy(X).normalize_total(ts).to_scipy(), src)
     if layer is not None:
         adata.layers[layer] = out
     else:
@@ -207,7 +222,8 @@ def log1p(adata, layer=None, copy: bool = False):
         _record_transform(adata, "log1p")
         adata.uns["log1p"] = {"base": None}
         return adata if copy else None
-    out = _csr(adata, layer).log1p().to_scipy()
+    src = adata.layers[layer] if layer is not None else adata.X
+    out = _like_input(_csr(adata, layer).log1p().to_scipy(), src)
     if layer is not None:
         adata.layers[layer] = out
     else:
@@ -223,7 +239,11 @@ def highly_variable_genes(adata, n_top_genes=None, n_bins: int = 20, flavor: str
 
     ``n_top_genes=None`` (scanpy's default) selects seurat/cell_ranger genes by the
     ``min_mean``/``max_mean``/``min_disp``/``max_disp`` cutoffs; an integer takes the top-N.
+    ``seurat_v3`` and ``pearson_residuals`` rank rather than threshold, so they require
+    ``n_top_genes`` — scanpy raises there too, where we used to default it to 2000 silently.
     """
+    if flavor in ("seurat_v3", "seurat_v3_paper", "pearson_residuals") and n_top_genes is None:
+        raise ValueError(f"`n_top_genes` is required for flavor={flavor!r}")
     adata = _copy_or_reject(adata, copy, "highly_variable_genes")
     reader = _backed_reader(adata, layer)
     if reader is not None:                       # out-of-core: stream per-gene moments
@@ -241,6 +261,8 @@ def highly_variable_genes(adata, n_top_genes=None, n_bins: int = 20, flavor: str
     for col in df.columns:
         adata.var[col] = df[col].to_numpy()
     adata.uns["hvg"] = {"flavor": flavor}
+    if flavor == "pearson_residuals":
+        adata.uns["hvg"]["computed_on"] = "adata.X"
     return adata if copy else None
 
 
@@ -377,7 +399,13 @@ def scrublet(adata, sim_doublet_ratio: float = 2.0, expected_doublet_rate: float
                        n_pcs=n_pcs, random_state=random_state)
     adata.obs["doublet_score"] = res["doublet_scores"]
     adata.obs["predicted_doublet"] = res["predicted_doublets"]
-    adata.uns["scrublet"] = {"threshold": res["threshold"]}
+    adata.uns["scrublet"] = {
+        "threshold": res["threshold"],
+        "doublet_scores_sim": res["doublet_scores_sim"],
+        "doublet_parents": res["doublet_parents"],
+        "parameters": {"expected_doublet_rate": expected_doublet_rate,
+                       "sim_doublet_ratio": sim_doublet_ratio,
+                       "n_neighbors": res["n_neighbors"], "random_state": random_state}}
     return adata if copy else None
 
 
@@ -718,24 +746,44 @@ def neighbors(adata, n_neighbors: int = 15, n_pcs: int | None = None, *, use_rep
 
 def harmony_integrate(adata, key, basis: str = "X_pca", adjusted_basis: str = "X_pca_harmony",
                       random_state: int = 0, copy: bool = False):
-    """Harmony batch integration (``sc.external.pp.harmony_integrate``); writes ``obsm[adjusted_basis]``."""
+    """Harmony batch integration (``sc.external.pp.harmony_integrate``); writes ``obsm[adjusted_basis]``.
+
+    ``key`` is a column in ``adata.obs`` or a list of them; several columns are combined into
+    one compound covariate, which is what scanpy documents.
+    """
     from .integration import harmonize
     adata = adata.copy() if copy else adata
-    batch = adata.obs[key].to_numpy()
+    if not isinstance(key, str):
+        cols = [adata.obs[k].astype(str).to_numpy() for k in key]
+        batch = np.array(["|".join(v) for v in zip(*cols)])
+    else:
+        batch = adata.obs[key].to_numpy()
     adata.obsm[adjusted_basis] = np.asarray(harmonize(adata.obsm[basis], batch, random_state=random_state))
     return adata if copy else None
 
 
-def bbknn(adata, batch_key, use_rep: str = "X_pca", neighbors_within_batch: int = 3,
+def bbknn(adata, batch_key: str = "batch", *, use_rep: str = "X_pca",
+          neighbors_within_batch: int = 3, n_pcs: int | None = 50, trim: int | None = None,
           random_state: int = 0, copy: bool = False):
-    """Batch-balanced kNN (``sc.external.pp.bbknn``); writes ``obsp`` + ``uns['neighbors']``."""
+    """Batch-balanced kNN (``sc.external.pp.bbknn``); writes ``obsp`` + ``uns['neighbors']``.
+
+    ``n_neighbors`` in the recorded params is ``neighbors_within_batch x n_batches`` — the
+    width of the combined neighbour set — which is what scanpy's ``Neighbors`` (and so dpt and
+    paga) reads. Recording ``neighbors_within_batch`` there instead understated it by the batch
+    count.
+    """
     from .neighbors import bbknn as _bbknn
     adata = adata.copy() if copy else adata
-    dist, conn = _bbknn(np.asarray(adata.obsm[use_rep], dtype=np.float32),
-                        adata.obs[batch_key].to_numpy(),
-                        neighbors_within_batch=neighbors_within_batch, random_state=random_state)
+    dist, conn, n_neighbors = _bbknn(np.asarray(adata.obsm[use_rep], dtype=np.float32),
+                                     adata.obs[batch_key].to_numpy(),
+                                     neighbors_within_batch=neighbors_within_batch,
+                                     n_pcs=n_pcs, trim=trim, random_state=random_state)
     adata.obsp["distances"] = dist
     adata.obsp["connectivities"] = conn
-    adata.uns["neighbors"] = {"connectivities_key": "connectivities", "distances_key": "distances",
-                              "params": {"n_neighbors": neighbors_within_batch, "method": "umap"}}
+    adata.uns["neighbors"] = {
+        "connectivities_key": "connectivities", "distances_key": "distances",
+        "params": {"n_neighbors": n_neighbors, "method": "umap", "metric": "euclidean",
+                   "random_state": random_state, "use_rep": use_rep, "n_pcs": n_pcs,
+                   "bbknn": {"trim": 10 * n_neighbors if trim is None else trim,
+                             "computation": "metal"}}}
     return adata if copy else None

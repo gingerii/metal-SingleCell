@@ -462,7 +462,34 @@ def _exact_knn_rows(coords: np.ndarray, rows: np.ndarray, k: int) -> tuple[np.nd
     return oi, od
 
 
+def _trim_graph(conn, trim):
+    """Keep only each cell's strongest connectivities — a port of ``bbknn.matrix.trimming``.
+
+    Per-row threshold (the ``trim``-th largest value), applied to rows, transposed, applied
+    again — so the result is symmetric. bbknn's default is ``10 * n_neighbors``, and without it
+    a hub cell keeps every edge any cell threw at it: measured max row degree 158 against the
+    reference's 90.
+    """
+    import scipy.sparse as sp
+    cnts = sp.csr_matrix(conn, copy=True)
+    if trim is None or trim <= 0:
+        return cnts
+    vals = np.zeros(cnts.shape[0])
+    for i in range(cnts.shape[0]):
+        row = cnts.data[cnts.indptr[i]:cnts.indptr[i + 1]]
+        if row.shape[0] > trim:
+            vals[i] = row[np.argsort(row)[-trim]]
+    for _ in range(2):                       # rows, then columns, with the same thresholds
+        for i in range(cnts.shape[0]):
+            row = cnts.data[cnts.indptr[i]:cnts.indptr[i + 1]]
+            row[row < vals[i]] = 0
+        cnts.eliminate_zeros()
+        cnts = cnts.T.tocsr()
+    return cnts
+
+
 def bbknn(X_pca: np.ndarray, batch, neighbors_within_batch: int = 3,
+          n_pcs: int | None = 50, trim: int | None = None,
           random_state: int = 0):
     """Batch-balanced kNN (rapids-singlecell/scanpy ``pp.bbknn``).
 
@@ -476,6 +503,8 @@ def bbknn(X_pca: np.ndarray, batch, neighbors_within_batch: int = 3,
     from umap.umap_ import fuzzy_simplicial_set
 
     X = np.asarray(X_pca, dtype=np.float32)
+    if n_pcs is not None:                    # the reference slices the representation first
+        X = X[:, :n_pcs]
     n = X.shape[0]
     batch = np.asarray(batch)
     cats = np.unique(batch)
@@ -524,7 +553,10 @@ def bbknn(X_pca: np.ndarray, batch, neighbors_within_batch: int = 3,
         conn = conn[0]
     rows = np.repeat(np.arange(n), n_neighbors)
     distances = sp.csr_matrix((knn_dists.ravel(), (rows, knn_indices.ravel())), shape=(n, n))
-    return distances, conn.tocsr()
+    distances.setdiag(0)                     # self is not a neighbour, matching pp.neighbors
+    distances.eliminate_zeros()
+    conn = _trim_graph(conn, 10 * n_neighbors if trim is None else trim)
+    return distances, conn.tocsr(), n_neighbors
 
 
 def _knn_descent(X, k, n_iters: int = 8, seed: int = 0, tile: int = 20000):

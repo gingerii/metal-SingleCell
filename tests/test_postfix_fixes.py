@@ -188,7 +188,7 @@ def test_bbknn_tiny_batch_no_crash():
     rng = np.random.default_rng(0)
     X = rng.standard_normal((60, 10)).astype(np.float32)
     batch = np.array(["a"] * 40 + ["b"] * 2 + ["c"] * 18)   # batch 'b' (2) < k=3
-    _, conn = bbknn(X, batch, neighbors_within_batch=3)
+    _, conn, _ = bbknn(X, batch, neighbors_within_batch=3)
     ok = conn.shape == (60, 60) and conn.nnz > 0
     _row("6", "bbknn_tiny_batch", "conn_nnz", int(conn.nnz), ok)
     assert ok
