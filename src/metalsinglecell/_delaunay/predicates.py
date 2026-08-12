@@ -265,23 +265,22 @@ inline i128 i64_mul(long a, long b) {
 }
 
 inline char i128_sign(i128 a) { return i128_zero(a) ? 0 : (i128_neg(a) ? -1 : 1); }
-"""
 
+// ---- the predicates themselves, so any kernel can reuse them ----
 
-_PREDICATE_KERNEL_SOURCE = """
-    uint t = thread_position_in_grid.x;
-    if (t >= (uint)nquad[0]) return;
+inline char orient_sign(long ax, long ay, long bx, long by, long cx, long cy) {
+    // degree 2: with coordinates bounded by MAX_COORD = 2**30 this never leaves int64
+    long det = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    return (char)((det > 0) ? 1 : ((det < 0) ? -1 : 0));
+}
 
-    int ia = quads[4 * t + 0], ib = quads[4 * t + 1];
-    int ic = quads[4 * t + 2], id = quads[4 * t + 3];
-
-    long ax = (long)px[ia] - (long)px[id], ay = (long)py[ia] - (long)py[id];
-    long bx = (long)px[ib] - (long)px[id], by = (long)py[ib] - (long)py[id];
-    long cx = (long)px[ic] - (long)px[id], cy = (long)py[ic] - (long)py[id];
-
+inline char incircle_sign(long ax, long ay, long bx, long by,
+                          long cx, long cy, long dx, long dy) {
+    ax -= dx; ay -= dy;
+    bx -= dx; by -= dy;
+    cx -= dx; cy -= dy;
     long m = max(max(max(abs(ax), abs(ay)), max(abs(bx), abs(by))),
                  max(abs(cx), abs(cy)));
-
     if (m <= (long)SAFE) {                 // the common case: exact in plain 64-bit
         long aa = ax * ax + ay * ay;
         long bb = bx * bx + by * by;
@@ -289,26 +288,40 @@ _PREDICATE_KERNEL_SOURCE = """
         long det = ax * (by * cc - bb * cy)
                  - ay * (bx * cc - bb * cx)
                  + aa * (bx * cy - by * cx);
-        sign[t] = (char)((det > 0) ? 1 : ((det < 0) ? -1 : 0));
-        return;
+        return (char)((det > 0) ? 1 : ((det < 0) ? -1 : 0));
     }
-
     // wide operands: same determinant, 128-bit. Bounded by 12 * MAX_COORD**4 = 2**123.6.
     i128 aa = i128_add(i64_mul(ax, ax), i64_mul(ay, ay));
     i128 bb = i128_add(i64_mul(bx, bx), i64_mul(by, by));
     i128 cc = i128_add(i64_mul(cx, cx), i64_mul(cy, cy));
-
     i128 t1 = i128_sub(i128_mul_i64(cc, by), i128_mul_i64(bb, cy));
     i128 t2 = i128_sub(i128_mul_i64(cc, bx), i128_mul_i64(bb, cx));
     i128 t3 = i128_sub(i64_mul(bx, cy), i64_mul(by, cx));
-
     i128 det = i128_sub(i128_mul_i64(t1, ax), i128_mul_i64(t2, ay));
-    // aa and t3 both fit in 64 bits of magnitude, so this product is exact
     bool s3 = i128_neg(aa) != i128_neg(t3);
     i128 p3 = u64_mul(i128_abs(aa).lo, i128_abs(t3).lo);
     det = i128_add(det, s3 ? i128_negate(p3) : p3);
+    return i128_sign(det);
+}
+"""
 
-    sign[t] = i128_sign(det);
+
+def i128_header():
+    """The exact-predicate MSL prelude, for kernels that need it (see :mod:`.gpu`).
+
+    ``SAFE`` has to be defined ahead of the functions that branch on it, so the ordering
+    here is load-bearing.
+    """
+    return f"#define SAFE {SAFE_ABS}\n" + _I128_HEADER
+
+
+_PREDICATE_KERNEL_SOURCE = """
+    uint t = thread_position_in_grid.x;
+    if (t >= (uint)nquad[0]) return;
+    int ia = quads[4 * t + 0], ib = quads[4 * t + 1];
+    int ic = quads[4 * t + 2], id = quads[4 * t + 3];
+    sign[t] = incircle_sign((long)px[ia], (long)py[ia], (long)px[ib], (long)py[ib],
+                            (long)px[ic], (long)py[ic], (long)px[id], (long)py[id]);
 """
 
 
@@ -334,7 +347,7 @@ def incircle_gpu(ipts, quads):
         name="incircle_exact",
         input_names=["px", "py", "quads", "nquad"],
         output_names=["sign"],
-        header=_I128_HEADER + f"\n#define SAFE {SAFE_ABS}\n",
+        header=i128_header(),
         source=_PREDICATE_KERNEL_SOURCE,
     )
     (out,) = kernel(

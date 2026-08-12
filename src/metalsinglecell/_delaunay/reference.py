@@ -500,42 +500,59 @@ def _edge_split(pts, mesh, t, slot, pt_idx, loc, active, inf):
     _rehome(pts, mesh, (T1, T2, T3, T4), loc, active, inf)
 
 
-def _flip_round(pts, mesh, loc, active, inf):
-    """Flip every non-Delaunay edge that can be flipped without conflicting.
+def select_flips(pts, mesh, inf):
+    """Half-edges to flip this round: non-Delaunay, and free of conflicts.
 
-    Returns the number of flips performed. Two flips conflict when they share a triangle,
-    so each candidate claims both of its triangles by scatter-min on the candidate index
-    and proceeds only if it still owns both — a lock-free independent set, and exactly
-    what ``atomic_min`` gives in the kernel.
+    Two flips conflict when they share a triangle, so each candidate claims both of its
+    triangles by scatter-min on the half-edge index and proceeds only if it still owns
+    both — a lock-free independent set. The half-edge index is the claim token rather than
+    a compacted candidate id specifically so that this maps onto ``atomic_fetch_min`` in
+    :mod:`.gpu` with the same tie-break and no stream compaction.
     """
     m = mesh.n_tri
     t = np.repeat(np.arange(m), 3)
     slot = np.tile(np.arange(3), m)
+    half = t * 3 + slot
     code = mesh.nbr[t, slot]
-    u, j = code // 3, code % 3
+    u = code // 3
 
-    # visit each edge once, from its lower-indexed triangle
-    keep = t < u
-    t, slot, u, j = t[keep], slot[keep], u[keep], j[keep]
+    keep = t < u                       # visit each edge once, from the lower triangle
+    t, u, half = t[keep], u[keep], half[keep]
     if len(t) == 0:
-        return 0
+        return np.zeros(0, dtype=np.int64)
 
-    s = mesh.tri[u, j]
-    bad = in_circumcircle(pts, mesh.tri[t], s, inf) > 0
+    s = mesh.tri[u, code[keep] % 3]
     # a tie (exactly cocircular) is left alone: every choice is Delaunay, and flipping on
     # ties is how a flip loop starts cycling
-    t, slot, u, j = t[bad], slot[bad], u[bad], j[bad]
+    bad = in_circumcircle(pts, mesh.tri[t], s, inf) > 0
+    t, u, half = t[bad], u[bad], half[bad]
     if len(t) == 0:
-        return 0
+        return np.zeros(0, dtype=np.int64)
 
-    cand = np.arange(len(t))
-    owner = np.full(m, len(t), dtype=np.int64)
-    np.minimum.at(owner, t, cand)
-    np.minimum.at(owner, u, cand)
-    go = (owner[t] == cand) & (owner[u] == cand)
-    t, slot, u, j = t[go], slot[go], u[go], j[go]
-    if len(t) == 0:
+    owner = np.full(m, np.iinfo(np.int32).max, dtype=np.int64)
+    np.minimum.at(owner, t, half)
+    np.minimum.at(owner, u, half)
+    return half[(owner[t] == half) & (owner[u] == half)]
+
+
+def _flip_round(pts, mesh, loc, active, inf, *, backend="cpu"):
+    """Flip every non-Delaunay edge that can be flipped without conflicting.
+
+    Returns the number of flips performed. ``backend="gpu"`` runs the scan and the
+    conflict resolution as Metal kernels; the selection is identical either way, so the
+    resulting mesh is bit-for-bit the same.
+    """
+    m = mesh.n_tri
+    if backend == "gpu":
+        from .gpu import flip_candidates
+        half = flip_candidates(pts, mesh.tri, mesh.nbr, inf)
+    else:
+        half = select_flips(pts, mesh, inf)
+    if len(half) == 0:
         return 0
+    t, slot = half // 3, half % 3
+    code = mesh.nbr[t, slot]
+    u, j = code // 3, code % 3
 
     r = mesh.tri[t, slot]
     p = mesh.tri[t, (slot + 1) % 3]
@@ -570,12 +587,17 @@ def _flip_round(pts, mesh, loc, active, inf):
     return len(t)
 
 
-def triangulate(points, *, max_rounds: int = 10000, return_info: bool = False):
+def triangulate(points, *, max_rounds: int = 10000, return_info: bool = False,
+                backend: str = "cpu"):
     """Delaunay triangulation of ``points`` (n, 2), by exact-predicate batch insertion.
 
     Returns an ``(m, 3)`` array of vertex indices into the *input* order. With
     ``return_info`` also returns the conditioning diagnostics and per-phase counters.
+    ``backend="gpu"`` runs the flipping scan and conflict resolution as Metal kernels and
+    produces an identical result; everything else still runs on the host.
     """
+    if backend not in ("cpu", "gpu"):
+        raise ValueError(f"backend must be 'cpu' or 'gpu', got {backend!r}")
     raw = np.asarray(points, dtype=np.float64)
     if len(raw) < 3:
         raise ValueError("a triangulation needs at least 3 points")
@@ -622,7 +644,7 @@ def triangulate(points, *, max_rounds: int = 10000, return_info: bool = False):
             edge_splits += len(sel_t)
 
         for _ in range(max_rounds):
-            k = _flip_round(pts, mesh, loc, active, inf)
+            k = _flip_round(pts, mesh, loc, active, inf, backend=backend)
             flips += k
             if k == 0:
                 break
