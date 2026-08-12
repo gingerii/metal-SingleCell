@@ -45,7 +45,9 @@ downstream tooling are unchanged.
 ## Install
 
 ```bash
-pip install metalsinglecell          # Python ≥ 3.11
+pip install metalsinglecell               # Python ≥ 3.11
+pip install "metalsinglecell[backed]"     # + the out-of-core (zarr) path
+pip install "metalsinglecell[hvg]"        # + highly_variable_genes(flavor="seurat_v3")
 ```
 
 On Apple Silicon this also pulls in `mlx` (the Metal GPU backend); on other platforms it installs the
