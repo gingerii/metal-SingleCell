@@ -2,9 +2,11 @@
 
 [![CI](https://github.com/gingerii/metal-SingleCell/actions/workflows/ci.yml/badge.svg)](https://github.com/gingerii/metal-SingleCell/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/metalsinglecell.svg)](https://pypi.org/project/metalsinglecell/)
+[![Downloads](https://img.shields.io/pypi/dm/metalsinglecell.svg)](https://pypi.org/project/metalsinglecell/)
 [![Python](https://img.shields.io/pypi/pyversions/metalsinglecell.svg)](https://pypi.org/project/metalsinglecell/)
 [![Docs](https://readthedocs.org/projects/metal-singlecell/badge/?version=latest)](https://metal-singlecell.readthedocs.io/en/latest/)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
+[![Hits](https://hits.sh/github.com/gingerii/metal-SingleCell.svg)](https://hits.sh/github.com/gingerii/metal-SingleCell/)
 <!-- GPU tests: uncomment once a self-hosted Apple-Silicon runner is registered and gpu-parity.yml runs automatically
 [![GPU tests](https://github.com/gingerii/metal-SingleCell/actions/workflows/gpu-parity.yml/badge.svg)](https://github.com/gingerii/metal-SingleCell/actions/workflows/gpu-parity.yml)
 -->
