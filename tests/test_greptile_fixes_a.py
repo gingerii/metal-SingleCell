@@ -97,3 +97,34 @@ def test_fresh_backed_object_never_inherits_stages(tmp_path):
     del a
     gc.collect()
     assert inherited == 0, f"{inherited}/100 fresh objects started with another's stages"
+
+
+# ------------------------------------------------------- 2. materialize onto its source
+
+
+@pytest.mark.parametrize("where", ["same", "parent", "inside"])
+def test_materialize_refuses_to_overwrite_its_source(tmp_path, where):
+    src_dir = tmp_path / "stores"
+    src_dir.mkdir()
+    p = _store(src_dir / "src.zarr", _poisson(20, 8, lam=2.0))
+    before = _snapshot(p)
+    dest = {"same": p, "parent": str(src_dir), "inside": os.path.join(p, "ckpt.zarr")}[where]
+    a = _backed(p)
+    msc_pp.normalize_total(a, target_sum=1e4)
+    msc_pp.log1p(a)
+    with pytest.raises(ValueError, match="source"):
+        msc_pp.materialize(a, dest)
+    assert _snapshot(p) == before, "the source store was modified"
+    assert not os.path.exists(os.path.join(p, "ckpt.zarr"))
+    # the raw counts still read back
+    assert _backed(p).X[:].nnz == sp.csr_matrix(_poisson(20, 8, lam=2.0)).nnz
+
+
+def test_materialize_to_a_new_path_still_works(tmp_path):
+    p = _store(tmp_path / "src.zarr", _poisson(20, 8))
+    a = _backed(p)
+    msc_pp.normalize_total(a, target_sum=1e4)
+    msc_pp.log1p(a)
+    msc_pp.materialize(a, tmp_path / "ckpt.zarr")
+    assert a.X[:].nnz == sp.csr_matrix(_poisson(20, 8)).nnz
+    assert msc_pp._stream_stages(a) == []

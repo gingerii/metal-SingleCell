@@ -258,6 +258,35 @@ def write_backed_zarr(adata, path, block_rows: int = 20_000):
 _DENSE_STAGES = {"scale"}
 
 
+def _source_store_path(reader):
+    """Filesystem path of the store the reader streams from, or ``None`` if it has none."""
+    import os
+    grp = getattr(reader._dset, "group", None)
+    root = getattr(getattr(grp, "store", None), "root", None)        # zarr v3 LocalStore
+    if root is None:
+        root = getattr(getattr(grp, "store", None), "path", None)    # zarr v2 DirectoryStore
+    if root is None:
+        root = getattr(getattr(grp, "file", None), "filename", None)  # h5py-backed .h5ad
+    return os.path.realpath(str(root)) if root is not None else None
+
+
+def _refuse_overwriting_source(reader, out_path):
+    """Raise if writing ``out_path`` would clobber the store ``reader`` is reading.
+
+    ``write_transformed_zarr`` opens its destination with ``mode="w"``, which deletes what is
+    there — the same store, or a directory that contains it, would lose the raw counts.
+    """
+    import os
+    src = _source_store_path(reader)
+    if src is None:
+        return
+    dst = os.path.realpath(str(out_path))
+    if src == dst or dst.startswith(src + os.sep) or src.startswith(dst + os.sep):
+        raise ValueError(f"refusing to write {str(out_path)!r}: it is, contains or lies inside "
+                         f"the source store {src!r}, which writing would overwrite. "
+                         f"Checkpoint to a separate path.")
+
+
 def write_transformed_zarr(reader, transform, out_path, obs=None, var=None,
                            block_rows: int | None = None):
     """Stream raw-count blocks through a **sparse-preserving** ``transform`` and write the
@@ -281,6 +310,7 @@ def write_transformed_zarr(reader, transform, out_path, obs=None, var=None,
         raise ValueError(f"write_transformed_zarr needs a sparse-preserving transform; "
                          f"got densifying stage(s) {bad}. Checkpoint post-log1p, pre-scale.")
     out_path = str(out_path)
+    _refuse_overwriting_source(reader, out_path)
     br = int(block_rows or reader.default_block_rows)
 
     g = zarr.open_group(out_path, mode="w")
