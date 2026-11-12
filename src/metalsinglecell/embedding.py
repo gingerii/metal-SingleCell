@@ -432,7 +432,7 @@ def _multi_component_layout(graph, labels: np.ndarray, n_comp: int, dim: int,
 
     radii = np.sqrt(sizes / sizes.max()) * 10.0
     radii = np.maximum(radii, 0.4)                    # keep tiny components visible
-    centers = _pack_discs(radii)
+    centers = _pack_discs(radii, dim=dim)
 
     Y = np.empty((n, dim), dtype=np.float32)
     for c in range(n_comp):
@@ -453,15 +453,22 @@ def _multi_component_layout(graph, labels: np.ndarray, n_comp: int, dim: int,
     return Y + rng.normal(scale=1e-4, size=Y.shape).astype(np.float32)
 
 
-def _pack_discs(radii: np.ndarray, pad: float = 1.1) -> np.ndarray:
+def _pack_discs(radii: np.ndarray, pad: float = 1.1, dim: int = 2) -> np.ndarray:
     """Centers for non-overlapping discs of the given radii: biggest first, then rings.
 
-    Returned in the first two dimensions only (zero elsewhere for ``dim > 2``); the
-    within-component layout still uses every dimension.
+    Returns ``(len(radii), dim)``. The discs are packed in the first two dimensions (zero
+    elsewhere for ``dim > 2``); the within-component layout still uses every dimension. For
+    ``dim == 1`` there is no plane to pack in, so the components are laid end to end on the
+    line, biggest first.
     """
     k = len(radii)
-    centers = np.zeros((k, 2), dtype=np.float32)
     order = np.argsort(-radii)
+    if dim == 1:
+        widths = 2.0 * radii[order] * pad
+        centers = np.zeros((k, 1), dtype=np.float32)
+        centers[order, 0] = np.cumsum(widths) - widths / 2.0
+        return centers
+    centers = np.zeros((k, dim), dtype=np.float32)
     centers[order[0]] = 0.0
     inner = radii[order[0]] * pad
     i = 1
