@@ -769,7 +769,9 @@ def neighbors(adata, n_neighbors: int = 15, n_pcs: int | None = None, *, use_rep
         raise NotImplementedError(f"metric={metric!r} is not implemented (Euclidean only)")
     adata = adata.copy() if copy else adata
     rep, rep_key = _choose_representation(adata, use_rep, n_pcs, random_state)
-    if n_pcs is not None:                            # scanpy truncates the rep to the first n_pcs
+    # scanpy truncates only an obsm representation to its first n_pcs columns; .X (use_rep='X',
+    # n_pcs=0, or the automatic choice on <= 50 variables) is always used whole.
+    if n_pcs is not None and rep_key not in (None, "X"):
         rep = rep[:, :n_pcs]
     dist, conn = _nb(rep, n_neighbors=n_neighbors, random_state=random_state)
 
