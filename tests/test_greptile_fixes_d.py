@@ -90,3 +90,27 @@ def test_tsne_affinities_match_sklearn(monkeypatch):
     assert P.sum() == pytest.approx(1.0, abs=1e-5)
     assert np.abs(P - P_ref).sum() < 1e-3             # the d^4 kernel misplaced ~7-18% of the mass
     assert np.abs(P - P_ref).max() < 1e-2 * P_ref.max()
+
+
+# ---------------- 3. tl.tsne forwards early_exaggeration ----------------
+
+@pytest.mark.metal
+def test_tl_tsne_forwards_early_exaggeration(monkeypatch):
+    import anndata as ad
+    import metalsinglecell as msc
+    from metalsinglecell._vendor.mlx_vis import tsne as vt
+
+    seen = []
+
+    def fake_fit(self, X, epoch_callback=None):
+        seen.append(self.early_exaggeration)
+        return np.zeros((len(X), self.n_components), np.float32)
+
+    monkeypatch.setattr(vt.TSNE, "fit_transform", fake_fit)
+    X = np.random.default_rng(0).normal(size=(60, 8)).astype(np.float32)
+    for ee in (1.0, 50.0):
+        a = ad.AnnData(X, obs=pd.DataFrame(index=[f"c{i}" for i in range(60)]))
+        a.obsm["X_pca"] = X
+        msc.tl.tsne(a, use_rep="X_pca", early_exaggeration=ee)
+        assert a.uns["tsne"]["params"]["early_exaggeration"] == ee
+    assert seen == [1.0, 50.0]

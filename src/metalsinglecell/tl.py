@@ -155,7 +155,8 @@ def tsne(adata, use_rep: str | None = None, perplexity: float = 30.0, n_componen
     key = key_added or "tsne"
     adata.obsm["X_tsne" if key_added is None else key_added] = _tl.tsne(
         np.asarray(rep, dtype=np.float32), n_components=n_components, perplexity=perplexity,
-        learning_rate=learning_rate, random_state=random_state)
+        learning_rate=learning_rate, early_exaggeration=early_exaggeration,
+        random_state=random_state)
     adata.uns[key] = {"params": {"perplexity": perplexity,
                                  "early_exaggeration": early_exaggeration,
                                  "learning_rate": learning_rate, "metric": "euclidean"}}
