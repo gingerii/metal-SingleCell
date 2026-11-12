@@ -77,6 +77,18 @@ def test_knn_duplicate_coordinates_keep_twins_not_self(set_diag):
 
 
 @pytest.mark.metal
+def test_low_level_spatial_helper_drops_self_by_identity():
+    """``spatial.spatial_neighbors`` (the coords-level helper) had the same column-0 bug."""
+    from metalsinglecell import spatial
+    A = spatial.spatial_neighbors(_DUP8, n_neighs=3)
+    assert np.all(A.diagonal() == 0.0)
+    rows = _row_sets(A)
+    for i, j in _TWINS8.items():
+        assert j in rows[i], f"row {i} lost its duplicate {j}"
+    assert all(len(r) == 3 for r in rows)
+
+
+@pytest.mark.metal
 @needs_squidpy
 @pytest.mark.parametrize("set_diag", [False, True])
 def test_knn_duplicate_coordinates_match_squidpy(set_diag):

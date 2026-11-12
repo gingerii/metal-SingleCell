@@ -30,12 +30,12 @@ def spatial_neighbors(coords, n_neighs: int = 6, symmetric: bool = False):
     """
     import scipy.sparse as sp
 
-    from .neighbors import _knn_grid
+    from .gr import _knn_edges
 
-    knn_idx, _ = _knn_grid(np.asarray(coords, dtype=np.float32), n_neighs + 1)
+    coords = np.asarray(coords, dtype=np.float32)
     n = coords.shape[0]
-    rows = np.repeat(np.arange(n), n_neighs)
-    cols = knn_idx[:, 1:].ravel()                      # exclude self (self is column 0)
+    # Self is removed by identity (a duplicate coordinate can sort ahead of it), not column 0.
+    rows, cols, _ = _knn_edges(coords, n_neighs)
     A = sp.csr_matrix((np.ones(rows.size, np.float32), (rows, cols)), shape=(n, n))
     if symmetric:
         A = ((A + A.T) > 0).astype(np.float32)         # undirected union
