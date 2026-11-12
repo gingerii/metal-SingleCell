@@ -114,3 +114,47 @@ def test_tl_tsne_forwards_early_exaggeration(monkeypatch):
         msc.tl.tsne(a, use_rep="X_pca", early_exaggeration=ee)
         assert a.uns["tsne"]["params"]["early_exaggeration"] == ee
     assert seen == [1.0, 50.0]
+
+
+# ---------------- 4. Two-group logreg: one correctly signed score row per group ----------------
+
+def _planted_markers(groups):
+    import anndata as ad
+    rng = np.random.default_rng(0)
+    n, g = len(groups), 6
+    X = rng.normal(0, 1, (n, g)).astype(np.float32)
+    for j, name in enumerate(sorted(set(groups))):
+        X[groups == name, j] += 3.0                   # gene j marks group j
+    a = ad.AnnData(X, obs=pd.DataFrame({"g": pd.Categorical(groups)},
+                                       index=[f"c{i}" for i in range(n)]))
+    a.var_names = [f"g{i}" for i in range(g)]
+    return a
+
+
+def test_logreg_two_groups_each_group_gets_its_own_signed_scores():
+    import metalsinglecell as msc
+    a = _planted_markers(np.array(["A"] * 100 + ["B"] * 100))
+    msc.tl.rank_genes_groups(a, "g", method="logreg", use_raw=False)
+    r = a.uns["rank_genes_groups"]
+    assert r["names"].dtype.names == ("A", "B")
+    assert r["names"]["A"][0] == "g0"                 # A's planted marker
+    assert r["names"]["B"][0] == "g1"                 # B's planted marker
+    score_a = dict(zip(r["names"]["A"], r["scores"]["A"]))
+    score_b = dict(zip(r["names"]["B"], r["scores"]["B"]))
+    for gene, s in score_a.items():
+        assert score_b[gene] == pytest.approx(-s)
+
+
+def test_logreg_three_groups_unchanged_vs_scanpy():
+    sc = pytest.importorskip("scanpy")
+    import metalsinglecell as msc
+    a = _planted_markers(np.array(["A"] * 70 + ["B"] * 70 + ["C"] * 60))
+    ref = a.copy()
+    sc.tl.rank_genes_groups(ref, "g", method="logreg")
+    msc.tl.rank_genes_groups(a, "g", method="logreg", use_raw=False)
+    for c in "ABC":
+        assert list(a.uns["rank_genes_groups"]["names"][c]) == \
+            list(ref.uns["rank_genes_groups"]["names"][c])
+        np.testing.assert_allclose(a.uns["rank_genes_groups"]["scores"][c],
+                                   ref.uns["rank_genes_groups"]["scores"][c], rtol=1e-5)
+    assert a.uns["rank_genes_groups"]["names"]["C"][0] == "g2"

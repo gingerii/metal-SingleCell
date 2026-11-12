@@ -185,7 +185,14 @@ def rank_genes_groups(X, groups, var_names=None, method: str = "t-test",
         clf = LogisticRegression(**kwds); clf.fit(Xd, code)
         coef = clf.coef_; existing = np.unique(code)            # (n_classes, n_genes)
         for gi, cat in enumerate(cats):
-            scores = coef[0] if G <= 2 else coef[np.argmax(existing == gi)]
+            if G == 2:
+                # Binary fit: sklearn's single coef_ row points toward classes_[1]. That group
+                # gets +coef and the other -coef, so each ranks its own markers. Deliberate
+                # departure from scanpy, which reports only the first group and gives it the
+                # +coef row, i.e. the second group's markers under the first group's name.
+                scores = coef[0] if gi == clf.classes_[1] else -coef[0]
+            else:
+                scores = coef[np.argmax(existing == gi)]
             order = np.argsort(-scores)
             out[str(cat)] = {"names": var_names[order], "scores": scores[order],
                              "pvals": None, "logfoldchanges": None}
