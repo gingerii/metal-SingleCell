@@ -142,3 +142,40 @@ def test_backed_pca_uncentred_raises_before_doing_anything(tmp_path):
         msc_pp.pca(a, n_comps=4, zero_center=False, mask_var=None)
     assert "X_pca" not in a.obsm and "PCs" not in a.varm and "pca" not in a.uns
     assert msc_pp._stream_stages(a) == stages
+
+
+# ------------------------------------------- 4. streaming n_comps > selected genes
+
+
+@pytest.mark.parametrize("n_obs,n_vars,n_hvg,n_comps", [
+    (60, 10, None, 50),       # explicit n_comps above the panel width
+    (60, 30, 10, 20),         # explicit n_comps above an HVG mask
+    (8, 30, None, 20),        # fewer cells than genes: clamp to n_obs
+])
+def test_backed_pca_clamps_n_comps_like_incore(tmp_path, n_obs, n_vars, n_hvg, n_comps):
+    import anndata as ad
+    X = _poisson(n_obs, n_vars)
+    mask = None
+    if n_hvg is not None:
+        mask = np.zeros(n_vars, bool)
+        mask[:n_hvg] = True
+    p = _store(tmp_path / "s.zarr", X, block_rows=16)
+
+    incore = ad.AnnData(sp.csr_matrix(X))
+    b = _backed(p)
+    kw = {"mask_var": mask}
+    with warnings.catch_warnings(record=True) as w_in:
+        warnings.simplefilter("always")
+        msc_pp.pca(incore, n_comps=n_comps, **kw)
+    with warnings.catch_warnings(record=True) as w_bk:
+        warnings.simplefilter("always")
+        msc_pp.pca(b, n_comps=n_comps, **kw)
+
+    assert b.obsm["X_pca"].shape == incore.obsm["X_pca"].shape
+    assert b.varm["PCs"].shape == incore.varm["PCs"].shape
+    assert b.uns["pca"]["variance_ratio"].shape == incore.uns["pca"]["variance_ratio"].shape
+    assert np.isfinite(b.obsm["X_pca"]).all()
+    # same warnings policy as in-core (which clamps silently)
+    def user_warnings(ws):
+        return sorted({str(x.message) for x in ws if issubclass(x.category, UserWarning)})
+    assert user_warnings(w_bk) == user_warnings(w_in)

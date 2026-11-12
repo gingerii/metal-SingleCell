@@ -172,6 +172,9 @@ def pca_covariance_eigh_streaming(reader, transform, n_out_genes: int, n_comps: 
     from .sparse import CSR
 
     H, n = int(n_out_genes), reader.n_obs
+    # Clamp silently, exactly as the in-core `pca` does: eigh yields at most H components, and
+    # an n_comps above that crashed the projection with a broadcast error.
+    n_comps = min(int(n_comps), min(n, H))
     br = int(block_rows or auto_block_rows(H, reader.default_block_rows))
     if H > 20000:
         import warnings

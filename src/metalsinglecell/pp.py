@@ -702,8 +702,8 @@ def pca(adata, n_comps: int | None = None, layer=None, use_highly_variable: bool
         tf = _build_pca_transform(adata, mask)
         X_pca, comps, vr = pca_covariance_eigh_streaming(reader, tf, H, n_comps=n_comps)
         adata.obsm["X_pca"] = np.asarray(X_pca)
-        # n_comps may have been clamped to the rank of the selection — size from the
-        # components actually returned, not from what was asked for.
+        # The streaming solver clamps n_comps to min(n_obs, n_selected_genes), as the in-core
+        # path does — size from the components actually returned, not from what was asked for.
         pcs = np.zeros((adata.n_vars, np.asarray(comps).shape[0]), dtype=np.float32)
         pcs[mask if mask is not None else slice(None)] = np.asarray(comps).T
         adata.varm["PCs"] = pcs
