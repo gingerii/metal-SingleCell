@@ -131,3 +131,37 @@ def test_pca_uncentred_variance_ratio_matches_scanpy():
     sc.pp.pca(b, n_comps=5, zero_center=False, svd_solver="arpack")
     np.testing.assert_allclose(a.uns["pca"]["variance_ratio"], b.uns["pca"]["variance_ratio"],
                                rtol=1e-4)
+
+
+# --------------------------------------------------------------------------- scale: stored std
+
+
+def _small_counts(n=10, g=4, seed=0):
+    import anndata as ad
+    rng = np.random.default_rng(seed)
+    return ad.AnnData(sp.csr_matrix(rng.poisson(2, size=(n, g)).astype(np.float32)))
+
+
+@pytest.mark.metal
+def test_scale_stores_the_std_it_divides_by():
+    """var['std'] was the population std (ddof=0) while .X was divided by the sample std
+    (ddof=1), so unscaling with the stored statistics did not give back the data."""
+    from metalsinglecell import pp as msc_pp
+    a = _small_counts()
+    X = a.X.toarray().astype(np.float64)
+    msc_pp.scale(a)
+    np.testing.assert_allclose(a.var["std"].to_numpy(), X.std(axis=0, ddof=1), rtol=1e-6)
+    rec = np.asarray(a.X) * a.var["std"].to_numpy() + a.var["mean"].to_numpy()
+    np.testing.assert_allclose(rec, X, atol=1e-5)
+
+
+@needs_scanpy
+@pytest.mark.metal
+def test_scale_std_matches_scanpy():
+    import scanpy as sc
+    from metalsinglecell import pp as msc_pp
+    a, b = _small_counts(), _small_counts()
+    msc_pp.scale(a)
+    sc.pp.scale(b)
+    np.testing.assert_allclose(a.var["std"].to_numpy(), b.var["std"].to_numpy(), rtol=1e-6)
+    np.testing.assert_allclose(a.var["mean"].to_numpy(), b.var["mean"].to_numpy(), rtol=1e-6)

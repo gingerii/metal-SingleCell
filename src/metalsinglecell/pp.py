@@ -360,7 +360,10 @@ def scale(adata, max_value: float | None = None, zero_center: bool = True,
     # on the same scale later, and they are cheap next to the scaling itself.
     mean = np.asarray(X.mean(axis=0)).ravel()
     sq_mean = np.asarray(X.multiply(X).mean(axis=0)).ravel()
-    std = np.sqrt(np.maximum(sq_mean - mean * mean, 0.0))
+    var = np.maximum(sq_mean - mean * mean, 0.0)
+    if X.shape[0] != 1:                          # ddof=1: what scanpy stores and _pp.scale divides by
+        var *= X.shape[0] / (X.shape[0] - 1)
+    std = np.sqrt(var)
     std[std == 0] = 1.0
     out = _pp.scale(_csr(adata, layer), max_value=max_value, zero_center=zero_center)
     if layer is not None:
