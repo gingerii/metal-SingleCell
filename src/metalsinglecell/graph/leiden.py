@@ -320,9 +320,11 @@ def _refine_sync(graph: Graph, part: np.ndarray, resolution: float, twom: float,
         commit = wants & coin
         comm = mx.where(commit, target, comm)         # no-op when no vertex wants to move
         # Frontier for the next pass: moved ∪ neighbours-of-moved ∪ wanted-but-held.
-        # Propagating through all edges (not just same-Louvain-community ones) is a
-        # conservative superset — it can only over-activate, never wrongly prune — so
-        # the refined labels stay identical to no-pruning.
+        # Propagating through all edges (not just same-Louvain-community ones) over-activates
+        # rather than under-activates, but the frontier is still an APPROXIMATION, as in
+        # `_local_moving_sync`: a sub-community's Σtot shifts when a non-neighbour leaves or
+        # joins it, and the vertices adjacent to it are not woken, so refined labels can
+        # differ from prune=False (quality-preserving in practice; graph-clustering skill).
         if prune_on:
             ci = commit.astype(mx.int32)
             nbr = mx.zeros((n,), dtype=mx.int32).at[graph.edge_src].maximum(ci[graph.indices])
