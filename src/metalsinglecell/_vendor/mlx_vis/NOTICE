@@ -1,6 +1,11 @@
 This directory vendors several modules from the `mlx-vis` project (mlx-vis 0.7.0):
 
-    nndescent.py  —  copied verbatim from mlx_vis/_nndescent/nndescent.py
+    nndescent.py  —  from mlx_vis/_nndescent/nndescent.py, plus one bugfix marked
+                     `VENDOR PATCH (metalsinglecell)` in the source: `NNDescent.build` and the
+                     rp-tree helpers draw from a local `np.random.RandomState(random_state)`
+                     instead of calling `np.random.seed` and the global stream, so building a
+                     graph no longer resets the caller's NumPy randomness. A seeded RandomState
+                     yields the same stream, so graphs are unchanged for a given random_state.
     normalize.py  —  copied verbatim from mlx_vis/_normalize.py
     knn.py        —  from mlx_vis/_knn.py; only the internal import was rewritten to be
                      relative (`from .nndescent import NNDescent`)
@@ -51,4 +56,5 @@ structurally heterogeneous graph to show up.
 
 Changes to the vendored files: as itemized above (relative-import rewrites throughout; the
 tsne.py UnboundLocalError bugfix; the tsne.py squared-distance fix, which changes the t-SNE
-input affinities back to the standard Gaussian kernel). No other algorithmic changes.
+input affinities back to the standard Gaussian kernel; the nndescent.py local-RNG fix, which
+leaves the graphs unchanged). No other algorithmic changes.
