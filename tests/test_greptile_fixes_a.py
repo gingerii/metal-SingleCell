@@ -128,3 +128,17 @@ def test_materialize_to_a_new_path_still_works(tmp_path):
     msc_pp.materialize(a, tmp_path / "ckpt.zarr")
     assert a.X[:].nnz == sp.csr_matrix(_poisson(20, 8)).nnz
     assert msc_pp._stream_stages(a) == []
+
+
+# ------------------------------------------------- 3. backed pca(zero_center=False)
+
+
+def test_backed_pca_uncentred_raises_before_doing_anything(tmp_path):
+    p = _store(tmp_path / "s.zarr", _poisson(60, 12), block_rows=16)
+    a = _backed(p)
+    msc_pp.normalize_total(a, target_sum=1e4)
+    stages = list(msc_pp._stream_stages(a))
+    with pytest.raises(NotImplementedError, match="zero_center"):
+        msc_pp.pca(a, n_comps=4, zero_center=False, mask_var=None)
+    assert "X_pca" not in a.obsm and "PCs" not in a.varm and "pca" not in a.uns
+    assert msc_pp._stream_stages(a) == stages

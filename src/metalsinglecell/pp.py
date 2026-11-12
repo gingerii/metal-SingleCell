@@ -692,6 +692,11 @@ def pca(adata, n_comps: int | None = None, layer=None, use_highly_variable: bool
 
     reader = _backed_reader(adata, layer)
     if reader is not None:                       # out-of-core: fused streaming covariance-eigh
+        if not zero_center:
+            raise NotImplementedError(
+                "pca(zero_center=False) is not supported on a backed (on-disk) adata.X: the "
+                "streaming covariance-eigh solver always mean-centres. Use zero_center=True, "
+                "or load into memory first (`adata = adata.to_memory()`).")
         from .decomposition import pca_covariance_eigh_streaming
         H = int(mask.sum()) if mask is not None else adata.n_vars
         tf = _build_pca_transform(adata, mask)
