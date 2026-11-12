@@ -226,16 +226,23 @@ def normalize_total(adata, target_sum: float | None = None, layer=None,
     adata = _copy_or_reject(adata, copy, "normalize_total")
     reader = _backed_reader(adata, layer)
     if reader is not None:                       # out-of-core: record a deferred transform
+        if not inplace:
+            raise NotImplementedError(
+                "normalize_total(inplace=False) is not supported on a backed (on-disk) adata.X: "
+                "the normalized matrix cannot be returned in memory. Use inplace=True (records "
+                "a deferred transform), or load first with `adata = adata.to_memory()`.")
         totals = None
         if "total_counts" in adata.obs:          # reuse per-cell totals from a prior QC pass
             totals = adata.obs["total_counts"].to_numpy()
-        elif target_sum is None:                 # else one lightweight pass for row sums
+        elif target_sum is None or key_added is not None:   # else one lightweight row-sum pass
             from .backed import stream_qc
             totals = stream_qc(reader)["total_counts"]
         # The store is CSR, so follow scanpy's CSR path: the median over ALL cells.
         ts = float(target_sum) if target_sum is not None else float(np.median(totals))
         if totals is not None:
             _warn_if_zero_count_cells(totals, ts)
+        if key_added is not None:                # scanpy stores the norm factors counts / target
+            adata.obs[key_added] = totals / ts
         _record_transform(adata, "normalize_total", ts)
         return adata if copy else None
     import scipy.sparse as sp

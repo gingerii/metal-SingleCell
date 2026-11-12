@@ -240,3 +240,27 @@ def test_streaming_normalize_total_matches_scanpy_csr(tmp_path, prior_qc):
     with pytest.warns(UserWarning, match=_ZERO_MSG):
         msc_pp.normalize_total(b)
     assert msc_pp._stream_stages(b) == [("normalize_total", scanpy_target)]
+
+
+# ---------------------------------- 6. backed normalize_total(inplace=False) / key_added
+
+
+def test_backed_normalize_total_inplace_false_raises_without_recording(tmp_path):
+    p = _store(tmp_path / "s.zarr", _poisson(12, 6))
+    b = _backed(p)
+    with pytest.raises(NotImplementedError, match="inplace"):
+        msc_pp.normalize_total(b, target_sum=1e4, inplace=False)
+    assert msc_pp._stream_stages(b) == []
+
+
+@needs_scanpy
+@pytest.mark.parametrize("target_sum", [None, 1e4])
+def test_backed_normalize_total_writes_key_added_like_scanpy(tmp_path, target_sum):
+    import anndata as ad
+    import scanpy as sc
+    X = _poisson(12, 6) + 1
+    ref = ad.AnnData(sp.csr_matrix(X))
+    sc.pp.normalize_total(ref, target_sum=target_sum, key_added="nf")
+    b = _backed(_store(tmp_path / "s.zarr", X))
+    msc_pp.normalize_total(b, target_sum=target_sum, key_added="nf")
+    np.testing.assert_allclose(b.obs["nf"].to_numpy(), ref.obs["nf"].to_numpy(), rtol=1e-6)
