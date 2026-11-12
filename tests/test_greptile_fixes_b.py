@@ -95,3 +95,39 @@ def test_neighbors_clamp_matches_scanpy_params():
     assert a.uns["neighbors"]["params"]["n_neighbors"] == b.uns["neighbors"]["params"]["n_neighbors"]
     assert (np.diff(a.obsp["distances"].tocsr().indptr)
             == np.diff(b.obsp["distances"].tocsr().indptr)).all()
+
+
+# --------------------------------------------------------------------------- pca: zero_center=False
+
+
+def _offset(n=200, g=30, seed=0):
+    rng = np.random.default_rng(seed)
+    return (5.0 + rng.normal(0, 1, size=(n, g))).astype(np.float32)
+
+
+@pytest.mark.metal
+@pytest.mark.parametrize("solver", ["full", "arpack", "randomized", "covariance_eigh"])
+def test_pca_uncentred_variance_ratio_is_a_ratio(solver):
+    """Uncentred PCA divided S**2/(n-1), which carries the mean, by the centred total variance,
+    so PC1's ratio was ~25 on offset data. sklearn's TruncatedSVD (scanpy's zero_center=False)
+    uses the variance of the scores, which keeps every ratio and their sum <= 1."""
+    from metalsinglecell.decomposition import pca
+    x_pca, _, vr = pca(_offset(), n_comps=5, solver=solver, zero_center=False)
+    assert (vr <= 1).all() and vr.sum() <= 1
+    np.testing.assert_allclose(vr, np.var(x_pca.astype(np.float64), axis=0)
+                               / np.var(_offset().astype(np.float64), axis=0).sum(), rtol=1e-4)
+
+
+@needs_scanpy
+@pytest.mark.metal
+def test_pca_uncentred_variance_ratio_matches_scanpy():
+    import anndata as ad
+    import scanpy as sc
+    from metalsinglecell import pp as msc_pp
+    a, b = ad.AnnData(_offset()), ad.AnnData(_offset())
+    # Pin arpack on both: scanpy's own zero_center=False default is randomized TruncatedSVD,
+    # which is off by up to 0.5% on PCs 2-5 of this flat spectrum, against the exact SVD.
+    msc_pp.pca(a, n_comps=5, zero_center=False, svd_solver="arpack")
+    sc.pp.pca(b, n_comps=5, zero_center=False, svd_solver="arpack")
+    np.testing.assert_allclose(a.uns["pca"]["variance_ratio"], b.uns["pca"]["variance_ratio"],
+                               rtol=1e-4)
