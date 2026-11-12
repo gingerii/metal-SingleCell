@@ -128,6 +128,7 @@ choice is deliberate.
 | `gr.calculate_niche(random_state=)` | `0` | `42` | labels differ run-to-run only. |
 | `pp.scrublet` **embedding** | joint observed+simulated log1p PCA | observed-only z-scored fit | deliberate. Ours measured a higher injected-doublet AUC (0.972 against 0.796), so it is kept. The neighbour count, score smoothing and call threshold now follow the reference. |
 | `.X` dtype | `float32` | `float64` | our CSR kernels are fp32 throughout. Consistent, and stated here rather than discovered. |
+| `tl.rank_genes_groups(method='logreg')`, two groups | both groups, each scored by its own signed coefficient | the first group only | deliberate. A binary fit has one coefficient row, which favours the second group; scanpy files it under the first, so its list for that group ranks the other group's markers first. |
 
 Fixed in 0.1.3: `gr.spatial_autocorr` returned only the statistic and `pval_sim`, and that
 `pval_sim` counted one tail — the clustered one. A gene with significant *negative* spatial
@@ -138,6 +139,72 @@ carries the rest of squidpy's columns (`pval_norm`, `var_norm`, and with `n_perm
 squidpy's does rather than `100`, and `copy=True` returns the `DataFrame` rather than the
 `AnnData`. Benjamini–Hochberg is implemented in-package rather than pulled from statsmodels,
 and is pinned against it to 1e-12.
+
+### The November 2026 code review
+
+An automated review (Greptile) of the whole repository raised 24 findings. We reproduced each
+against scanpy 1.11.5 / squidpy 1.8.2 before fixing it: 20 held as stated, 4 held in part, and
+none was false. All are fixed in 0.1.4, each with a regression test.
+
+Data loss:
+
+- `pp.materialize(adata, path)` with `path` equal to, inside, or containing the source store
+  opened it for writing before reading it. The counts became an all-zero matrix, `layers`,
+  `raw` and `obsm` were deleted, and the round-trip check passed because both sides read the
+  wiped store. Such a path is now refused before anything is opened.
+- The streaming transform registry was keyed by `id(adata)` and never cleared, so a newly
+  opened backed object could reuse a dead object's id and inherit its pending stages — 49 of
+  100 did in a loop that reopened stores, which applies `log1p` twice. Entries now die with
+  their object.
+
+Silently wrong numbers:
+
+- `gr.co_occurrence` encoded labels in lexical order and dropped the mapping, so with clusters
+  `'0'`…`'10'` the curves sat under the wrong cell types (up to 0.92 from squidpy's values).
+  It now follows the categorical order.
+- `tl.score_genes` and `tl.score_genes_cell_cycle` always read `.X`, where scanpy reads `.raw`
+  by default. On the pbmc3k tutorial object the scores correlated r = 0.62 with scanpy's, and
+  8 of the 10 genes in a T-cell set were dropped without a warning. Both now take `use_raw`
+  and `layer`, and warn about genes they drop.
+- `pp.neighbors(n_pcs=0)` sliced `.X` to zero columns, so every distance was 0; any `n_pcs`
+  also truncated `.X` itself. Only `obsm` representations are truncated now, as in scanpy.
+- `pp.pca(zero_center=False)` divided uncentred singular values by the centred total
+  variance and reported a PC1 variance ratio of 25.4 where scanpy reports 0.038. On a backed
+  `.X` it centred the data anyway while recording `zero_center=False`; that combination now
+  raises.
+- `tl.tsne` recorded `early_exaggeration` but always ran with 12. The vendored kernel also
+  squared already-squared distances (exp(−βd⁴)), misplacing 7–18% of the affinity mass; the
+  affinities now match sklearn's. Measured embedding quality moved by at most 0.003.
+- `tl.rank_genes_groups(method='logreg')` with two groups returned one list for both groups,
+  so one group's list ranked the other's markers first (see the table above).
+- `pp.scale` stored the population standard deviation in `var['std']` but divided by the
+  sample standard deviation.
+- The spatial k-NN and grid builders turned duplicate coordinates into self-edges and lost
+  the duplicate.
+- Backed `pp.normalize_total(inplace=False)` recorded a stage and returned `None`; it now
+  raises. Backed `key_added` is now written.
+- `pp.neighbors` above 30,000 cells, and `pp.scrublet` above 10,000, reset NumPy's global
+  random stream.
+- The README's streaming example used `ad.read_zarr`, which loads `.X` into memory and never
+  reaches the streaming path.
+
+Crashes: `tl.umap(n_components=3)` on a disconnected graph; `pp.neighbors` on fewer cells than
+`n_neighbors`, which now clamps and warns as scanpy does; `gr.calculate_niche` when the cells
+have fewer distinct neighbourhood compositions than `n_niches`; backed `pp.pca` with `n_comps`
+above the number of selected genes.
+
+Contract breaks: `pp.filter_cells` / `pp.filter_genes(inplace=False)` wrote count columns into
+`.obs` / `.var`. The parity harness, `validation.compare`, compared shapes only after
+flattening and treated NaN, +inf and −inf as equal; no existing parity test relied on either.
+
+`pp.normalize_total(target_sum=None)` now matches scanpy for each input type, including
+scanpy's behaviour on sparse input: when more than half the cells are empty the median target
+is 0 and every row is zeroed, so filter empty cells first. Dense input takes the median of the
+non-zero totals, as scanpy does.
+
+Two code comments called Louvain/Leiden vertex pruning exact. It is an approximation: on a
+3000-cell graph, pruned local moving stopped with 2 vertices that could still improve. Final
+labels were unchanged over 3 seeds, and the code is unchanged.
 
 ### The August 2026 audit
 
