@@ -233,3 +233,78 @@ def test_score_genes_cell_cycle_default_uses_raw_like_scanpy():
     for key in ("S_score", "G2M_score"):
         np.testing.assert_allclose(a.obs[key], ref.obs[key], rtol=1e-4, atol=1e-5)
     assert list(a.obs["phase"].astype(str)) == list(ref.obs["phase"].astype(str))
+
+
+# ---------------- 6. k-means: duplicate rows, empty clusters ----------------
+
+@pytest.mark.metal
+def test_kmeans_identical_rows_do_not_crash():
+    from metalsinglecell import tools
+    with pytest.warns(UserWarning, match="distinct clusters"):
+        lab = tools.kmeans(np.ones((50, 4), np.float32), n_clusters=2)
+    assert len(np.unique(lab)) == 1
+
+
+@pytest.mark.metal
+def test_kmeans_more_clusters_than_distinct_rows():
+    from metalsinglecell import tools
+    X = np.repeat(np.eye(3, dtype=np.float32), 20, axis=0)
+    with pytest.warns(UserWarning, match="distinct clusters"):
+        lab = tools.kmeans(X, n_clusters=5)
+    assert len(np.unique(lab)) == 3
+    for r in range(3):                                # each distinct row is one cluster
+        assert len(np.unique(lab[r * 20:(r + 1) * 20])) == 1
+    assert len({lab[0], lab[20], lab[40]}) == 3
+
+
+class _ForcedSeeds:
+    """Stands in for the k-means++ generator so the seeds are chosen by the test."""
+
+    def __init__(self, seeds):
+        self.seeds = list(seeds)
+
+    def integers(self, *args, **kwargs):
+        return self.seeds.pop(0)
+
+    def choice(self, *args, **kwargs):
+        return self.seeds.pop(0)
+
+
+@pytest.mark.metal
+def test_kmeans_empty_cluster_keeps_its_centroid(monkeypatch):
+    """An empty cluster must not jump to the origin.
+
+    Seeds 0 and 4 are the same point, so cluster 2 is empty after the first assignment. A
+    zero centroid made the result depend on where the origin is: k-means is translation
+    invariant, so shifting the data must not change the labels.
+    """
+    from metalsinglecell import tools
+    X = np.array([[1, -2], [-1, -7], [5, 3], [-1, 2], [1, -2], [3, -1], [-1, -2]], np.float32)
+    labels = []
+    for shift in (0.0, 50.0):
+        monkeypatch.setattr(tools.np.random, "default_rng",
+                            lambda *a, **k: _ForcedSeeds([0, 1, 4]))
+        labels.append(tools.kmeans(X + shift, n_clusters=3))
+    np.testing.assert_array_equal(labels[0], labels[1])
+    assert len(np.unique(labels[1])) == 3
+
+
+@pytest.mark.metal
+def test_calculate_niche_few_distinct_compositions_default_n_niches():
+    """Two cell types and a 6-NN graph allow only 7 compositions, fewer than the 10 niches."""
+    import anndata as ad
+    import metalsinglecell as msc
+    rng = np.random.default_rng(0)
+    xy = np.stack(np.meshgrid(np.arange(40), np.arange(40)), -1).reshape(-1, 2).astype(float)
+    xy += rng.normal(0, 0.05, xy.shape)
+    ct = np.where(xy[:, 0] < 20, "epi", "stroma")
+    flip = rng.random(len(ct)) < 0.2
+    ct[flip] = rng.choice(["epi", "stroma"], flip.sum())
+    a = ad.AnnData(np.zeros((len(ct), 1), np.float32),
+                   obs=pd.DataFrame({"ct": pd.Categorical(ct)},
+                                    index=[f"c{i}" for i in range(len(ct))]))
+    a.obsm["spatial"] = xy
+    msc.gr.spatial_neighbors_knn(a, n_neighs=6)
+    with pytest.warns(UserWarning, match="distinct clusters"):
+        msc.gr.calculate_niche(a, "ct")
+    assert 1 < a.obs["niche"].nunique() <= 7
