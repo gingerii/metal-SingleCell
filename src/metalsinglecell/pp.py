@@ -203,6 +203,15 @@ def _like_input(out, original):
     return out.toarray() if sp.issparse(out) else np.asarray(out)
 
 
+def _warn_if_zero_count_cells(counts, target_sum):
+    """scanpy's ``"Some cells have zero counts"`` check, run on its norm factors."""
+    import warnings
+    with np.errstate(divide="ignore", invalid="ignore"):
+        all_positive = np.all(np.asarray(counts, dtype=np.float64) / target_sum > 0)
+    if not all_positive:
+        warnings.warn("Some cells have zero counts", UserWarning, stacklevel=3)
+
+
 def normalize_total(adata, target_sum: float | None = None, layer=None,
                     exclude_highly_expressed: bool = False, key_added: str | None = None,
                     inplace: bool = True, copy: bool = False):
@@ -217,20 +226,29 @@ def normalize_total(adata, target_sum: float | None = None, layer=None,
     adata = _copy_or_reject(adata, copy, "normalize_total")
     reader = _backed_reader(adata, layer)
     if reader is not None:                       # out-of-core: record a deferred transform
-        if target_sum is not None:
-            ts = float(target_sum)
-        elif "total_counts" in adata.obs:        # reuse per-cell totals from a prior QC pass
-            ts = float(np.median(adata.obs["total_counts"].to_numpy()))
-        else:                                    # else one lightweight pass for row sums
+        totals = None
+        if "total_counts" in adata.obs:          # reuse per-cell totals from a prior QC pass
+            totals = adata.obs["total_counts"].to_numpy()
+        elif target_sum is None:                 # else one lightweight pass for row sums
             from .backed import stream_qc
-            ts = float(np.median(stream_qc(reader)["total_counts"]))
+            totals = stream_qc(reader)["total_counts"]
+        # The store is CSR, so follow scanpy's CSR path: the median over ALL cells.
+        ts = float(target_sum) if target_sum is not None else float(np.median(totals))
+        if totals is not None:
+            _warn_if_zero_count_cells(totals, ts)
         _record_transform(adata, "normalize_total", ts)
         return adata if copy else None
     import scipy.sparse as sp
-    X = sp.csr_matrix(adata.layers[layer] if layer is not None else adata.X)
-    ts = float(target_sum) if target_sum is not None else float(np.median(np.asarray(X.sum(1)).ravel()))
     src = adata.layers[layer] if layer is not None else adata.X
+    X = sp.csr_matrix(src)
     counts = np.asarray(X.sum(1)).ravel()
+    if target_sum is not None:
+        ts = float(target_sum)
+    elif sp.issparse(src):                       # scanpy 1.11.5's CSR path: median of all cells
+        ts = float(np.median(counts))
+    else:                                        # its dense path: median of nonzero totals
+        ts = float(np.median(counts[counts > 0]))
+    _warn_if_zero_count_cells(counts, ts)
     out = _like_input(CSR.from_scipy(X).normalize_total(ts).to_scipy(), src)
     if not inplace:
         return {"X": out, "norm_factor": counts / ts}

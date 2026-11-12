@@ -179,3 +179,64 @@ def test_backed_pca_clamps_n_comps_like_incore(tmp_path, n_obs, n_vars, n_hvg, n
     def user_warnings(ws):
         return sorted({str(x.message) for x in ws if issubclass(x.category, UserWarning)})
     assert user_warnings(w_bk) == user_warnings(w_in)
+
+
+# ---------------------------------------------- 5. normalize_total median vs scanpy
+
+
+@needs_scanpy
+@pytest.mark.parametrize("kind", ["dense", "csr", "csc"])
+def test_normalize_total_median_target_matches_scanpy(kind):
+    import anndata as ad
+    import scanpy as sc
+    X = _mostly_empty()
+    make = {"dense": lambda: X.copy(), "csr": lambda: sp.csr_matrix(X),
+            "csc": lambda: sp.csc_matrix(X)}[kind]
+    ref = ad.AnnData(make())
+    with pytest.warns(UserWarning, match=_ZERO_MSG):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)   # scanpy divides by a 0 target
+            sc.pp.normalize_total(ref)
+    got = ad.AnnData(make())
+    with pytest.warns(UserWarning, match=_ZERO_MSG):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            msc_pp.normalize_total(got)
+
+    def dense(M):
+        return M.toarray() if sp.issparse(M) else np.asarray(M)
+    np.testing.assert_allclose(dense(got.X), dense(ref.X), rtol=1e-6, atol=1e-6)
+
+
+@needs_scanpy
+def test_normalize_total_without_empty_cells_does_not_warn():
+    import anndata as ad
+    X = _poisson(12, 6) + 1
+    for M in (X.copy(), sp.csr_matrix(X)):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            msc_pp.normalize_total(ad.AnnData(M))
+        assert not [x for x in w if _ZERO_MSG in str(x.message)]
+
+
+@needs_scanpy
+@pytest.mark.parametrize("prior_qc", [False, True])
+def test_streaming_normalize_total_matches_scanpy_csr(tmp_path, prior_qc):
+    """The store is CSR, so the streaming target follows scanpy's CSR path (all-cell median)."""
+    import anndata as ad
+    import scanpy as sc
+    X = _mostly_empty()
+    ref = ad.AnnData(sp.csr_matrix(X))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        nf = sc.pp.normalize_total(ref, inplace=False)["norm_factor"]
+    scanpy_target = float(np.median(X.sum(1)))              # what scanpy's CSR branch uses
+    assert np.isinf(nf[-1]) and scanpy_target == 0.0         # confirms the oracle's behaviour
+
+    p = _store(tmp_path / "s.zarr", X)
+    b = _backed(p)
+    if prior_qc:
+        msc_pp.calculate_qc_metrics(b)
+    with pytest.warns(UserWarning, match=_ZERO_MSG):
+        msc_pp.normalize_total(b)
+    assert msc_pp._stream_stages(b) == [("normalize_total", scanpy_target)]
