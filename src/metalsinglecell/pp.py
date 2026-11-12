@@ -107,7 +107,14 @@ def _stream_stages(adata):
 
 
 def _record_transform(adata, *stage):
-    _STREAM_TRANSFORMS.setdefault(id(adata), []).append(tuple(stage))
+    key = id(adata)
+    if key not in _STREAM_TRANSFORMS:
+        # Keyed by id(), so drop the entry when the object dies: CPython reuses a dead
+        # object's id, and a new AnnData at the same address would otherwise inherit its
+        # stages. (AnnData is unhashable, so a WeakKeyDictionary is not an option.)
+        import weakref
+        weakref.finalize(adata, _STREAM_TRANSFORMS.pop, key, None)
+    _STREAM_TRANSFORMS.setdefault(key, []).append(tuple(stage))
 
 
 def _build_transform(adata):
