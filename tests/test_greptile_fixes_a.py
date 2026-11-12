@@ -266,6 +266,29 @@ def test_backed_normalize_total_writes_key_added_like_scanpy(tmp_path, target_su
     np.testing.assert_allclose(b.obs["nf"].to_numpy(), ref.obs["nf"].to_numpy(), rtol=1e-6)
 
 
+@pytest.mark.metal
+@pytest.mark.parametrize("kwargs", [{"target_sum": 1e4, "key_added": "nf"},
+                                    {"target_sum": None}])
+def test_backed_normalize_total_after_pending_stages_raises(tmp_path, kwargs):
+    """Totals come from the raw store, so after a pending stage they would be stale
+    (PR #9 review): key_added would save the wrong factors, and the median the wrong target."""
+    b = _backed(_store(tmp_path / "s.zarr", _poisson(12, 6) + 1))
+    msc_pp.normalize_total(b, target_sum=1e4)
+    before = list(msc_pp._stream_stages(b))
+    with pytest.raises(NotImplementedError, match="pending"):
+        msc_pp.normalize_total(b, **kwargs)
+    assert list(msc_pp._stream_stages(b)) == before
+    assert "nf" not in b.obs
+
+
+@pytest.mark.metal
+def test_backed_normalize_total_after_pending_stages_with_explicit_target_still_records(tmp_path):
+    b = _backed(_store(tmp_path / "s.zarr", _poisson(12, 6) + 1))
+    msc_pp.normalize_total(b, target_sum=1e4)
+    msc_pp.normalize_total(b, target_sum=1e3)                   # needs no totals: allowed
+    assert [s[0] for s in msc_pp._stream_stages(b)] == ["normalize_total", "normalize_total"]
+
+
 # --------------------------------------------------------- 7. README streaming example
 
 

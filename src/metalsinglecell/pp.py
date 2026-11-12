@@ -231,6 +231,16 @@ def normalize_total(adata, target_sum: float | None = None, layer=None,
                 "normalize_total(inplace=False) is not supported on a backed (on-disk) adata.X: "
                 "the normalized matrix cannot be returned in memory. Use inplace=True (records "
                 "a deferred transform), or load first with `adata = adata.to_memory()`.")
+        pending = [s[0] for s in _stream_stages(adata)]
+        if pending and (target_sum is None or key_added is not None):
+            # The totals below are read from the raw store (or a QC pass over it), so after a
+            # pending stage they describe the old counts: the median target and the key_added
+            # factors would both be wrong. Getting them right needs an extra full pass.
+            raise NotImplementedError(
+                f"normalize_total on a backed adata.X with pending stages {pending} needs the "
+                "per-cell totals after those stages, which takes an extra pass over the data. "
+                "Pass an explicit target_sum without key_added, or normalize before the other "
+                "stages.")
         totals = None
         if "total_counts" in adata.obs:          # reuse per-cell totals from a prior QC pass
             totals = adata.obs["total_counts"].to_numpy()

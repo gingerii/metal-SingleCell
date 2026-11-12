@@ -182,7 +182,9 @@ Silently wrong numbers:
 - The spatial k-NN and grid builders turned duplicate coordinates into self-edges and lost
   the duplicate.
 - Backed `pp.normalize_total(inplace=False)` recorded a stage and returned `None`; it now
-  raises. Backed `key_added` is now written.
+  raises. Backed `key_added` is now written. After a pending stage, backed `normalize_total`
+  needs an explicit `target_sum` and no `key_added`: the totals it reads describe the counts
+  on disk, not the transformed values.
 - `pp.neighbors` above 30,000 cells, and `pp.scrublet` above 10,000, reset NumPy's global
   random stream.
 - The README's streaming example used `ad.read_zarr`, which loads `.X` into memory and never
