@@ -190,3 +190,47 @@ def test_co_occurrence_drops_unused_categories_and_keeps_order():
     occ_s, _ = sq.gr.co_occurrence(ref, "ct", interval=10, copy=True)
     assert occ_m.shape == (3, 3, 9)
     np.testing.assert_allclose(occ_m, occ_s, rtol=1e-6, atol=1e-9)
+
+
+# --------------------------------------------------------------------------- 3. NNDescent RNG
+
+
+def _small_embedding(n=600, d=8, seed=0):
+    return np.random.default_rng(seed).normal(size=(n, d)).astype(np.float32)
+
+
+@pytest.mark.metal
+@pytest.mark.parametrize("random_state", [0, None])
+def test_nndescent_leaves_global_rng_untouched(random_state):
+    from metalsinglecell._vendor.mlx_vis.nndescent import NNDescent
+    X = _small_embedding()
+    np.random.seed(12345)
+    expected = np.random.rand(4)
+    np.random.seed(12345)
+    NNDescent(k=10, random_state=random_state).build(X)
+    np.testing.assert_array_equal(np.random.rand(4), expected)
+
+
+@pytest.mark.metal
+def test_nndescent_high_dim_projection_leaves_global_rng_untouched():
+    """d > 100 takes the random-projection branch, which also draws random numbers."""
+    from metalsinglecell._vendor.mlx_vis.nndescent import NNDescent
+    X = _small_embedding(n=400, d=120)
+    np.random.seed(7)
+    expected = np.random.rand(4)
+    np.random.seed(7)
+    NNDescent(k=10, random_state=3).build(X)
+    np.testing.assert_array_equal(np.random.rand(4), expected)
+
+
+@pytest.mark.metal
+@pytest.mark.parametrize("d", [8, 120])
+def test_nndescent_is_deterministic_for_a_random_state(d):
+    from metalsinglecell._vendor.mlx_vis.nndescent import NNDescent
+    X = _small_embedding(n=500, d=d)
+    np.random.seed(1)
+    i1, d1 = NNDescent(k=10, random_state=5).build(X)
+    np.random.seed(2)                       # a different global state must not matter
+    i2, d2 = NNDescent(k=10, random_state=5).build(X)
+    np.testing.assert_array_equal(i1, i2)
+    np.testing.assert_array_equal(d1, d2)
