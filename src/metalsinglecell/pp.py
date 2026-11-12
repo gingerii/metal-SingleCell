@@ -768,6 +768,11 @@ def neighbors(adata, n_neighbors: int = 15, n_pcs: int | None = None, *, use_rep
     if metric != "euclidean":
         raise NotImplementedError(f"metric={metric!r} is not implemented (Euclidean only)")
     adata = adata.copy() if copy else adata
+    if n_neighbors > adata.n_obs:                    # very small datasets: scanpy's clamp
+        import warnings
+        n_neighbors = 1 + int(0.5 * adata.n_obs)
+        warnings.warn(f"n_obs too small: adjusting to `n_neighbors = {n_neighbors}`",
+                      UserWarning, stacklevel=2)
     rep, rep_key = _choose_representation(adata, use_rep, n_pcs, random_state)
     # scanpy truncates only an obsm representation to its first n_pcs columns; .X (use_rep='X',
     # n_pcs=0, or the automatic choice on <= 50 variables) is always used whole.

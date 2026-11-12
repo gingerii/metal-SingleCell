@@ -63,3 +63,35 @@ def test_neighbors_n_pcs_still_truncates_obsm():
     a.obsm["emb"] = rng.normal(size=(a.n_obs, 10)).astype(np.float32)
     a.obsm["emb3"] = a.obsm["emb"][:, :3].copy()
     assert _same_graph(_graph(a, use_rep="emb", n_pcs=3), _graph(a, use_rep="emb3"))
+
+
+# --------------------------------------------------------------------------- neighbors: tiny n_obs
+
+
+@pytest.mark.metal
+@pytest.mark.parametrize("k", [15, 40])
+def test_neighbors_clamps_n_neighbors_on_tiny_objects(k):
+    """scanpy clamps ``n_neighbors > n_obs`` to ``1 + int(0.5 * n_obs)`` with a warning and
+    records the effective value. 10 cells at the default 15 raised ``negative axis 1 index: -1``
+    and 40 raised a length mismatch."""
+    from metalsinglecell import pp as msc_pp
+    a = _clusters()[:10].copy()
+    with pytest.warns(UserWarning, match="n_obs too small"):
+        msc_pp.neighbors(a, n_neighbors=k, use_rep="X")
+    assert a.uns["neighbors"]["params"]["n_neighbors"] == 6
+    assert (np.diff(a.obsp["distances"].tocsr().indptr) == 5).all()   # k - 1, self excluded
+
+
+@needs_scanpy
+@pytest.mark.metal
+def test_neighbors_clamp_matches_scanpy_params():
+    import scanpy as sc
+    from metalsinglecell import pp as msc_pp
+    a = _clusters()[:10].copy()
+    b = a.copy()
+    with pytest.warns(UserWarning):
+        msc_pp.neighbors(a, use_rep="X")
+    sc.pp.neighbors(b, use_rep="X")
+    assert a.uns["neighbors"]["params"]["n_neighbors"] == b.uns["neighbors"]["params"]["n_neighbors"]
+    assert (np.diff(a.obsp["distances"].tocsr().indptr)
+            == np.diff(b.obsp["distances"].tocsr().indptr)).all()
