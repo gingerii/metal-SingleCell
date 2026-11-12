@@ -186,10 +186,15 @@ def _knn_edges(coords, n_neighs):
     from .neighbors import _knn_grid
     n = coords.shape[0]
     want = min(n, n_neighs + 1 + _TIE_PAD)
-    idx, dist = _knn_grid(coords, want)                       # self-inclusive, self first
-    cand, cd = idx[:, 1:], dist[:, 1:]
-    order = np.lexsort((cand, cd), axis=1)
-    keep = np.take_along_axis(cand, order, axis=1)[:, :n_neighs]
+    idx, dist = _knn_grid(coords, want)                       # self-inclusive
+    # Drop self by IDENTITY, not by column. A duplicate coordinate ties self at distance 0
+    # and can sort ahead of it (the brute path breaks ties by index, the grid kernel's sort
+    # is unstable), so dropping column 0 kept a self-edge and lost the twin. Self sorts last
+    # and is cut; when twins crowd self out of the candidates, the cut drops only a spare
+    # (want - 1 >= n_neighs whenever want < n, and when want == n every row holds self).
+    cd = np.where(idx == np.arange(n)[:, None], np.inf, dist)
+    order = np.lexsort((idx, cd), axis=1)[:, :want - 1]
+    keep = np.take_along_axis(idx, order, axis=1)[:, :n_neighs]
     kept_d = np.take_along_axis(cd, order, axis=1)[:, :n_neighs]
     rows = np.repeat(np.arange(n, dtype=np.int64), n_neighs)
     return rows, keep.ravel().astype(np.int64), kept_d.ravel().astype(np.float32)
@@ -521,8 +526,14 @@ def co_occurrence(adata, cluster_key, interval=50, spatial_key: str = "spatial",
     _require_categorical(adata, cluster_key)
     kw = ({"interval": np.asarray(interval, dtype=np.float64)}
           if np.ndim(interval) else {"n_intervals": int(interval)})
+    # Pass category CODES, not label values: the kernel encodes with np.unique, which sorts
+    # string labels lexically ('0','1','10','2'), while sq.pl.co_occurrence labels the axes
+    # in category order. Unused categories are dropped first, as squidpy's output does.
+    codes = adata.obs[cluster_key].cat.remove_unused_categories().cat.codes.to_numpy()
+    if (codes < 0).any():
+        raise ValueError(f"adata.obs[{cluster_key!r}] has missing values")
     res = _gr.co_occurrence(np.asarray(adata.obsm[spatial_key], dtype=np.float32),
-                            adata.obs[cluster_key].to_numpy(), **kw)
+                            codes, **kw)
     out = {"occ": res["occ"], "interval": res["interval"]}
     if copy:
         return out["occ"], out["interval"]      # squidpy returns the tuple, not the object

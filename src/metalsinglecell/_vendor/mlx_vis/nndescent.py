@@ -44,14 +44,17 @@ class NNDescent:
         k = min(self.k, n - 1)
         mc = self.max_candidates or k
 
-        if self.random_state is not None:
-            np.random.seed(self.random_state)
+        # VENDOR PATCH (metalsinglecell): a local generator instead of np.random.seed + the
+        # global stream, which reset the caller's numpy randomness on every build. Seeding a
+        # RandomState draws the same MT19937 stream as the global seed did, so a given
+        # random_state gives the same graph as before.
+        rng = np.random.RandomState(self.random_state)
 
         # Precompute squared norms
         sq_norms = mx.sum(X * X, axis=1)  # (n,)
 
         # Random init
-        idx_np = np.random.randint(0, n - 1, (n, k), dtype=np.int32)
+        idx_np = rng.randint(0, n - 1, (n, k), dtype=np.int32)
         i_vals = np.arange(n, dtype=np.int32)[:, None]
         idx_np = np.where(idx_np >= i_vals, idx_np + 1, idx_np).astype(np.int32)
         indices = mx.array(idx_np)
@@ -72,14 +75,14 @@ class NNDescent:
         proj_dim = min(100, d)
         proj_dim2 = min(300, d)
         if proj_dim < d:
-            P = mx.array(np.random.randn(d, proj_dim).astype(np.float32) / np.sqrt(proj_dim))
+            P = mx.array(rng.randn(d, proj_dim).astype(np.float32) / np.sqrt(proj_dim))
             X_low = X @ P          # (n, proj_dim)
             sq_norms_low = mx.sum(X_low * X_low, axis=1)
             mx.eval(X_low, sq_norms_low)
         else:
             X_low, sq_norms_low = X, sq_norms
         # P2 is computed lazily inside iter 1 to avoid persistent VRAM.
-        P2 = mx.array(np.random.randn(d, proj_dim2).astype(np.float32) / np.sqrt(proj_dim2)) if proj_dim2 < d else None
+        P2 = mx.array(rng.randn(d, proj_dim2).astype(np.float32) / np.sqrt(proj_dim2)) if proj_dim2 < d else None
 
         # Memory budget for row chunking.
         # Each row costs roughly: total_cols * 8 (argsort intermediates) + mc_new*k
@@ -486,7 +489,7 @@ def _dedup_topk(all_cands, all_dists, n_rows, k, mem_budget):
     return new_indices, new_dists
 
 
-def _rp_tree_init(X, n, k, d, n_trees=8, leaf_size=None):
+def _rp_tree_init(X, n, k, d, n_trees=8, leaf_size=None, rng=None):
     """Initialize k-NN graph using random projection trees.
 
     Build n_trees random projection trees. Points in the same leaf are
@@ -494,6 +497,8 @@ def _rp_tree_init(X, n, k, d, n_trees=8, leaf_size=None):
 
     All on MLX GPU.
     """
+    if rng is None:  # VENDOR PATCH (metalsinglecell): local generator, not the global stream
+        rng = np.random.RandomState()
     if leaf_size is None:
         leaf_size = max(k * 2, 64)
 
@@ -506,7 +511,7 @@ def _rp_tree_init(X, n, k, d, n_trees=8, leaf_size=None):
 
     for _ in range(n_trees):
         # Build one RP tree: recursively split data
-        leaves = _build_rp_tree(X_np, np.arange(n), leaf_size, d)
+        leaves = _build_rp_tree(X_np, np.arange(n), leaf_size, d, rng)
 
         # For each leaf, all points in the leaf are candidates for each other
         for leaf in leaves:
@@ -525,7 +530,7 @@ def _rp_tree_init(X, n, k, d, n_trees=8, leaf_size=None):
     # Fill remaining slots with random points
     for i in range(n):
         while cand_count[i] < k:
-            r = np.random.randint(0, n - 1)
+            r = rng.randint(0, n - 1)
             if r >= i:
                 r += 1
             cand_indices[i, cand_count[i]] = r
@@ -534,21 +539,23 @@ def _rp_tree_init(X, n, k, d, n_trees=8, leaf_size=None):
     return mx.array(cand_indices)
 
 
-def _build_rp_tree(X, point_ids, leaf_size, d):
+def _build_rp_tree(X, point_ids, leaf_size, d, rng=None):
     """Recursively build a random projection tree. Returns list of leaf arrays."""
     if len(point_ids) <= leaf_size:
         return [point_ids]
 
+    if rng is None:  # VENDOR PATCH (metalsinglecell): local generator, not the global stream
+        rng = np.random.RandomState()
     # Random hyperplane: pick two random points, split by midpoint
-    i, j = np.random.choice(len(point_ids), 2, replace=False)
+    i, j = rng.choice(len(point_ids), 2, replace=False)
     p1, p2 = X[point_ids[i]], X[point_ids[j]]
     normal = p2 - p1
     norm = np.linalg.norm(normal)
     if norm < 1e-10:
         # Degenerate: split randomly
         mid = len(point_ids) // 2
-        return (_build_rp_tree(X, point_ids[:mid], leaf_size, d) +
-                _build_rp_tree(X, point_ids[mid:], leaf_size, d))
+        return (_build_rp_tree(X, point_ids[:mid], leaf_size, d, rng) +
+                _build_rp_tree(X, point_ids[mid:], leaf_size, d, rng))
 
     normal /= norm
     midpoint = (p1 + p2) / 2
@@ -563,11 +570,11 @@ def _build_rp_tree(X, point_ids, leaf_size, d):
     # Avoid empty splits
     if len(left_ids) == 0 or len(right_ids) == 0:
         mid = len(point_ids) // 2
-        return (_build_rp_tree(X, point_ids[:mid], leaf_size, d) +
-                _build_rp_tree(X, point_ids[mid:], leaf_size, d))
+        return (_build_rp_tree(X, point_ids[:mid], leaf_size, d, rng) +
+                _build_rp_tree(X, point_ids[mid:], leaf_size, d, rng))
 
-    return (_build_rp_tree(X, left_ids, leaf_size, d) +
-            _build_rp_tree(X, right_ids, leaf_size, d))
+    return (_build_rp_tree(X, left_ids, leaf_size, d, rng) +
+            _build_rp_tree(X, right_ids, leaf_size, d, rng))
 
 
 def _gather_dists(X, sq_norms, col_ids):

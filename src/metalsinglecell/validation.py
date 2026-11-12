@@ -30,21 +30,25 @@ def compare(
 ) -> dict:
     """Compare two arrays and return a parity record.
 
-    ``rtol``/``atol`` default to fp32-appropriate tolerances. Non-finite entries
-    (NaN/inf — e.g. HVG dispersions for zero-variance genes) are handled
+    ``rtol``/``atol`` default to fp32-appropriate tolerances. The shapes must match
+    exactly, before flattening (so (2,3) vs (3,2), or (n,1) vs (n,), fails). Non-finite
+    entries (NaN/inf — e.g. HVG dispersions for zero-variance genes) are handled
     explicitly: error metrics are computed over positions finite in both arrays,
-    and the comparison only passes if the non-finite *masks* match.
+    and the comparison only passes if the non-finite entries match exactly — NaN
+    where NaN, and inf with the same sign.
     """
-    got = np.asarray(got, dtype=np.float64).ravel()
-    expected = np.asarray(expected, dtype=np.float64).ravel()
+    got = np.asarray(got, dtype=np.float64)
+    expected = np.asarray(expected, dtype=np.float64)
     if got.shape != expected.shape:
         return {
             "check": name, "passed": False, "reason": "shape_mismatch",
-            "got_shape": got.size, "expected_shape": expected.size,
+            "got_shape": got.shape, "expected_shape": expected.shape,
         }
+    got, expected = got.ravel(), expected.ravel()
 
     finite = np.isfinite(got) & np.isfinite(expected)
-    masks_match = bool(np.array_equal(np.isfinite(got), np.isfinite(expected)))
+    # equal_nan matches NaN to NaN only; inf must equal inf of the same sign.
+    masks_match = bool(np.array_equal(got[~finite], expected[~finite], equal_nan=True))
     g, e = got[finite], expected[finite]
 
     abs_err = np.abs(g - e)

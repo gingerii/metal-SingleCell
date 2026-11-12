@@ -13,7 +13,9 @@ def kmeans(X, n_clusters: int = 8, max_iter: int = 300, tol: float = 1e-4,
            random_state: int = 0) -> np.ndarray:
     """Lloyd's k-means on the GPU (MLX). Returns integer labels per row.
 
-    Distances use ``|x|^2 + |c|^2 - 2 x·c^T`` (one matmul/iter); k-means++ init.
+    Distances use ``|x|^2 + |c|^2 - 2 x·c^T`` (one matmul/iter); k-means++ init. As in
+    sklearn, fewer than ``n_clusters`` distinct clusters can come back (duplicate rows, or
+    more clusters than distinct rows); that case warns rather than fails.
     """
     import mlx.core as mx
 
@@ -26,8 +28,11 @@ def kmeans(X, n_clusters: int = 8, max_iter: int = 300, tol: float = 1e-4,
     centers = [int(rng.integers(n))]
     d2 = np.sum((Xnp - Xnp[centers[0]]) ** 2, axis=1)
     for _ in range(1, n_clusters):
-        probs = d2 / d2.sum()
-        nxt = int(rng.choice(n, p=probs))
+        total = d2.sum()
+        # total == 0: every row already sits on a chosen centre (duplicate rows, or more
+        # clusters than distinct rows), so there is no distance left to weight by. Any row
+        # will do; the extra centre duplicates an existing one and its cluster stays empty.
+        nxt = int(rng.choice(n, p=d2 / total)) if total > 0 else int(rng.integers(n))
         centers.append(nxt)
         d2 = np.minimum(d2, np.sum((Xnp - Xnp[nxt]) ** 2, axis=1))
     C = mx.array(Xnp[centers])
@@ -45,6 +50,8 @@ def kmeans(X, n_clusters: int = 8, max_iter: int = 300, tol: float = 1e-4,
         onehot = (new_labels[:, None] == mx.arange(n_clusters)[None, :]).astype(mx.float32)
         counts = mx.sum(onehot, axis=0, keepdims=True).T
         newC = (onehot.T @ Xg) / mx.maximum(counts, 1.0)
+        newC = mx.where(counts > 0, newC, C)               # empty cluster: keep its centroid,
+                                                           # don't collapse it to the origin
         shift = mx.sum((newC - C) ** 2).item()
         C = newC
         mx.eval(C, new_labels)
@@ -52,7 +59,14 @@ def kmeans(X, n_clusters: int = 8, max_iter: int = 300, tol: float = 1e-4,
         labels = new_labels
         if not moved or shift < tol:
             break
-    return np.asarray(labels)
+    labels = np.asarray(labels)
+    n_found = len(np.unique(labels))
+    if n_found < n_clusters:
+        import warnings
+        warnings.warn(f"Number of distinct clusters ({n_found}) found smaller than n_clusters "
+                      f"({n_clusters}). Possibly due to duplicate points in X.", UserWarning,
+                      stacklevel=2)
+    return labels
 
 
 def _subset_row_mean(X, cols: np.ndarray) -> np.ndarray:
@@ -77,6 +91,13 @@ def score_genes(X, gene_list, var_names, ctrl_size: int = 50, n_bins: int = 25,
     var_names = np.asarray(var_names).astype(str)
     name_to_idx = {g: i for i, g in enumerate(var_names)}
     gene_idx = np.array([name_to_idx[g] for g in gene_list if g in name_to_idx])
+    missing = [g for g in gene_list if g not in name_to_idx]
+    if missing:                                              # scanpy warns, then drops them
+        import warnings
+        warnings.warn(f"genes are not in var_names and ignored: {missing}", UserWarning,
+                      stacklevel=2)
+    if gene_idx.size == 0:
+        raise ValueError("No valid genes were passed for scoring.")
 
     Xc = sp.csc_matrix(X)
     obs_avg = np.asarray(Xc.mean(axis=0)).ravel()           # per-gene avg expression
@@ -185,7 +206,14 @@ def rank_genes_groups(X, groups, var_names=None, method: str = "t-test",
         clf = LogisticRegression(**kwds); clf.fit(Xd, code)
         coef = clf.coef_; existing = np.unique(code)            # (n_classes, n_genes)
         for gi, cat in enumerate(cats):
-            scores = coef[0] if G <= 2 else coef[np.argmax(existing == gi)]
+            if G == 2:
+                # Binary fit: sklearn's single coef_ row points toward classes_[1]. That group
+                # gets +coef and the other -coef, so each ranks its own markers. Deliberate
+                # departure from scanpy, which reports only the first group and gives it the
+                # +coef row, i.e. the second group's markers under the first group's name.
+                scores = coef[0] if gi == clf.classes_[1] else -coef[0]
+            else:
+                scores = coef[np.argmax(existing == gi)]
             order = np.argsort(-scores)
             out[str(cat)] = {"names": var_names[order], "scores": scores[order],
                              "pvals": None, "logfoldchanges": None}

@@ -155,7 +155,8 @@ def tsne(adata, use_rep: str | None = None, perplexity: float = 30.0, n_componen
     key = key_added or "tsne"
     adata.obsm["X_tsne" if key_added is None else key_added] = _tl.tsne(
         np.asarray(rep, dtype=np.float32), n_components=n_components, perplexity=perplexity,
-        learning_rate=learning_rate, random_state=random_state)
+        learning_rate=learning_rate, early_exaggeration=early_exaggeration,
+        random_state=random_state)
     adata.uns[key] = {"params": {"perplexity": perplexity,
                                  "early_exaggeration": early_exaggeration,
                                  "learning_rate": learning_rate, "metric": "euclidean"}}
@@ -277,27 +278,41 @@ def rank_genes_groups(adata, groupby, method: str = "t-test", reference: str = "
 
 
 def score_genes(adata, gene_list, score_name: str = "score", ctrl_size: int = 50,
-                n_bins: int = 25, random_state: int = 0, copy: bool = False):
-    """Gene-set score (``sc.tl.score_genes``); writes ``adata.obs[score_name]``."""
+                n_bins: int = 25, random_state: int = 0, copy: bool = False,
+                use_raw: bool | None = None, layer: str | None = None):
+    """Gene-set score (``sc.tl.score_genes``); writes ``adata.obs[score_name]``.
+
+    ``use_raw``/``layer`` follow scanpy: ``.raw`` is used when it exists unless you pass
+    ``False`` or a ``layer``. Always reading ``.X`` scored the z-scaled HVG matrix on the
+    tutorial object, dropping every set gene outside the HVGs.
+    """
     import scipy.sparse as sp
     from .pp import _reject_backed
-    _reject_backed(adata, "score_genes")
+    _reject_backed(adata, "score_genes", layer)
     adata = adata.copy() if copy else adata
-    X = np.asarray(adata.X.todense() if sp.issparse(adata.X) else adata.X, dtype=np.float32)
-    adata.obs[score_name] = _tl.score_genes(X, list(gene_list), adata.var_names.to_numpy(),
+    src, var_names, _ = _expression_source(adata, layer, use_raw)
+    # Keep a sparse source sparse: the scorer slices out only the set and control columns.
+    X = src.astype(np.float32) if sp.issparse(src) else np.asarray(src, dtype=np.float32)
+    adata.obs[score_name] = _tl.score_genes(X, list(gene_list), var_names,
                                             ctrl_size=ctrl_size, n_bins=n_bins, random_state=random_state)
     return adata if copy else None
 
 
-def score_genes_cell_cycle(adata, s_genes, g2m_genes, random_state: int = 0, copy: bool = False):
-    """S/G2M scores + phase (``sc.tl.score_genes_cell_cycle``); writes ``obs['S_score'/'G2M_score'/'phase']``."""
+def score_genes_cell_cycle(adata, s_genes, g2m_genes, random_state: int = 0, copy: bool = False,
+                           use_raw: bool | None = None, layer: str | None = None):
+    """S/G2M scores + phase (``sc.tl.score_genes_cell_cycle``); writes ``obs['S_score'/'G2M_score'/'phase']``.
+
+    ``use_raw``/``layer`` follow scanpy (``.raw`` when it exists), as in :func:`score_genes`.
+    """
     import scipy.sparse as sp
     from .pp import _reject_backed
-    _reject_backed(adata, "score_genes_cell_cycle")
+    _reject_backed(adata, "score_genes_cell_cycle", layer)
     adata = adata.copy() if copy else adata
-    X = np.asarray(adata.X.todense() if sp.issparse(adata.X) else adata.X, dtype=np.float32)
+    src, var_names, _ = _expression_source(adata, layer, use_raw)
+    # Keep a sparse source sparse: the scorer slices out only the set and control columns.
+    X = src.astype(np.float32) if sp.issparse(src) else np.asarray(src, dtype=np.float32)
     res = _tl.score_genes_cell_cycle(X, list(s_genes), list(g2m_genes),
-                                     adata.var_names.to_numpy(), random_state=random_state)
+                                     var_names, random_state=random_state)
     adata.obs["S_score"] = res["S_score"]
     adata.obs["G2M_score"] = res["G2M_score"]
     import pandas as pd

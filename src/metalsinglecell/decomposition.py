@@ -29,11 +29,18 @@ def _svd_flip(u: np.ndarray, v: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return u * signs, v * signs[:, None]
 
 
-def _finalize(U, S, Vt, n_samples: int, n_comps: int, total_var: float):
+def _finalize(U, S, Vt, n_samples: int, n_comps: int, total_var: float,
+              zero_center: bool = True):
     U, Vt = _svd_flip(U, Vt)
     components = Vt[:n_comps]
     x_pca = U[:, :n_comps] * S[:n_comps]
-    explained_variance = (S[:n_comps] ** 2) / (n_samples - 1)
+    if zero_center:
+        explained_variance = (S[:n_comps] ** 2) / (n_samples - 1)
+    else:
+        # Uncentred: S**2 carries the mean, which total_var (a centred variance) excludes, so
+        # the ratio could exceed 1. sklearn's TruncatedSVD (scanpy's zero_center=False) uses
+        # the variance of the scores instead; ddof=1 on both sides gives the same ratio.
+        explained_variance = x_pca.var(axis=0, ddof=1)
     variance_ratio = explained_variance / total_var
     return x_pca.astype(np.float32), components.astype(np.float32), variance_ratio.astype(np.float64)
 
@@ -99,7 +106,8 @@ def pca(
     Xc = _center_gpu(X) if zero_center else _as_gpu(X)
 
     if solver == "randomized":
-        return _pca_randomized(Xc, n_samples, n_comps, random_state, n_oversamples, n_iter)
+        return _pca_randomized(Xc, n_samples, n_comps, random_state, n_oversamples, n_iter,
+                               zero_center=zero_center)
 
     # full / arpack: hand the centered matrix to LAPACK in fp64.
     Xc64 = np.asarray(Xc).astype(np.float64)
@@ -121,7 +129,7 @@ def pca(
     else:
         raise ValueError(f"unknown solver {solver!r} (full|arpack|randomized|covariance_eigh)")
 
-    return _finalize(U, S, Vt, n_samples, n_comps, total_var)
+    return _finalize(U, S, Vt, n_samples, n_comps, total_var, zero_center=zero_center)
 
 
 def _eigh_components(cov: np.ndarray, n_samples: int, n_comps: int):
@@ -164,6 +172,9 @@ def pca_covariance_eigh_streaming(reader, transform, n_out_genes: int, n_comps: 
     from .sparse import CSR
 
     H, n = int(n_out_genes), reader.n_obs
+    # Clamp silently, exactly as the in-core `pca` does: eigh yields at most H components, and
+    # an n_comps above that crashed the projection with a broadcast error.
+    n_comps = min(int(n_comps), min(n, H))
     br = int(block_rows or auto_block_rows(H, reader.default_block_rows))
     if H > 20000:
         import warnings
@@ -216,7 +227,7 @@ def _ortho(Z):
 
 
 def _pca_randomized(Xc, n_samples: int, n_comps: int, random_state: int,
-                    n_oversamples: int, n_iter: int):
+                    n_oversamples: int, n_iter: int, zero_center: bool = True):
     """Randomized SVD: GPU matmuls (fp32) + fp64 core SVD of the projection."""
     import mlx.core as mx
 
@@ -237,7 +248,7 @@ def _pca_randomized(Xc, n_samples: int, n_comps: int, random_state: int,
     Uhat, S, Vt = np.linalg.svd(np.asarray(B).astype(np.float64), full_matrices=False)
     U = np.asarray(Q).astype(np.float64) @ Uhat
     total_var = np.asarray(Xc).astype(np.float64).var(axis=0, ddof=1).sum()
-    return _finalize(U, S, Vt, n_samples, n_comps, total_var)
+    return _finalize(U, S, Vt, n_samples, n_comps, total_var, zero_center=zero_center)
 
 
 def _pca_randomized_sparse(csr, n_comps: int, random_state: int,

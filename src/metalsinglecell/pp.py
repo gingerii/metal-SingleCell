@@ -107,7 +107,14 @@ def _stream_stages(adata):
 
 
 def _record_transform(adata, *stage):
-    _STREAM_TRANSFORMS.setdefault(id(adata), []).append(tuple(stage))
+    key = id(adata)
+    if key not in _STREAM_TRANSFORMS:
+        # Keyed by id(), so drop the entry when the object dies: CPython reuses a dead
+        # object's id, and a new AnnData at the same address would otherwise inherit its
+        # stages. (AnnData is unhashable, so a WeakKeyDictionary is not an option.)
+        import weakref
+        weakref.finalize(adata, _STREAM_TRANSFORMS.pop, key, None)
+    _STREAM_TRANSFORMS.setdefault(key, []).append(tuple(stage))
 
 
 def _build_transform(adata):
@@ -196,6 +203,15 @@ def _like_input(out, original):
     return out.toarray() if sp.issparse(out) else np.asarray(out)
 
 
+def _warn_if_zero_count_cells(counts, target_sum):
+    """scanpy's ``"Some cells have zero counts"`` check, run on its norm factors."""
+    import warnings
+    with np.errstate(divide="ignore", invalid="ignore"):
+        all_positive = np.all(np.asarray(counts, dtype=np.float64) / target_sum > 0)
+    if not all_positive:
+        warnings.warn("Some cells have zero counts", UserWarning, stacklevel=3)
+
+
 def normalize_total(adata, target_sum: float | None = None, layer=None,
                     exclude_highly_expressed: bool = False, key_added: str | None = None,
                     inplace: bool = True, copy: bool = False):
@@ -210,20 +226,46 @@ def normalize_total(adata, target_sum: float | None = None, layer=None,
     adata = _copy_or_reject(adata, copy, "normalize_total")
     reader = _backed_reader(adata, layer)
     if reader is not None:                       # out-of-core: record a deferred transform
-        if target_sum is not None:
-            ts = float(target_sum)
-        elif "total_counts" in adata.obs:        # reuse per-cell totals from a prior QC pass
-            ts = float(np.median(adata.obs["total_counts"].to_numpy()))
-        else:                                    # else one lightweight pass for row sums
+        if not inplace:
+            raise NotImplementedError(
+                "normalize_total(inplace=False) is not supported on a backed (on-disk) adata.X: "
+                "the normalized matrix cannot be returned in memory. Use inplace=True (records "
+                "a deferred transform), or load first with `adata = adata.to_memory()`.")
+        pending = [s[0] for s in _stream_stages(adata)]
+        if pending and (target_sum is None or key_added is not None):
+            # The totals below are read from the raw store (or a QC pass over it), so after a
+            # pending stage they describe the old counts: the median target and the key_added
+            # factors would both be wrong. Getting them right needs an extra full pass.
+            raise NotImplementedError(
+                f"normalize_total on a backed adata.X with pending stages {pending} needs the "
+                "per-cell totals after those stages, which takes an extra pass over the data. "
+                "Pass an explicit target_sum without key_added, or normalize before the other "
+                "stages.")
+        totals = None
+        if "total_counts" in adata.obs:          # reuse per-cell totals from a prior QC pass
+            totals = adata.obs["total_counts"].to_numpy()
+        elif target_sum is None or key_added is not None:   # else one lightweight row-sum pass
             from .backed import stream_qc
-            ts = float(np.median(stream_qc(reader)["total_counts"]))
+            totals = stream_qc(reader)["total_counts"]
+        # The store is CSR, so follow scanpy's CSR path: the median over ALL cells.
+        ts = float(target_sum) if target_sum is not None else float(np.median(totals))
+        if totals is not None:
+            _warn_if_zero_count_cells(totals, ts)
+        if key_added is not None:                # scanpy stores the norm factors counts / target
+            adata.obs[key_added] = totals / ts
         _record_transform(adata, "normalize_total", ts)
         return adata if copy else None
     import scipy.sparse as sp
-    X = sp.csr_matrix(adata.layers[layer] if layer is not None else adata.X)
-    ts = float(target_sum) if target_sum is not None else float(np.median(np.asarray(X.sum(1)).ravel()))
     src = adata.layers[layer] if layer is not None else adata.X
+    X = sp.csr_matrix(src)
     counts = np.asarray(X.sum(1)).ravel()
+    if target_sum is not None:
+        ts = float(target_sum)
+    elif sp.issparse(src):                       # scanpy 1.11.5's CSR path: median of all cells
+        ts = float(np.median(counts))
+    else:                                        # its dense path: median of nonzero totals
+        ts = float(np.median(counts[counts > 0]))
+    _warn_if_zero_count_cells(counts, ts)
     out = _like_input(CSR.from_scipy(X).normalize_total(ts).to_scipy(), src)
     if not inplace:
         return {"X": out, "norm_factor": counts / ts}
@@ -302,16 +344,16 @@ def filter_cells(adata, min_counts=None, max_counts=None, min_genes=None,
     X = _sci(adata)
     keep = _pp.filter_cells(X, min_counts=min_counts, max_counts=max_counts,
                             min_genes=min_genes, max_genes=max_genes)
+    per_cell = (_pp.nonzero_per_row(X) if (min_genes is not None or max_genes is not None)
+                else np.asarray(X.sum(axis=1)).ravel())
+    if not inplace:                              # scanpy returns before writing anything
+        return keep, per_cell
     # scanpy records the quantity it filtered on, so the threshold stays inspectable after the
     # subset: obs['n_genes'] for the gene thresholds, obs['n_counts'] for the count ones.
     if min_genes is not None or max_genes is not None:
         adata.obs["n_genes"] = _pp.nonzero_per_row(X)
-    per_cell = (_pp.nonzero_per_row(X) if (min_genes is not None or max_genes is not None)
-                else np.asarray(X.sum(axis=1)).ravel())
     if min_counts is not None or max_counts is not None:
         adata.obs["n_counts"] = np.asarray(X.sum(axis=1)).ravel()
-    if not inplace:
-        return keep, per_cell
     adata._inplace_subset_obs(keep)
     return adata if copy else None
 
@@ -327,14 +369,14 @@ def filter_genes(adata, min_counts=None, max_counts=None, min_cells=None,
     X = _sci(adata)
     keep = _pp.filter_genes(X, min_counts=min_counts, max_counts=max_counts,
                             min_cells=min_cells, max_cells=max_cells)
-    if min_cells is not None or max_cells is not None:
-        adata.var["n_cells"] = _pp.nonzero_per_col(X)
     per_gene = (_pp.nonzero_per_col(X) if (min_cells is not None or max_cells is not None)
                 else np.asarray(X.sum(axis=0)).ravel())
+    if not inplace:                              # scanpy returns before writing anything
+        return keep, per_gene
+    if min_cells is not None or max_cells is not None:
+        adata.var["n_cells"] = _pp.nonzero_per_col(X)
     if min_counts is not None or max_counts is not None:
         adata.var["n_counts"] = np.asarray(X.sum(axis=0)).ravel()
-    if not inplace:
-        return keep, per_gene
     adata._inplace_subset_var(keep)
     return adata if copy else None
 
@@ -360,7 +402,10 @@ def scale(adata, max_value: float | None = None, zero_center: bool = True,
     # on the same scale later, and they are cheap next to the scaling itself.
     mean = np.asarray(X.mean(axis=0)).ravel()
     sq_mean = np.asarray(X.multiply(X).mean(axis=0)).ravel()
-    std = np.sqrt(np.maximum(sq_mean - mean * mean, 0.0))
+    var = np.maximum(sq_mean - mean * mean, 0.0)
+    if X.shape[0] != 1:                          # ddof=1: what scanpy stores and _pp.scale divides by
+        var *= X.shape[0] / (X.shape[0] - 1)
+    std = np.sqrt(var)
     std[std == 0] = 1.0
     out = _pp.scale(_csr(adata, layer), max_value=max_value, zero_center=zero_center)
     if layer is not None:
@@ -682,13 +727,18 @@ def pca(adata, n_comps: int | None = None, layer=None, use_highly_variable: bool
 
     reader = _backed_reader(adata, layer)
     if reader is not None:                       # out-of-core: fused streaming covariance-eigh
+        if not zero_center:
+            raise NotImplementedError(
+                "pca(zero_center=False) is not supported on a backed (on-disk) adata.X: the "
+                "streaming covariance-eigh solver always mean-centres. Use zero_center=True, "
+                "or load into memory first (`adata = adata.to_memory()`).")
         from .decomposition import pca_covariance_eigh_streaming
         H = int(mask.sum()) if mask is not None else adata.n_vars
         tf = _build_pca_transform(adata, mask)
         X_pca, comps, vr = pca_covariance_eigh_streaming(reader, tf, H, n_comps=n_comps)
         adata.obsm["X_pca"] = np.asarray(X_pca)
-        # n_comps may have been clamped to the rank of the selection — size from the
-        # components actually returned, not from what was asked for.
+        # The streaming solver clamps n_comps to min(n_obs, n_selected_genes), as the in-core
+        # path does — size from the components actually returned, not from what was asked for.
         pcs = np.zeros((adata.n_vars, np.asarray(comps).shape[0]), dtype=np.float32)
         pcs[mask if mask is not None else slice(None)] = np.asarray(comps).T
         adata.varm["PCs"] = pcs
@@ -768,8 +818,15 @@ def neighbors(adata, n_neighbors: int = 15, n_pcs: int | None = None, *, use_rep
     if metric != "euclidean":
         raise NotImplementedError(f"metric={metric!r} is not implemented (Euclidean only)")
     adata = adata.copy() if copy else adata
+    if n_neighbors > adata.n_obs:                    # very small datasets: scanpy's clamp
+        import warnings
+        n_neighbors = 1 + int(0.5 * adata.n_obs)
+        warnings.warn(f"n_obs too small: adjusting to `n_neighbors = {n_neighbors}`",
+                      UserWarning, stacklevel=2)
     rep, rep_key = _choose_representation(adata, use_rep, n_pcs, random_state)
-    if n_pcs is not None:                            # scanpy truncates the rep to the first n_pcs
+    # scanpy truncates only an obsm representation to its first n_pcs columns; .X (use_rep='X',
+    # n_pcs=0, or the automatic choice on <= 50 variables) is always used whole.
+    if n_pcs is not None and rep_key not in (None, "X"):
         rep = rep[:, :n_pcs]
     dist, conn = _nb(rep, n_neighbors=n_neighbors, random_state=random_state)
 

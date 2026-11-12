@@ -363,9 +363,12 @@ def _local_moving_sync(graph: Graph, resolution: float, twom: float, seed: int =
         comm = mx.where(commit, target, comm)         # no-op when no vertex wants to move
         # Frontier for the NEXT pass: a vertex is re-evaluated only if it moved, a
         # neighbor moved (its best target may change), or it wanted to move but the coin
-        # held it (a pending move to retry). A vertex with an unchanged neighbourhood
-        # would just re-confirm "stay", so skipping it changes nothing — pruning is
-        # exact here (committed moves, and final labels, identical to no-pruning).
+        # held it (a pending move to retry). This is a quality-preserving APPROXIMATION,
+        # not exact: a vertex's gain also depends on the Σtot of the communities it touches,
+        # which shifts when a NON-neighbour joins or leaves them, and such a vertex is not
+        # woken. Pruned local moving can therefore stop with a few improving moves left, and
+        # labels can differ from prune=False (as with Ozaki et al.'s pruning and Leiden's
+        # queue; modularity is unchanged in practice — see the graph-clustering skill).
         if prune_on:
             ci = commit.astype(mx.int32)
             nbr = mx.zeros((n,), dtype=mx.int32).at[graph.edge_src].maximum(ci[graph.indices])

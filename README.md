@@ -265,8 +265,11 @@ python -m metalsinglecell.backed  1M_neurons.h5  atlas.zarr  --block-rows 100000
 ```
 
 ```python
-import anndata as ad, metalsinglecell as msc
-adata = ad.read_zarr("atlas.zarr")     # backed, not fully loaded
+import anndata as ad, zarr, metalsinglecell as msc
+from anndata.io import read_elem, sparse_dataset
+g = zarr.open("atlas.zarr", mode="r")
+adata = ad.AnnData(X=sparse_dataset(g["X"]),   # .X stays on disk (ad.read_zarr would load it)
+                   obs=read_elem(g["obs"]), var=read_elem(g["var"]))
 msc.pp.calculate_qc_metrics(adata)     # each pp step detects the backed .X and streams
 msc.pp.normalize_total(adata); msc.pp.log1p(adata)
 msc.pp.highly_variable_genes(adata); msc.pp.scale(adata)
