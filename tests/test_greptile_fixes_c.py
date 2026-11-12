@@ -133,3 +133,60 @@ def test_grid_builder_duplicate_coordinates(set_diag):
     rows = _row_sets(C)
     assert all(j in rows[i] for i, j in twins.items())
     assert _tie_free_differences(C, b.obsp["spatial_connectivities"], coords) == 0
+
+
+# --------------------------------------------------------------------------- 2. co_occurrence
+
+
+def _typed_field(cats, labels_fn, n=400, seed=0):
+    import pandas as pd
+    coords = np.random.default_rng(seed).uniform(0, 100, size=(n, 2))
+    obs = pd.DataFrame({"ct": pd.Categorical(labels_fn(coords), categories=cats)})
+    return _adata(coords, obs=obs)
+
+
+def _four_bands(xy):
+    x = xy[:, 0]
+    return np.where(x < 25, "0", np.where(x < 50, "1", np.where(x < 75, "2", "10")))
+
+
+@pytest.mark.metal
+@needs_squidpy
+def test_co_occurrence_follows_categorical_order():
+    """Leiden-style labels: categories '0','1','2','10' in numeric order, which np.unique
+    would sort to '0','1','10','2'."""
+    import squidpy as sq
+    from metalsinglecell import gr as msc_gr
+    a = _typed_field(["0", "1", "2", "10"], _four_bands)
+    occ_m, int_m = msc_gr.co_occurrence(a.copy(), "ct", interval=10, copy=True)
+    occ_s, int_s = sq.gr.co_occurrence(a.copy(), "ct", interval=10, copy=True)
+    np.testing.assert_allclose(int_m, int_s)
+    assert occ_m.shape == occ_s.shape
+    np.testing.assert_allclose(occ_m, occ_s, rtol=1e-6, atol=1e-9)
+    # uns slot carries the same array
+    msc_gr.co_occurrence(a, "ct", interval=10)
+    np.testing.assert_allclose(a.uns["ct_co_occurrence"]["occ"], occ_s, rtol=1e-6, atol=1e-9)
+
+
+@pytest.mark.metal
+@needs_squidpy
+def test_co_occurrence_drops_unused_categories_and_keeps_order():
+    """An unused category is dropped (squidpy's dimensions); the rest keep category order.
+
+    squidpy itself mis-indexes when an unused category sits in the middle, so the oracle is
+    squidpy on the same data with the unused category removed first.
+    """
+    import squidpy as sq
+    from metalsinglecell import gr as msc_gr
+
+    def bands(xy):
+        x = xy[:, 0]
+        return np.where(x < 33, "A", np.where(x < 66, "C", "B"))
+
+    a = _typed_field(["A", "gone", "C", "B"], bands)
+    occ_m, _ = msc_gr.co_occurrence(a.copy(), "ct", interval=10, copy=True)
+    ref = a.copy()
+    ref.obs["ct"] = ref.obs["ct"].cat.remove_unused_categories()
+    occ_s, _ = sq.gr.co_occurrence(ref, "ct", interval=10, copy=True)
+    assert occ_m.shape == (3, 3, 9)
+    np.testing.assert_allclose(occ_m, occ_s, rtol=1e-6, atol=1e-9)

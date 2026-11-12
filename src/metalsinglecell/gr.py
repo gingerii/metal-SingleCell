@@ -526,8 +526,14 @@ def co_occurrence(adata, cluster_key, interval=50, spatial_key: str = "spatial",
     _require_categorical(adata, cluster_key)
     kw = ({"interval": np.asarray(interval, dtype=np.float64)}
           if np.ndim(interval) else {"n_intervals": int(interval)})
+    # Pass category CODES, not label values: the kernel encodes with np.unique, which sorts
+    # string labels lexically ('0','1','10','2'), while sq.pl.co_occurrence labels the axes
+    # in category order. Unused categories are dropped first, as squidpy's output does.
+    codes = adata.obs[cluster_key].cat.remove_unused_categories().cat.codes.to_numpy()
+    if (codes < 0).any():
+        raise ValueError(f"adata.obs[{cluster_key!r}] has missing values")
     res = _gr.co_occurrence(np.asarray(adata.obsm[spatial_key], dtype=np.float32),
-                            adata.obs[cluster_key].to_numpy(), **kw)
+                            codes, **kw)
     out = {"occ": res["occ"], "interval": res["interval"]}
     if copy:
         return out["occ"], out["interval"]      # squidpy returns the tuple, not the object
