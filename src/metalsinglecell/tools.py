@@ -77,6 +77,13 @@ def score_genes(X, gene_list, var_names, ctrl_size: int = 50, n_bins: int = 25,
     var_names = np.asarray(var_names).astype(str)
     name_to_idx = {g: i for i, g in enumerate(var_names)}
     gene_idx = np.array([name_to_idx[g] for g in gene_list if g in name_to_idx])
+    missing = [g for g in gene_list if g not in name_to_idx]
+    if missing:                                              # scanpy warns, then drops them
+        import warnings
+        warnings.warn(f"genes are not in var_names and ignored: {missing}", UserWarning,
+                      stacklevel=2)
+    if gene_idx.size == 0:
+        raise ValueError("No valid genes were passed for scoring.")
 
     Xc = sp.csc_matrix(X)
     obs_avg = np.asarray(Xc.mean(axis=0)).ravel()           # per-gene avg expression

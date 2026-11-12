@@ -158,3 +158,78 @@ def test_logreg_three_groups_unchanged_vs_scanpy():
         np.testing.assert_allclose(a.uns["rank_genes_groups"]["scores"][c],
                                    ref.uns["rank_genes_groups"]["scores"][c], rtol=1e-5)
     assert a.uns["rank_genes_groups"]["names"]["C"][0] == "g2"
+
+
+# ---------------- 5. score_genes follows scanpy's use_raw / layer ----------------
+
+S_GENES = ["G3", "G70", "G75", "G80", "G85", "G90"]
+G2M_GENES = ["G5", "G72", "G77", "G82", "G88", "G95"]
+SET = ["G5", "G70", "G90", "G100", "G110"]          # G70 and above live only in .raw
+
+
+def _raw_lognorm_x_scaled(seed=0, center=True):
+    """``.raw`` holds log-normalised values for 120 genes; ``.X`` is scaled over the first 60.
+
+    With ``center=True`` (z-scaling, the tutorial object's state) every gene's mean in ``.X`` is
+    ~0, so the expression bins that pick control genes are set by rounding noise; comparing
+    scores computed *from* ``.X`` then needs ``center=False``.
+    """
+    import anndata as ad
+    rng = np.random.default_rng(seed)
+    n, g = 300, 120
+    counts = rng.poisson(rng.gamma(2.0, 1.0, size=g) + 0.2, size=(n, g)).astype(np.float32)
+    lognorm = np.log1p(counts / counts.sum(1, keepdims=True) * 1e4).astype(np.float32)
+    a = ad.AnnData(lognorm, obs=pd.DataFrame(index=[f"c{i}" for i in range(n)]),
+                   var=pd.DataFrame(index=[f"G{i}" for i in range(g)]))
+    a.layers["lognorm"] = lognorm.copy()
+    a.raw = a
+    a = a[:, :60].copy()
+    Xs = a.X - a.X.mean(0) if center else a.X
+    a.X = (Xs / (a.X.std(0) + 1e-8)).astype(np.float32)
+    return a
+
+
+@pytest.mark.metal
+def test_score_genes_default_uses_raw_like_scanpy():
+    sc = pytest.importorskip("scanpy")
+    import metalsinglecell as msc
+    a = _raw_lognorm_x_scaled()
+    ref = a.copy()
+    sc.tl.score_genes(ref, SET)
+    msc.tl.score_genes(a, SET)
+    np.testing.assert_allclose(a.obs["score"], ref.obs["score"], rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.metal
+def test_score_genes_use_raw_false_and_layer_like_scanpy():
+    sc = pytest.importorskip("scanpy")
+    import metalsinglecell as msc
+    a = _raw_lognorm_x_scaled(center=False)
+
+    ref = a.copy()
+    sc.tl.score_genes(ref, SET, use_raw=False)
+    with pytest.warns(UserWarning, match="not in var_names"):
+        msc.tl.score_genes(a, SET, use_raw=False)
+    np.testing.assert_allclose(a.obs["score"], ref.obs["score"], rtol=1e-4, atol=1e-5)
+
+    ref = a.copy()
+    sc.tl.score_genes(ref, ["G5", "G10", "G20"], layer="lognorm")
+    msc.tl.score_genes(a, ["G5", "G10", "G20"], layer="lognorm")
+    np.testing.assert_allclose(a.obs["score"], ref.obs["score"], rtol=1e-4, atol=1e-5)
+
+    with pytest.raises(ValueError, match="No valid genes"), \
+            pytest.warns(UserWarning, match="not in var_names"):
+        msc.tl.score_genes(a, ["NOPE1", "NOPE2"])
+
+
+@pytest.mark.metal
+def test_score_genes_cell_cycle_default_uses_raw_like_scanpy():
+    sc = pytest.importorskip("scanpy")
+    import metalsinglecell as msc
+    a = _raw_lognorm_x_scaled()
+    ref = a.copy()
+    sc.tl.score_genes_cell_cycle(ref, s_genes=S_GENES, g2m_genes=G2M_GENES)
+    msc.tl.score_genes_cell_cycle(a, S_GENES, G2M_GENES)
+    for key in ("S_score", "G2M_score"):
+        np.testing.assert_allclose(a.obs[key], ref.obs[key], rtol=1e-4, atol=1e-5)
+    assert list(a.obs["phase"].astype(str)) == list(ref.obs["phase"].astype(str))
