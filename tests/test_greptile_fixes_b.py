@@ -205,3 +205,34 @@ def test_filter_inplace_false_returns_scanpys_mask_and_counts(fn, kw):
     m1, n1 = getattr(msc_pp, fn)(ad.AnnData(X.copy()), inplace=False, **kw)
     m2, n2 = getattr(sc.pp, fn)(ad.AnnData(X.copy()), inplace=False, **kw)
     assert np.array_equal(m1, m2) and np.array_equal(n1, n2)
+
+
+# --------------------------------------------------------------------------- validation.compare
+
+
+@pytest.mark.parametrize("got,expected", [
+    (np.arange(6.0).reshape(2, 3), np.arange(6.0).reshape(3, 2)),   # same flattened values
+    (np.ones((5, 1)), np.ones(5)),                                   # strict: no squeezing
+])
+def test_compare_rejects_shape_mismatch_before_flattening(got, expected):
+    from metalsinglecell import validation
+    r = validation.compare("shape", got, expected)
+    assert not r["passed"] and r["reason"] == "shape_mismatch"
+    assert r["got_shape"] == got.shape and r["expected_shape"] == expected.shape
+
+
+@pytest.mark.parametrize("got,expected", [
+    ([np.nan], [np.inf]), ([np.inf], [-np.inf]), ([np.nan], [-np.inf]),
+    ([1.0, np.inf], [1.0, np.nan]),
+])
+def test_compare_distinguishes_nan_and_signed_inf(got, expected):
+    from metalsinglecell import validation
+    r = validation.compare("nonfinite", np.array(got), np.array(expected))
+    assert not r["passed"] and not r["nonfinite_masks_match"]
+
+
+def test_compare_matching_nonfinite_values_still_pass():
+    from metalsinglecell import validation
+    a = np.array([[1.0, np.nan], [np.inf, -np.inf]])
+    r = validation.compare("nonfinite_ok", a, a.copy())
+    assert r["passed"] and r["nonfinite_masks_match"] and r["n_compared"] == 1
