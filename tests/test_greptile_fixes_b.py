@@ -165,3 +165,43 @@ def test_scale_std_matches_scanpy():
     sc.pp.scale(b)
     np.testing.assert_allclose(a.var["std"].to_numpy(), b.var["std"].to_numpy(), rtol=1e-6)
     np.testing.assert_allclose(a.var["mean"].to_numpy(), b.var["mean"].to_numpy(), rtol=1e-6)
+
+
+# --------------------------------------------------------------------------- filter: inplace=False
+
+
+@pytest.mark.metal
+@pytest.mark.parametrize("fn,kw", [
+    ("filter_cells", {"min_genes": 3}), ("filter_cells", {"min_counts": 3}),
+    ("filter_genes", {"min_cells": 3}), ("filter_genes", {"min_counts": 3}),
+])
+def test_filter_inplace_false_leaves_object_unchanged(fn, kw):
+    """scanpy returns ``(mask, number)`` before writing anything; msc wrote n_genes/n_counts/
+    n_cells into .obs/.var first, overwriting any existing column of that name."""
+    import anndata as ad
+    from metalsinglecell import pp as msc_pp
+    rng = np.random.default_rng(0)
+    a = ad.AnnData(sp.csr_matrix(rng.poisson(1, size=(20, 10)).astype(np.float32)))
+    a.obs["n_counts"] = -1.0                       # a pre-existing column must survive
+    a.var["n_counts"] = -1.0
+    obs, var = a.obs.copy(), a.var.copy()
+    mask, number = getattr(msc_pp, fn)(a, inplace=False, **kw)
+    assert a.shape == (20, 10)
+    assert a.obs.equals(obs) and a.var.equals(var)
+    assert mask.dtype == bool and len(number) == len(mask)
+
+
+@needs_scanpy
+@pytest.mark.metal
+@pytest.mark.parametrize("fn,kw", [
+    ("filter_cells", {"min_genes": 3}), ("filter_genes", {"min_cells": 3}),
+])
+def test_filter_inplace_false_returns_scanpys_mask_and_counts(fn, kw):
+    import anndata as ad
+    import scanpy as sc
+    from metalsinglecell import pp as msc_pp
+    rng = np.random.default_rng(0)
+    X = sp.csr_matrix(rng.poisson(1, size=(20, 10)).astype(np.float32))
+    m1, n1 = getattr(msc_pp, fn)(ad.AnnData(X.copy()), inplace=False, **kw)
+    m2, n2 = getattr(sc.pp, fn)(ad.AnnData(X.copy()), inplace=False, **kw)
+    assert np.array_equal(m1, m2) and np.array_equal(n1, n2)

@@ -302,16 +302,16 @@ def filter_cells(adata, min_counts=None, max_counts=None, min_genes=None,
     X = _sci(adata)
     keep = _pp.filter_cells(X, min_counts=min_counts, max_counts=max_counts,
                             min_genes=min_genes, max_genes=max_genes)
+    per_cell = (_pp.nonzero_per_row(X) if (min_genes is not None or max_genes is not None)
+                else np.asarray(X.sum(axis=1)).ravel())
+    if not inplace:                              # scanpy returns before writing anything
+        return keep, per_cell
     # scanpy records the quantity it filtered on, so the threshold stays inspectable after the
     # subset: obs['n_genes'] for the gene thresholds, obs['n_counts'] for the count ones.
     if min_genes is not None or max_genes is not None:
         adata.obs["n_genes"] = _pp.nonzero_per_row(X)
-    per_cell = (_pp.nonzero_per_row(X) if (min_genes is not None or max_genes is not None)
-                else np.asarray(X.sum(axis=1)).ravel())
     if min_counts is not None or max_counts is not None:
         adata.obs["n_counts"] = np.asarray(X.sum(axis=1)).ravel()
-    if not inplace:
-        return keep, per_cell
     adata._inplace_subset_obs(keep)
     return adata if copy else None
 
@@ -327,14 +327,14 @@ def filter_genes(adata, min_counts=None, max_counts=None, min_cells=None,
     X = _sci(adata)
     keep = _pp.filter_genes(X, min_counts=min_counts, max_counts=max_counts,
                             min_cells=min_cells, max_cells=max_cells)
-    if min_cells is not None or max_cells is not None:
-        adata.var["n_cells"] = _pp.nonzero_per_col(X)
     per_gene = (_pp.nonzero_per_col(X) if (min_cells is not None or max_cells is not None)
                 else np.asarray(X.sum(axis=0)).ravel())
+    if not inplace:                              # scanpy returns before writing anything
+        return keep, per_gene
+    if min_cells is not None or max_cells is not None:
+        adata.var["n_cells"] = _pp.nonzero_per_col(X)
     if min_counts is not None or max_counts is not None:
         adata.var["n_counts"] = np.asarray(X.sum(axis=0)).ravel()
-    if not inplace:
-        return keep, per_gene
     adata._inplace_subset_var(keep)
     return adata if copy else None
 
