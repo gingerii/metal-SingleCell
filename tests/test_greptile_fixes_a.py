@@ -264,3 +264,39 @@ def test_backed_normalize_total_writes_key_added_like_scanpy(tmp_path, target_su
     b = _backed(_store(tmp_path / "s.zarr", X))
     msc_pp.normalize_total(b, target_sum=target_sum, key_added="nf")
     np.testing.assert_allclose(b.obs["nf"].to_numpy(), ref.obs["nf"].to_numpy(), rtol=1e-6)
+
+
+# --------------------------------------------------------- 7. README streaming example
+
+
+def _readme_streaming_snippet():
+    from metalsinglecell import config
+    text = (config.REPO_ROOT / "README.md").read_text()
+    section = text.split("## Out-of-core", 1)[1]
+    m = re.search(r"```python\n(.*?)```", section, re.S)
+    assert m, "no python block in the README's out-of-core section"
+    return m.group(1)
+
+
+def test_readme_streaming_example_stays_backed(tmp_path):
+    rng = np.random.default_rng(0)
+    # varied gene means so the default seurat HVG cutoffs select a usable set
+    lam = rng.gamma(0.6, 2.0, size=80)
+    X = rng.poisson(lam[None, :] * rng.uniform(0.5, 1.5, (300, 1))).astype(np.float32)
+    obs_names = [f"cell{i}" for i in range(300)]
+    var_names = [f"gene{j}" for j in range(80)]
+    p = _store(tmp_path / "atlas.zarr", X, block_rows=64, obs_names=obs_names,
+               var_names=var_names)
+    code = _readme_streaming_snippet().replace('"atlas.zarr"', repr(p))
+    ns, err = {}, None
+    try:
+        exec(compile(code, "README.md:out-of-core", "exec"), ns)   # noqa: S102 - our README
+    except Exception as e:                       # report the in-memory load first, if that is why
+        err = e
+    adata = ns.get("adata")
+    assert adata is not None and msc_pp._backed_reader(adata) is not None, (
+        f"the README example loaded .X into memory instead of streaming it (then: {err!r})")
+    if err is not None:
+        raise err
+    assert list(adata.obs_names) == obs_names and list(adata.var_names) == var_names
+    assert adata.obsm["X_pca"].shape[0] == 300
