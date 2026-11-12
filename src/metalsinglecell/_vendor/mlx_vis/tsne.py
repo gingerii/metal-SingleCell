@@ -189,7 +189,11 @@ class TSNE:
         beta = mx.ones((n,))
         target_H = float(np.log(self.perplexity))
         
-        sq_dists = knn_dists * knn_dists
+        # VENDOR PATCH (metalsinglecell): fit_transform calls compute_knn with
+        # return_euclidean=False, which already returns SQUARED distances. Upstream (since
+        # 0.5.0, when it switched from _chunked_knn's Euclidean output) squares them again,
+        # so the kernel was exp(-beta * d^4) and P differed from standard t-SNE / sklearn.
+        sq_dists = knn_dists
         mx.eval(sq_dists)
 
         for _ in range(64):

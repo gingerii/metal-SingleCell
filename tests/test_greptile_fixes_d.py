@@ -54,3 +54,39 @@ def test_tl_umap_three_components_on_disconnected_graph():
         msc.tl.umap(a, n_components=3, maxiter=20)
     assert a.obsm["X_umap"].shape == (300, 3)
     assert np.all(np.isfinite(a.obsm["X_umap"]))
+
+
+# ---------------- 2. t-SNE affinities: squared distances, not fourth powers ----------------
+
+@pytest.mark.metal
+def test_tsne_affinities_match_sklearn(monkeypatch):
+    """P from the vendored t-SNE equals sklearn's on the same kNN graph."""
+    from sklearn.manifold._t_sne import _joint_probabilities_nn
+    from metalsinglecell._vendor.mlx_vis import tsne as vt
+    from metalsinglecell._vendor.mlx_vis.knn import compute_knn
+
+    n, perp = 300, 10.0
+    k = int(3 * perp)
+    X = np.random.default_rng(0).normal(size=(n, 10)).astype(np.float32)
+
+    got = {}
+
+    def capture(self, edge_from, edge_to, edge_weights, Y, n_, epoch_callback=None):
+        got["P"] = sp.csr_matrix((np.array(edge_weights),
+                                  (np.array(edge_from), np.array(edge_to))), shape=(n_, n_))
+        return Y                                      # skip the optimisation itself
+
+    monkeypatch.setattr(vt.TSNE, "_optimize", capture)
+    vt.TSNE(perplexity=perp, pca_dim=None, knn_method="brute",
+            random_state=0).fit_transform(X)
+
+    # sklearn's affinities on the same neighbour sets, from fp64 squared Euclidean distances
+    idx, _ = compute_knn(X, k, method="brute")
+    X64 = X.astype(np.float64)
+    d2 = np.sum((X64[:, None, :] - X64[idx]) ** 2, axis=-1)
+    D = sp.csr_matrix((d2.ravel(), (np.repeat(np.arange(n), k), idx.ravel())), shape=(n, n))
+    P_ref = _joint_probabilities_nn(D, perp, 0).toarray()
+    P = got["P"].toarray()
+    assert P.sum() == pytest.approx(1.0, abs=1e-5)
+    assert np.abs(P - P_ref).sum() < 1e-3             # the d^4 kernel misplaced ~7-18% of the mass
+    assert np.abs(P - P_ref).max() < 1e-2 * P_ref.max()

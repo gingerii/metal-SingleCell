@@ -5,10 +5,18 @@ This directory vendors several modules from the `mlx-vis` project (mlx-vis 0.7.0
     knn.py        —  from mlx_vis/_knn.py; only the internal import was rewritten to be
                      relative (`from .nndescent import NNDescent`)
     tsne.py       —  from mlx_vis/_tsne/tsne.py; internal imports rewritten to be relative,
-                     plus a one-line bugfix (bind `X_mx` before the PCA-init block so
-                     fit_transform does not raise UnboundLocalError when pca_dim is None or
-                     the input dim <= pca_dim). The patch is marked `VENDOR PATCH
-                     (metalsinglecell)` in the source.
+                     plus two bugfixes, each marked `VENDOR PATCH (metalsinglecell)` in the
+                     source:
+                       * bind `X_mx` before the PCA-init block, so fit_transform does not
+                         raise UnboundLocalError when pca_dim is None or the input
+                         dim <= pca_dim;
+                       * `_build_p` no longer squares the kNN distances: compute_knn is called
+                         with return_euclidean=False and already returns squared distances,
+                         so upstream's kernel was exp(-beta * d^4). The affinities P now match
+                         sklearn's `_joint_probabilities_nn` on the same kNN graph (they were
+                         off by 7-18% of the probability mass). Upstream introduced this in
+                         0.5.0, when tsne.py switched from `_chunked_knn` (Euclidean output)
+                         to compute_knn; it is still present in 0.7.0.
     umap.py       —  from mlx_vis/_umap/umap.py; only the internal imports were rewritten to
                      be relative (`from .normalize ...`, `from .knn ...`)
 
@@ -42,4 +50,5 @@ Neither is a criticism of mlx-vis at the scale it targets; both failure modes ne
 structurally heterogeneous graph to show up.
 
 Changes to the vendored files: as itemized above (relative-import rewrites throughout; the
-tsne.py UnboundLocalError bugfix). No algorithmic changes.
+tsne.py UnboundLocalError bugfix; the tsne.py squared-distance fix, which changes the t-SNE
+input affinities back to the standard Gaussian kernel). No other algorithmic changes.
