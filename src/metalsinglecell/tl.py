@@ -291,7 +291,8 @@ def score_genes(adata, gene_list, score_name: str = "score", ctrl_size: int = 50
     _reject_backed(adata, "score_genes", layer)
     adata = adata.copy() if copy else adata
     src, var_names, _ = _expression_source(adata, layer, use_raw)
-    X = np.asarray(src.todense() if sp.issparse(src) else src, dtype=np.float32)
+    # Keep a sparse source sparse: the scorer slices out only the set and control columns.
+    X = src.astype(np.float32) if sp.issparse(src) else np.asarray(src, dtype=np.float32)
     adata.obs[score_name] = _tl.score_genes(X, list(gene_list), var_names,
                                             ctrl_size=ctrl_size, n_bins=n_bins, random_state=random_state)
     return adata if copy else None
@@ -308,7 +309,8 @@ def score_genes_cell_cycle(adata, s_genes, g2m_genes, random_state: int = 0, cop
     _reject_backed(adata, "score_genes_cell_cycle", layer)
     adata = adata.copy() if copy else adata
     src, var_names, _ = _expression_source(adata, layer, use_raw)
-    X = np.asarray(src.todense() if sp.issparse(src) else src, dtype=np.float32)
+    # Keep a sparse source sparse: the scorer slices out only the set and control columns.
+    X = src.astype(np.float32) if sp.issparse(src) else np.asarray(src, dtype=np.float32)
     res = _tl.score_genes_cell_cycle(X, list(s_genes), list(g2m_genes),
                                      var_names, random_state=random_state)
     adata.obs["S_score"] = res["S_score"]

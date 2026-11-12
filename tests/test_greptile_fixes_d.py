@@ -201,6 +201,31 @@ def test_score_genes_default_uses_raw_like_scanpy():
 
 
 @pytest.mark.metal
+@pytest.mark.parametrize("fn", ["score_genes", "score_genes_cell_cycle"])
+def test_score_genes_keeps_a_sparse_source_sparse(monkeypatch, fn):
+    """A sparse ``.raw`` reaches the scorer sparse (PR #9 review): densifying the whole, wide
+    ``.raw`` to score a few genes costs ~8 GB at 100k cells x 20k genes."""
+    import metalsinglecell as msc
+    from metalsinglecell import tools
+    dense = _raw_lognorm_x_scaled()
+    sparse = dense.copy()
+    raw = sparse.raw.to_adata()
+    raw.X = sp.csr_matrix(raw.X)
+    sparse.raw = raw
+    args = (SET,) if fn == "score_genes" else (S_GENES, G2M_GENES)
+    getattr(msc.tl, fn)(dense, *args)
+
+    seen, real = [], tools.score_genes
+    monkeypatch.setattr(tools, "score_genes",
+                        lambda X, *a, **k: (seen.append(sp.issparse(X)), real(X, *a, **k))[1])
+    getattr(msc.tl, fn)(sparse, *args)
+    assert seen and all(seen), "the expression source was densified before scoring"
+    cols = ["score"] if fn == "score_genes" else ["S_score", "G2M_score"]
+    for c in cols:
+        np.testing.assert_allclose(sparse.obs[c], dense.obs[c], rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.metal
 def test_score_genes_use_raw_false_and_layer_like_scanpy():
     sc = pytest.importorskip("scanpy")
     import metalsinglecell as msc
